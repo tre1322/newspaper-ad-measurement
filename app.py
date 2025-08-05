@@ -29,6 +29,7 @@ load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')
 
 # Production configuration - MOVED HERE AFTER app is created
 if os.environ.get('RAILWAY_ENVIRONMENT'):
@@ -40,6 +41,13 @@ if os.environ.get('RAILWAY_ENVIRONMENT'):
     app.config['SQLALCHEMY_DATABASE_URI'] = database_url
 else:
     app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///newspaper_ads.db')
+
+# Handle PostgreSQL URL format
+if database_url.startswith('postgres://'):
+    database_url = database_url.replace('postgres://', 'postgresql://', 1)
+
+app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Continue with your existing configuration
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')

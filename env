@@ -1,0 +1,15 @@
+# Database Configuration
+DATABASE_URL=sqlite:///newspaper_ads.db
+
+# Google Cloud Storage (we'll set these up later)
+GOOGLE_CLOUD_PROJECT=your-project-id
+GOOGLE_CLOUD_BUCKET=your-bucket-name
+# GOOGLE_APPLICATION_CREDENTIALS=path/to/service-account-key.json
+
+# Flask Configuration
+SECRET_KEY=your-super-secret-key-change-this
+FLASK_ENV=development
+FLASK_APP=app.py
+
+# Optional
+PORT=5000

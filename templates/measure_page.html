@@ -1,0 +1,2572 @@
+{% extends "base.html" %}
+
+{% block title %}Page {{ current_page }} - {{ publication.original_filename }}{% endblock %}
+
+{% block content %}
+<style>
+    .page-viewer {
+        position: relative;
+        border: 1px solid #ddd;
+        background: #f8f9fa;
+        max-height: 80vh;
+        overflow: auto;
+    }
+    
+    .page-container {
+        position: relative;
+        display: inline-block;
+        margin: 20px;
+    }
+
+    .page-image {
+        display: block;
+        max-width: none;
+        user-select: none;
+        -webkit-user-drag: none;
+    }
+
+    /* Context Menu Styles */
+    .context-menu {
+        position: absolute;
+        background: white;
+        border: 1px solid #ccc;
+        border-radius: 5px;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+        z-index: 1000;
+        min-width: 160px;
+        display: none;
+    }
+
+    .context-menu-item {
+        padding: 10px 15px;
+        cursor: pointer;
+        border-bottom: 1px solid #eee;
+        transition: background-color 0.2s;
+    }
+
+    .context-menu-item:hover {
+        background-color: #f0f0f0;
+    }
+
+    /* Broadsheet ad box styles */
+    .ad-box {
+        border: 2px solid #28a745 !important;
+        background: rgba(40, 167, 69, 0.1) !important;
+        cursor: move;
+        user-select: none;
+    }
+
+    .ad-box:hover {
+        border-color: #1e7e34 !important;
+        background: rgba(40, 167, 69, 0.2) !important;
+    }
+
+    .ad-label {
+        position: absolute;
+        top: 2px;
+        left: 2px;
+        background: rgba(40, 167, 69, 0.9);
+        color: white;
+        padding: 2px 6px;
+        font-size: 11px;
+        border-radius: 3px;
+        font-weight: bold;
+        pointer-events: none;
+    }
+
+    .delete-btn {
+        position: absolute;
+        top: -8px;
+        right: -8px;
+        background: #dc3545;
+        color: white;
+        border: none;
+        border-radius: 50%;
+        width: 18px;
+        height: 18px;
+        font-size: 12px;
+        cursor: pointer;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        z-index: 10;
+    }
+
+    .delete-btn:hover {
+        background: #c82333;
+    }
+
+    .context-menu-item:last-child {
+        border-bottom: none;
+    }
+
+    /* Ad Markers */
+    .ad-marker {
+        position: absolute;
+        width: 30px;
+        height: 30px;
+        background-color: #007bff;
+        color: white;
+        border: 2px solid white;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        font-weight: bold;
+        font-size: 14px;
+        cursor: pointer;
+        z-index: 100;
+        box-shadow: 0 2px 4px rgba(0,0,0,0.3);
+        transform: translate(-50%, -50%);
+    }
+
+    .ad-marker:hover {
+        background-color: #0056b3;
+        transform: translate(-50%, -50%) scale(1.1);
+    }
+
+    /* Manual box specific styles */
+    .manual-box {
+        border: 2px solid #6f42c1 !important;
+        background: rgba(111, 66, 193, 0.1) !important;
+    }
+
+    .manual-box:hover {
+        border-color: #5a2d7d !important;
+        background: rgba(111, 66, 193, 0.2) !important;
+    }
+
+    .manual-box .resize-handle {
+        background: #6f42c1 !important;
+        border: 1px solid white !important;
+        opacity: 1 !important;
+        z-index: 200;
+        width: 10px !important;
+        height: 10px !important;
+    }
+
+    .manual-box .resize-handle:hover {
+        background: #5a2d7d !important;
+        transform: scale(1.3) !important;
+        box-shadow: 0 0 4px rgba(111, 66, 193, 0.5);
+    }
+
+    .manual-box.selected .resize-handle {
+        opacity: 1 !important;
+        background: #5a2d7d !important;
+    }
+
+    .manual-box .delete-handle {
+        background: #6f42c1 !important;
+        border: 2px solid white !important;
+    }
+
+    .manual-box .delete-handle:hover {
+        background: #5a2d7d !important;
+    }
+
+    .measurements-panel {
+        position: sticky;
+        top: 20px;
+        max-height: 70vh;
+        overflow-y: auto;
+    }
+    
+    .ad-item {
+        border: 1px solid #e9ecef;
+        border-radius: 4px;
+        padding: 10px;
+        margin-bottom: 8px;
+        background: #f8f9fa;
+        transition: all 0.2s;
+    }
+
+    .measurements-updated {
+        animation: pulse 0.5s ease-in-out;
+    }
+
+    @keyframes pulse {
+        0% { background-color: #d4edda; }
+        100% { background-color: transparent; }
+    }
+
+    /* Special styles for special edition */
+    .special-edition .page-viewer {
+        cursor: context-menu;
+    }
+
+    /* Measurement Box Styles */
+    .measurement-box {
+        position: absolute;
+        border: 2px solid #007bff;
+        background: rgba(0, 123, 255, 0.1);
+        cursor: move;
+        min-width: 20px;
+        min-height: 20px;
+        box-sizing: border-box;
+    }
+
+    .measurement-box:hover {
+        border-color: #0056b3;
+        background: rgba(0, 123, 255, 0.2);
+    }
+
+    .measurement-box.selected {
+        border-color: #28a745;
+        background: rgba(40, 167, 69, 0.1);
+    }
+
+    /* Resize handles */
+    .resize-handle {
+        position: absolute;
+        background: #007bff;
+        border: 1px solid white;
+        width: 8px;
+        height: 8px;
+        box-sizing: border-box;
+    }
+
+    .resize-handle:hover {
+        background: #0056b3;
+    }
+
+    .resize-handle.nw {
+        top: -4px;
+        left: -4px;
+        cursor: nw-resize;
+    }
+
+    .resize-handle.ne {
+        top: -4px;
+        right: -4px;
+        cursor: ne-resize;
+    }
+
+    .resize-handle.sw {
+        bottom: -4px;
+        left: -4px;
+        cursor: sw-resize;
+    }
+
+    .resize-handle.se {
+        bottom: -4px;
+        right: -4px;
+        cursor: se-resize;
+    }
+
+    .resize-handle.n {
+        top: -4px;
+        left: 50%;
+        transform: translateX(-50%);
+        cursor: n-resize;
+    }
+
+    .resize-handle.s {
+        bottom: -4px;
+        left: 50%;
+        transform: translateX(-50%);
+        cursor: s-resize;
+    }
+
+    .resize-handle.w {
+        top: 50%;
+        left: -4px;
+        transform: translateY(-50%);
+        cursor: w-resize;
+    }
+
+    .resize-handle.e {
+        top: 50%;
+        right: -4px;
+        transform: translateY(-50%);
+        cursor: e-resize;
+    }
+
+    /* Delete handle */
+    .delete-handle {
+        position: absolute;
+        top: -10px;
+        right: -10px;
+        width: 20px;
+        height: 20px;
+        background: #dc3545;
+        color: white;
+        border-radius: 50%;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        cursor: pointer;
+        font-size: 12px;
+        font-weight: bold;
+        border: 2px solid white;
+        opacity: 0;
+        transition: opacity 0.2s;
+    }
+
+    .measurement-box:hover .delete-handle {
+        opacity: 1;
+    }
+
+    .delete-handle:hover {
+        background: #c82333;
+        transform: scale(1.1);
+    }
+
+    /* Regular broadsheet cursor */
+    .page-viewer:not(.special-edition) {
+        cursor: default;
+    }
+
+    /* Full-page ad specific styles */
+    .full-page-ad {
+        pointer-events: none; /* Prevent dragging */
+    }
+
+    .full-page-ad .delete-btn {
+        pointer-events: all; /* Allow delete button to be clicked */
+    }
+
+    .full-page-label {
+        pointer-events: none;
+        text-shadow: 1px 1px 2px rgba(0,0,0,0.1);
+    }
+
+    .full-page-item {
+        margin-bottom: 10px;
+    }
+
+    /* Button styling */
+    #fullPageAdBtn {
+        font-weight: 600;
+        text-shadow: none;
+    }
+
+    #fullPageAdBtn:hover {
+        background-color: #e0a800;
+        border-color: #d39e00;
+    }
+
+    /* Enhanced toolbar spacing */
+    .d-flex.gap-3 {
+        gap: 1rem !important;
+    }
+</style>
+
+<div class="row">
+    <div class="col-12">
+        <!-- Navigation Header -->
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                <nav aria-label="breadcrumb">
+                    <ol class="breadcrumb">
+                        <li class="breadcrumb-item">
+                            <a href="{{ url_for('measure_publication', pub_id=publication.id) }}">{{ publication.original_filename }}</a>
+                        </li>
+                        <li class="breadcrumb-item active">Page {{ current_page }}</li>
+                    </ol>
+                </nav>
+            </div>
+            
+            <div class="d-flex gap-3 align-items-center">
+                <!-- Quick Actions -->
+                <div class="btn-group" role="group">
+                    {% if publication.publication_type == 'broadsheet' %}
+                    <button type="button" class="btn btn-warning" id="fullPageAdBtn" title="Add Full-page Ad (258 inches)">
+                        <i class="fas fa-newspaper"></i> Full-page Ad
+                    </button>
+                    {% endif %}
+                    <a href="{{ url_for('publication_report', pub_id=publication.id) }}" class="btn btn-success" title="Generate comprehensive report">
+                        <i class="fas fa-chart-bar"></i> Generate Report
+                    </a>
+                </div>
+                
+                <!-- Zoom Controls -->
+                <div class="btn-group" role="group">
+                    <button type="button" class="btn btn-outline-secondary" id="zoomOutBtn" title="Zoom Out">
+                        <i class="fas fa-search-minus"></i>
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" id="zoomResetBtn" title="Reset to 100%">
+                        <span id="zoomLevel">100%</span>
+                    </button>
+                    <button type="button" class="btn btn-outline-secondary" id="zoomInBtn" title="Zoom In">
+                        <i class="fas fa-search-plus"></i>
+                    </button>
+                    <button type="button" class="btn btn-outline-info" id="fitToScreenBtn" title="Fit to Screen">
+                        <i class="fas fa-expand-arrows-alt"></i>
+                    </button>
+                </div>
+                
+                <!-- Page Navigation -->
+                <div class="btn-group" role="group">
+                    {% if current_page > 1 %}
+                        <a href="{{ url_for('measure_page', pub_id=publication.id, page_num=current_page-1) }}" 
+                           class="btn btn-outline-primary">
+                            <i class="fas fa-chevron-left"></i> Previous
+                        </a>
+                    {% endif %}
+                    
+                    <button type="button" class="btn btn-outline-primary" disabled>
+                        {{ current_page }} / {{ total_pages }}
+                    </button>
+                    
+                    {% if current_page < total_pages %}
+                        <a href="{{ url_for('measure_page', pub_id=publication.id, page_num=current_page+1) }}" 
+                           class="btn btn-outline-primary">
+                            Next <i class="fas fa-chevron-right"></i>
+                        </a>
+                    {% endif %}
+                </div>
+            </div>
+        </div>
+        
+        <!-- Instructions -->
+        {% if publication.publication_type == 'special_edition' %}
+        <div class="alert alert-info alert-dismissible fade show" role="alert">
+            <i class="fas fa-info-circle"></i> 
+            <strong>Special Edition Instructions:</strong> 
+            Right-click on any advertisement to select its size (1/8, 1/4, 1/2, or Full page) • Click numbered markers to delete ads • Use ← → keys to navigate pages
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        {% elif publication.publication_type == 'broadsheet' %}
+        <div class="alert alert-success alert-dismissible fade show" role="alert">
+            <i class="fas fa-magic"></i> 
+            <strong>Intelligent Detection:</strong> 
+            <strong>Left-click</strong> on ads for automatic detection • <strong>Right-click</strong> on empty space to create manual box • <strong>Drag purple corner handles</strong> to resize manual boxes • <strong>Full-page Ad</strong> button for complete page coverage • Use ← → keys to navigate pages
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        {% else %}
+        <div class="alert alert-info alert-dismissible fade show" role="alert">
+            <i class="fas fa-info-circle"></i> 
+            <strong>Instructions:</strong> 
+            Click "Draw New Box" then drag to create boxes • Drag boxes to move • Drag corners/edges to resize • Click X to delete • Use ← → keys to navigate pages
+            <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
+        </div>
+        {% endif %}
+        
+        <!-- Page Viewer and Controls -->
+        <div class="row">
+            <div class="col-8">
+                <div class="page-viewer {{ 'special-edition' if publication.publication_type == 'special_edition' else '' }}" id="pageViewer">
+                    <div class="page-container" id="pageContainer">
+                        <img src="{{ url_for('serve_page_image', page_id=page.id) }}" 
+                             alt="Page {{ current_page }}" 
+                             id="pageImage" 
+                             class="page-image">
+                        
+                        {% if publication.publication_type == 'broadsheet' %}
+                        <!-- Broadsheet ad boxes with intelligent detection -->
+                        {% for box in ad_boxes %}
+                        <div class="ad-box" 
+                             data-box-id="{{ box.id }}"
+                             style="position: absolute; left: {{ box.x }}px; top: {{ box.y }}px; width: {{ box.width }}px; height: {{ box.height }}px; border: 2px solid #28a745; background: rgba(40, 167, 69, 0.1); cursor: move;">
+                            
+                            <div class="ad-label">{{ "%.1f"|format(box.column_inches) }}" {% if box.ad_type and box.ad_type != 'manual' %}({{ box.ad_type.replace('_', ' ') }}){% endif %}</div>
+                            <button class="delete-btn" onclick="deleteAdBox({{ box.id }})" style="position: absolute; top: -5px; right: -5px; background: #dc3545; color: white; border: none; border-radius: 50%; width: 20px; height: 20px; font-size: 12px; cursor: pointer;">×</button>
+                        </div>
+                        {% endfor %}
+                        {% elif publication.publication_type != 'special_edition' %}
+                        <!-- Regular measurement boxes for non-special editions -->
+                        {% for box in ad_boxes %}
+                        <div class="measurement-box" 
+                             data-box-id="{{ box.id }}"
+                             style="left: {{ box.x }}px; top: {{ box.y }}px; width: {{ box.width }}px; height: {{ box.height }}px;">
+                            
+                            <!-- Resize handles -->
+                            <div class="resize-handle nw"></div>
+                            <div class="resize-handle ne"></div>
+                            <div class="resize-handle sw"></div>
+                            <div class="resize-handle se"></div>
+                            <div class="resize-handle n"></div>
+                            <div class="resize-handle s"></div>
+                            <div class="resize-handle w"></div>
+                            <div class="resize-handle e"></div>
+                            
+                            <!-- Delete button -->
+                            <div class="delete-handle" title="Delete this box">×</div>
+                        </div>
+                        {% endfor %}
+                        {% else %}
+                        <!-- Special edition markers -->
+                        {% for box in ad_boxes %}
+                        <div class="ad-marker" 
+                             data-box-id="{{ box.id }}"
+                             style="left: {{ box.x + (box.width / 2) }}px; top: {{ box.y + (box.height / 2) }}px;"
+                             title="Click to delete">
+                            {{ loop.index }}
+                        </div>
+                        {% endfor %}
+                        {% endif %}
+                    </div>
+                </div>
+                
+                <!-- Context Menu for Special Edition -->
+                {% if publication.publication_type == 'special_edition' %}
+                <div class="context-menu" id="contextMenu">
+                    <div class="context-menu-item" data-ad-type="eighth" data-inches="15">
+                        1/8 Page Ad (15 inches)
+                    </div>
+                    <div class="context-menu-item" data-ad-type="quarter" data-inches="30">
+                        1/4 Page Ad (30 inches)
+                    </div>
+                    <div class="context-menu-item" data-ad-type="half" data-inches="60">
+                        1/2 Page Ad (60 inches)
+                    </div>
+                    <div class="context-menu-item" data-ad-type="full" data-inches="125">
+                        Full Page Ad (125 inches)
+                    </div>
+                </div>
+                {% endif %}
+            </div>
+            
+            <!-- Measurements Panel -->
+            <div class="col-4">
+                <div class="measurements-panel">
+                    <div class="card">
+                        <div class="card-header">
+                            <h6><i class="fas fa-ruler"></i> Page {{ current_page }} Measurements</h6>
+                        </div>
+                        <div class="card-body">
+                            <div class="mb-3 p-2 bg-light rounded">
+                                <strong>Total: <span id="pageTotalInches">{{ "%.0f"|format(page.page_ad_inches) }}</span> column inches</strong>
+                                <br>
+                                <small class="text-muted">{{ ad_boxes|length }} ads measured</small>
+                            </div>
+                            
+                            {% if publication.publication_type != 'special_edition' and publication.publication_type != 'broadsheet' %}
+                            <div class="d-grid mb-3">
+                                <button class="btn btn-success" id="addBoxBtn">
+                                    <i class="fas fa-plus"></i> Draw New Box
+                                </button>
+                            </div>
+                            {% elif publication.publication_type == 'broadsheet' %}
+                            <div class="alert alert-light text-center mb-3">
+                                <i class="fas fa-mouse-pointer"></i>
+                                <strong>Smart Detection Active</strong><br>
+                                <small><strong>Left-click:</strong> Auto-detect ads<br><strong>Right-click:</strong> Place manual box<br><strong>Full-page button:</strong> Complete coverage</small>
+                            </div>
+                            {% endif %}
+                            
+                            <hr>
+                            
+                            <h6>Advertisement List</h6>
+                            <div id="adBoxesList" style="max-height: 400px; overflow-y: auto;">
+                                {% for box in ad_boxes %}
+                                <div class="ad-item" data-box-id="{{ box.id }}">
+                                    <div class="d-flex justify-content-between align-items-start">
+                                        <div>
+                                            {% if publication.publication_type == 'special_edition' %}
+                                                <div class="fw-bold text-primary">Ad #{{ loop.index }}</div>
+                                                <div class="text-success">{{ "%.0f"|format(box.column_inches) }}" inches</div>
+                                                <div class="small text-muted">
+                                                    {% if box.column_inches == 15 %}1/8 Page{% endif %}
+                                                    {% if box.column_inches == 30 %}1/4 Page{% endif %}
+                                                    {% if box.column_inches == 60 %}1/2 Page{% endif %}
+                                                    {% if box.column_inches == 125 %}Full Page{% endif %}
+                                                </div>
+                                            {% else %}
+                                                <div class="fw-bold text-primary">{{ "%.1f"|format(box.column_inches) }}" inches</div>
+                                                <div class="small text-muted">
+                                                    {{ "%.2f"|format(box.width_inches_raw) }}" × {{ "%.2f"|format(box.height_inches_raw) }}"
+                                                </div>
+                                                {% if publication.publication_type == 'broadsheet' and box.ad_type and box.ad_type != 'manual' %}
+                                                <div class="small text-success">
+                                                    {{ box.ad_type.replace('_', ' ').upper() }}
+                                                </div>
+                                                {% endif %}
+                                            {% endif %}
+                                        </div>
+                                        <div class="text-end">
+                                            {% if box.user_verified %}
+                                                <i class="fas fa-check-circle text-success" title="User verified"></i>
+                                            {% else %}
+                                                <i class="fas fa-robot text-info" title="AI detected"></i>
+                                            {% endif %}
+                                        </div>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+// Global variables
+let isSpecialEdition = {{ 'true' if publication.publication_type == 'special_edition' else 'false' }};
+let markerCounter = {{ ad_boxes|length + 1 }};
+let currentZoom = 1.0;
+let minZoom = 0.25;
+let maxZoom = 3.0;
+let zoomStep = 0.25;
+
+// Initialize when page loads
+document.addEventListener('DOMContentLoaded', function() {
+    if (isSpecialEdition) {
+        setupSpecialEditionInterface();
+    } else {
+        if ({{ 'true' if publication.publication_type == 'broadsheet' else 'false' }}) {
+            initializeBroadsheetInterface();
+        } else {
+            initializeRegularInterface();
+        }
+    }
+    setupKeyboardNavigation();
+    setupZoomControls();
+    
+    // Initialize full-page ad functionality
+    setupFullPageAdButton();
+    
+    // Auto-fit the page to container width
+    autoFitPageToContainer();
+});
+
+// Auto-fit page image to container width
+function autoFitPageToContainer() {
+    const pageImage = document.getElementById('pageImage');
+    const pageViewer = document.getElementById('pageViewer');
+    
+    if (!pageImage || !pageViewer) return;
+    
+    // Wait for image to load
+    if (pageImage.complete) {
+        calculateAndApplyFitZoom();
+    } else {
+        pageImage.onload = function() {
+            calculateAndApplyFitZoom();
+        };
+    }
+}
+
+function calculateAndApplyFitZoom() {
+    const pageImage = document.getElementById('pageImage');
+    const pageViewer = document.getElementById('pageViewer');
+    
+    if (!pageImage || !pageViewer) return;
+    
+    // Set to 75% zoom level for consistent starting point
+    const defaultZoom = 0.75;
+    
+    // Apply the zoom
+    currentZoom = defaultZoom;
+    applyZoom();
+    
+    console.log(`Page loaded at 75% zoom for consistent viewing`);
+}
+
+// Keep the smart fit function for the "Fit to Screen" button
+function calculateAndApplySmartFit() {
+    const pageImage = document.getElementById('pageImage');
+    const pageViewer = document.getElementById('pageViewer');
+    
+    if (!pageImage || !pageViewer) return;
+    
+    // Get container dimensions (subtract some padding for scrollbars and margins)
+    const containerWidth = pageViewer.clientWidth - 40; // 40px for margins/scrollbars
+    const containerHeight = pageViewer.clientHeight - 40;
+    
+    // Get image natural dimensions
+    const imageWidth = pageImage.naturalWidth || pageImage.width;
+    const imageHeight = pageImage.naturalHeight || pageImage.height;
+    
+    if (imageWidth === 0 || imageHeight === 0) return;
+    
+    // Calculate zoom levels to fit width and height
+    const zoomToFitWidth = containerWidth / imageWidth;
+    const zoomToFitHeight = containerHeight / imageHeight;
+    
+    // Use the smaller zoom level to ensure the entire image fits
+    const optimalZoom = Math.min(zoomToFitWidth, zoomToFitHeight);
+    
+    // Constrain to our zoom limits
+    const finalZoom = Math.max(minZoom, Math.min(maxZoom, optimalZoom));
+    
+    // Apply the zoom
+    currentZoom = finalZoom;
+    applyZoom();
+    
+    console.log(`Smart-fit: Container ${containerWidth}x${containerHeight}, Image ${imageWidth}x${imageHeight}, Zoom: ${(finalZoom * 100).toFixed(1)}%`);
+}
+
+// Note: Window resize auto-fit removed to maintain consistent 75% zoom
+// Users can manually use "Fit to Screen" button if needed after resize
+
+// Full-page Ad functionality (Broadsheet only)
+function setupFullPageAdButton() {
+    const fullPageAdBtn = document.getElementById('fullPageAdBtn');
+    
+    if (fullPageAdBtn) {
+        fullPageAdBtn.addEventListener('click', function() {
+            const currentAdCount = document.querySelectorAll('.ad-box, .measurement-box').length;
+            
+            let confirmMessage = 'Add a full-page advertisement (258 inches)?';
+            if (currentAdCount > 0) {
+                confirmMessage = `This will replace all ${currentAdCount} existing ads with a full-page ad (258 inches). Continue?`;
+            }
+            
+            if (confirm(confirmMessage)) {
+                addFullPageAd();
+            }
+        });
+    }
+}
+
+function addFullPageAd() {
+    // Show loading indicator
+    const fullPageAdBtn = document.getElementById('fullPageAdBtn');
+    const originalText = fullPageAdBtn.innerHTML;
+    fullPageAdBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Adding...';
+    fullPageAdBtn.disabled = true;
+    
+    // Get page image dimensions
+    const pageImage = document.getElementById('pageImage');
+    const imageWidth = pageImage.naturalWidth || pageImage.width;
+    const imageHeight = pageImage.naturalHeight || pageImage.height;
+    
+    // Create full-page box data (covers entire image with small margin)
+    const margin = 10; // Small margin so box is visible within page bounds
+    const fullPageData = {
+        x: margin,
+        y: margin,
+        width: imageWidth - (margin * 2),
+        height: imageHeight - (margin * 2),
+        ad_type: 'full_page',
+        column_inches: 258, // Full broadsheet page
+        is_full_page: true
+    };
+    
+    // Call API to add full-page ad
+    fetch(`/api/add_full_page_ad/{{ page.id }}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(fullPageData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Remove all existing ad boxes from the page
+            document.querySelectorAll('.ad-box, .measurement-box, .ad-marker').forEach(box => {
+                box.remove();
+            });
+            
+            // Create full-page visual box
+            createFullPageVisualBox(data);
+            
+            // Update measurements panel
+            updateMeasurementsPanelForFullPage(data);
+            
+            // Update page total
+            updatePageTotalForFullPage();
+            
+            // Show success message
+            showSuccessMessage('Full-page advertisement added successfully!');
+            
+        } else {
+            showErrorMessage('Error adding full-page ad: ' + data.error);
+        }
+        
+        // Reset button
+        fullPageAdBtn.innerHTML = originalText;
+        fullPageAdBtn.disabled = false;
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showErrorMessage('Network error occurred');
+        
+        // Reset button
+        fullPageAdBtn.innerHTML = originalText;
+        fullPageAdBtn.disabled = false;
+    });
+}
+
+function createFullPageVisualBox(data) {
+    const pageContainer = document.getElementById('pageContainer');
+    
+    // Create full-page ad box element
+    const fullPageBox = document.createElement('div');
+    fullPageBox.className = 'ad-box full-page-ad';
+    fullPageBox.dataset.boxId = data.box_id;
+    fullPageBox.style.position = 'absolute';
+    fullPageBox.style.left = data.x + 'px';
+    fullPageBox.style.top = data.y + 'px';
+    fullPageBox.style.width = data.width + 'px';
+    fullPageBox.style.height = data.height + 'px';
+    fullPageBox.style.border = '3px solid #ffc107'; // Yellow border for full-page
+    fullPageBox.style.backgroundColor = 'rgba(255, 193, 7, 0.15)'; // Yellow background
+    fullPageBox.style.cursor = 'default'; // Not draggable
+    fullPageBox.style.zIndex = '5'; // Lower z-index so it stays behind other elements
+    
+    // Add full-page label
+    const label = document.createElement('div');
+    label.className = 'ad-label full-page-label';
+    label.style.position = 'absolute';
+    label.style.top = '50%';
+    label.style.left = '50%';
+    label.style.transform = 'translate(-50%, -50%)';
+    label.style.background = 'rgba(255, 193, 7, 0.9)';
+    label.style.color = '#000';
+    label.style.padding = '10px 20px';
+    label.style.borderRadius = '5px';
+    label.style.fontSize = '18px';
+    label.style.fontWeight = 'bold';
+    label.style.textAlign = 'center';
+    label.innerHTML = 'FULL-PAGE AD<br>258 inches';
+    fullPageBox.appendChild(label);
+    
+    // Add delete button
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'delete-btn';
+    deleteBtn.innerHTML = '×';
+    deleteBtn.style.position = 'absolute';
+    deleteBtn.style.top = '10px';
+    deleteBtn.style.right = '10px';
+    deleteBtn.style.background = '#dc3545';
+    deleteBtn.style.color = 'white';
+    deleteBtn.style.border = 'none';
+    deleteBtn.style.borderRadius = '50%';
+    deleteBtn.style.width = '30px';
+    deleteBtn.style.height = '30px';
+    deleteBtn.style.fontSize = '16px';
+    deleteBtn.style.cursor = 'pointer';
+    deleteBtn.style.zIndex = '10';
+    deleteBtn.onclick = function(e) {
+        e.stopPropagation();
+        if (confirm('Delete the full-page advertisement?')) {
+            deleteFullPageAd(data.box_id);
+        }
+    };
+    fullPageBox.appendChild(deleteBtn);
+    
+    pageContainer.appendChild(fullPageBox);
+}
+
+function updateMeasurementsPanelForFullPage(data) {
+    const adBoxesList = document.getElementById('adBoxesList');
+    
+    // Clear existing list
+    adBoxesList.innerHTML = '';
+    
+    // Add full-page ad to list
+    const adItem = document.createElement('div');
+    adItem.className = 'ad-item full-page-item';
+    adItem.dataset.boxId = data.box_id;
+    adItem.style.border = '2px solid #ffc107';
+    adItem.style.backgroundColor = 'rgba(255, 193, 7, 0.1)';
+    
+    adItem.innerHTML = `
+        <div class="d-flex justify-content-between align-items-start">
+            <div>
+                <div class="fw-bold text-warning" style="font-size: 1.2em;">
+                    <i class="fas fa-newspaper"></i> FULL-PAGE AD
+                </div>
+                <div class="text-success" style="font-size: 1.1em; font-weight: bold;">
+                    258.0 inches
+                </div>
+                <div class="small text-muted">
+                    Complete page coverage
+                </div>
+            </div>
+            <div class="text-end">
+                <i class="fas fa-check-circle text-success" title="User created"></i>
+            </div>
+        </div>
+    `;
+    
+    adBoxesList.appendChild(adItem);
+}
+
+function updatePageTotalForFullPage() {
+    const totalElement = document.getElementById('pageTotalInches');
+    totalElement.textContent = '258';
+    
+    // Add visual feedback
+    totalElement.parentElement.classList.add('measurements-updated');
+    setTimeout(() => {
+        totalElement.parentElement.classList.remove('measurements-updated');
+    }, 1000);
+}
+
+function deleteFullPageAd(boxId) {
+    fetch(`/api/delete_box/${boxId}`, {
+        method: 'DELETE'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Remove visual element
+            const boxElement = document.querySelector(`[data-box-id="${boxId}"]`);
+            if (boxElement) {
+                boxElement.remove();
+            }
+            
+            // Clear measurements list
+            const adBoxesList = document.getElementById('adBoxesList');
+            adBoxesList.innerHTML = '';
+            
+            // Reset page total
+            const totalElement = document.getElementById('pageTotalInches');
+            totalElement.textContent = '0';
+            
+            showSuccessMessage('Full-page ad deleted successfully');
+        } else {
+            showErrorMessage('Error deleting full-page ad: ' + data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error deleting full-page ad:', error);
+        showErrorMessage('Network error occurred');
+    });
+}
+
+
+function createManualBoxElement(data) {
+    const pageContainer = document.getElementById('pageContainer');
+    
+    // Create manual box element
+    const manualBox = document.createElement('div');
+    manualBox.className = 'measurement-box manual-box';
+    manualBox.dataset.boxId = data.box_id;
+    manualBox.style.position = 'absolute';
+    manualBox.style.left = data.x + 'px';
+    manualBox.style.top = data.y + 'px';
+    manualBox.style.width = data.width + 'px';
+    manualBox.style.height = data.height + 'px';
+    manualBox.style.border = '2px solid #6f42c1';
+    manualBox.style.backgroundColor = 'rgba(111, 66, 193, 0.1)';
+    manualBox.style.cursor = 'move';
+    manualBox.style.zIndex = '50';
+    
+    // Add resize handles
+    const handles = ['nw', 'ne', 'sw', 'se', 'n', 's', 'w', 'e'];
+    handles.forEach(handle => {
+        const handleElement = document.createElement('div');
+        handleElement.className = `resize-handle ${handle}`;
+        handleElement.style.background = '#6f42c1';
+        handleElement.style.border = '1px solid white';
+        handleElement.style.width = '10px';
+        handleElement.style.height = '10px';
+        handleElement.style.position = 'absolute';
+        handleElement.style.zIndex = '100';
+        
+        // Position handles
+        switch(handle) {
+            case 'nw':
+                handleElement.style.top = '-5px';
+                handleElement.style.left = '-5px';
+                handleElement.style.cursor = 'nw-resize';
+                break;
+            case 'ne':
+                handleElement.style.top = '-5px';
+                handleElement.style.right = '-5px';
+                handleElement.style.cursor = 'ne-resize';
+                break;
+            case 'sw':
+                handleElement.style.bottom = '-5px';
+                handleElement.style.left = '-5px';
+                handleElement.style.cursor = 'sw-resize';
+                break;
+            case 'se':
+                handleElement.style.bottom = '-5px';
+                handleElement.style.right = '-5px';
+                handleElement.style.cursor = 'se-resize';
+                break;
+            case 'n':
+                handleElement.style.top = '-5px';
+                handleElement.style.left = '50%';
+                handleElement.style.transform = 'translateX(-50%)';
+                handleElement.style.cursor = 'n-resize';
+                break;
+            case 's':
+                handleElement.style.bottom = '-5px';
+                handleElement.style.left = '50%';
+                handleElement.style.transform = 'translateX(-50%)';
+                handleElement.style.cursor = 's-resize';
+                break;
+            case 'w':
+                handleElement.style.top = '50%';
+                handleElement.style.left = '-5px';
+                handleElement.style.transform = 'translateY(-50%)';
+                handleElement.style.cursor = 'w-resize';
+                break;
+            case 'e':
+                handleElement.style.top = '50%';
+                handleElement.style.right = '-5px';
+                handleElement.style.transform = 'translateY(-50%)';
+                handleElement.style.cursor = 'e-resize';
+                break;
+        }
+        
+        manualBox.appendChild(handleElement);
+    });
+    
+    // Add label
+    const label = document.createElement('div');
+    label.className = 'ad-label';
+    label.style.position = 'absolute';
+    label.style.top = '2px';
+    label.style.left = '2px';
+    label.style.background = 'rgba(111, 66, 193, 0.9)';
+    label.style.color = 'white';
+    label.style.padding = '2px 6px';
+    label.style.fontSize = '11px';
+    label.style.borderRadius = '3px';
+    label.style.fontWeight = 'bold';
+    label.style.pointerEvents = 'none';
+    label.style.zIndex = '10';
+    label.innerHTML = `${data.column_inches.toFixed(1)}" (manual)`;
+    manualBox.appendChild(label);
+    
+    // Add delete button
+    const deleteHandle = document.createElement('div');
+    deleteHandle.className = 'delete-handle';
+    deleteHandle.innerHTML = '×';
+    deleteHandle.title = 'Delete this manual box';
+    deleteHandle.style.position = 'absolute';
+    deleteHandle.style.top = '-10px';
+    deleteHandle.style.right = '-10px';
+    deleteHandle.style.width = '20px';
+    deleteHandle.style.height = '20px';
+    deleteHandle.style.background = '#6f42c1';
+    deleteHandle.style.color = 'white';
+    deleteHandle.style.borderRadius = '50%';
+    deleteHandle.style.display = 'flex';
+    deleteHandle.style.alignItems = 'center';
+    deleteHandle.style.justifyContent = 'center';
+    deleteHandle.style.cursor = 'pointer';
+    deleteHandle.style.fontSize = '12px';
+    deleteHandle.style.fontWeight = 'bold';
+    deleteHandle.style.border = '2px solid white';
+    deleteHandle.style.zIndex = '100';
+    deleteHandle.onclick = function(e) {
+        e.stopPropagation();
+        if (confirm('Delete this manual box?')) {
+            deleteAdBox(data.box_id);
+        }
+    };
+    manualBox.appendChild(deleteHandle);
+    
+    pageContainer.appendChild(manualBox);
+    
+    // Initialize custom manual box interaction
+    initializeManualBoxInteraction(manualBox);
+}
+
+function initializeManualBoxInteraction(box) {
+    const boxId = box.dataset.boxId;
+    let isDragging = false;
+    let isResizing = false;
+    let currentHandle = null;
+    let startMouseX = 0;
+    let startMouseY = 0;
+    let startBoxX = 0;
+    let startBoxY = 0;
+    let startBoxWidth = 0;
+    let startBoxHeight = 0;
+    
+    // Box dragging (click on box itself, not handles)
+    box.addEventListener('mousedown', function(e) {
+        // Don't drag if clicking on handles or delete button
+        if (e.target.classList.contains('resize-handle') || 
+            e.target.classList.contains('delete-handle') ||
+            e.target.classList.contains('ad-label')) {
+            return;
+        }
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        isDragging = true;
+        startMouseX = e.clientX;
+        startMouseY = e.clientY;
+        startBoxX = parseInt(box.style.left);
+        startBoxY = parseInt(box.style.top);
+        
+        box.style.cursor = 'grabbing';
+        
+        const onMouseMove = function(e) {
+            if (!isDragging) return;
+            
+            const deltaX = (e.clientX - startMouseX) / currentZoom;
+            const deltaY = (e.clientY - startMouseY) / currentZoom;
+            
+            const newX = startBoxX + deltaX;
+            const newY = startBoxY + deltaY;
+            
+            // Keep within bounds
+            const pageImage = document.getElementById('pageImage');
+            const maxX = (pageImage.naturalWidth || pageImage.width) - parseInt(box.style.width);
+            const maxY = (pageImage.naturalHeight || pageImage.height) - parseInt(box.style.height);
+            
+            const constrainedX = Math.max(0, Math.min(newX, maxX));
+            const constrainedY = Math.max(0, Math.min(newY, maxY));
+            
+            box.style.left = constrainedX + 'px';
+            box.style.top = constrainedY + 'px';
+        };
+        
+        const onMouseUp = function(e) {
+            if (!isDragging) return;
+            isDragging = false;
+            box.style.cursor = 'move';
+            
+            // Update in database
+            updateManualBoxInDatabase(boxId, {
+                x: parseInt(box.style.left),
+                y: parseInt(box.style.top),
+                width: parseInt(box.style.width),
+                height: parseInt(box.style.height)
+            });
+            
+            document.removeEventListener('mousemove', onMouseMove);
+            document.removeEventListener('mouseup', onMouseUp);
+        };
+        
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+    
+    // Handle resizing
+    box.querySelectorAll('.resize-handle').forEach(handle => {
+        handle.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            isResizing = true;
+            currentHandle = handle.classList[1]; // Get handle type (nw, ne, etc.)
+            startMouseX = e.clientX;
+            startMouseY = e.clientY;
+            startBoxX = parseInt(box.style.left);
+            startBoxY = parseInt(box.style.top);
+            startBoxWidth = parseInt(box.style.width);
+            startBoxHeight = parseInt(box.style.height);
+            
+            const onMouseMove = function(e) {
+                if (!isResizing) return;
+                
+                const deltaX = (e.clientX - startMouseX) / currentZoom;
+                const deltaY = (e.clientY - startMouseY) / currentZoom;
+                
+                let newX = startBoxX;
+                let newY = startBoxY;
+                let newWidth = startBoxWidth;
+                let newHeight = startBoxHeight;
+                
+                // Calculate new dimensions based on handle type
+                switch(currentHandle) {
+                    case 'nw':
+                        newX = startBoxX + deltaX;
+                        newY = startBoxY + deltaY;
+                        newWidth = startBoxWidth - deltaX;
+                        newHeight = startBoxHeight - deltaY;
+                        break;
+                    case 'ne':
+                        newY = startBoxY + deltaY;
+                        newWidth = startBoxWidth + deltaX;
+                        newHeight = startBoxHeight - deltaY;
+                        break;
+                    case 'sw':
+                        newX = startBoxX + deltaX;
+                        newWidth = startBoxWidth - deltaX;
+                        newHeight = startBoxHeight + deltaY;
+                        break;
+                    case 'se':
+                        newWidth = startBoxWidth + deltaX;
+                        newHeight = startBoxHeight + deltaY;
+                        break;
+                    case 'n':
+                        newY = startBoxY + deltaY;
+                        newHeight = startBoxHeight - deltaY;
+                        break;
+                    case 's':
+                        newHeight = startBoxHeight + deltaY;
+                        break;
+                    case 'w':
+                        newX = startBoxX + deltaX;
+                        newWidth = startBoxWidth - deltaX;
+                        break;
+                    case 'e':
+                        newWidth = startBoxWidth + deltaX;
+                        break;
+                }
+                
+                // Enforce minimum size
+                if (newWidth < 20) {
+                    newWidth = 20;
+                    if (currentHandle.includes('w')) {
+                        newX = startBoxX + startBoxWidth - 20;
+                    }
+                }
+                if (newHeight < 20) {
+                    newHeight = 20;
+                    if (currentHandle.includes('n')) {
+                        newY = startBoxY + startBoxHeight - 20;
+                    }
+                }
+                
+                // Keep within bounds
+                const pageImage = document.getElementById('pageImage');
+                const maxX = (pageImage.naturalWidth || pageImage.width) - newWidth;
+                const maxY = (pageImage.naturalHeight || pageImage.height) - newHeight;
+                newX = Math.max(0, Math.min(newX, maxX));
+                newY = Math.max(0, Math.min(newY, maxY));
+                
+                // Apply changes
+                box.style.left = newX + 'px';
+                box.style.top = newY + 'px';
+                box.style.width = newWidth + 'px';
+                box.style.height = newHeight + 'px';
+                
+                // Update label
+                updateManualBoxLabel(box, newWidth, newHeight);
+            };
+            
+            const onMouseUp = function(e) {
+                if (!isResizing) return;
+                isResizing = false;
+                currentHandle = null;
+                
+                // Update in database
+                updateManualBoxInDatabase(boxId, {
+                    x: parseInt(box.style.left),
+                    y: parseInt(box.style.top),
+                    width: parseInt(box.style.width),
+                    height: parseInt(box.style.height)
+                });
+                
+                document.removeEventListener('mousemove', onMouseMove);
+                document.removeEventListener('mouseup', onMouseUp);
+            };
+            
+            document.addEventListener('mousemove', onMouseMove);
+            document.addEventListener('mouseup', onMouseUp);
+        });
+    });
+}
+
+function updateManualBoxLabel(box, width, height) {
+    // Simple calculation for display - actual calculation happens server-side
+    const approximateInches = (width * height) / 2500; // Rough approximation
+    const label = box.querySelector('.ad-label');
+    if (label) {
+        label.innerHTML = `${approximateInches.toFixed(1)}" (manual)`;
+    }
+}
+
+
+function updateManualBoxInDatabase(boxId, boxData) {
+    fetch(`/api/update_manual_box/${boxId}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(boxData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Update measurements in the sidebar list
+            updateManualBoxInSidebar(boxId, data);
+            updatePageTotalRegular();
+        } else {
+            console.error('Error updating manual box:', data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error updating manual box:', error);
+    });
+}
+
+function updateManualBoxInSidebar(boxId, data) {
+    const listItem = document.querySelector(`.ad-item[data-box-id="${boxId}"]`);
+    if (listItem) {
+        listItem.innerHTML = `
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="fw-bold text-primary">${data.column_inches.toFixed(1)}" inches</div>
+                    <div class="small text-muted">
+                        ${data.width_raw.toFixed(2)}" × ${data.height_raw.toFixed(2)}"
+                    </div>
+                    <div class="small text-info">
+                        MANUAL
+                    </div>
+                </div>
+                <div class="text-end">
+                    <i class="fas fa-check-circle text-success" title="User created"></i>
+                </div>
+            </div>
+        `;
+        
+        // Add visual feedback
+        listItem.classList.add('measurements-updated');
+        setTimeout(() => {
+            listItem.classList.remove('measurements-updated');
+        }, 500);
+    }
+}
+
+// Keyboard navigation
+function setupKeyboardNavigation() {
+    document.addEventListener('keydown', function(e) {
+        if (e.key === 'ArrowLeft' && {{ current_page }} > 1) {
+            window.location.href = "{{ url_for('measure_page', pub_id=publication.id, page_num=current_page-1) }}";
+        } else if (e.key === 'ArrowRight' && {{ current_page }} < {{ total_pages }}) {
+            window.location.href = "{{ url_for('measure_page', pub_id=publication.id, page_num=current_page+1) }}";
+        }
+    });
+}
+
+// Zoom Controls
+function setupZoomControls() {
+    const zoomInBtn = document.getElementById('zoomInBtn');
+    const zoomOutBtn = document.getElementById('zoomOutBtn');
+    const zoomResetBtn = document.getElementById('zoomResetBtn');
+    const fitToScreenBtn = document.getElementById('fitToScreenBtn');
+    const pageContainer = document.getElementById('pageContainer');
+    const pageViewer = document.getElementById('pageViewer');
+    
+    if (zoomInBtn) {
+        zoomInBtn.addEventListener('click', function() {
+            zoomIn();
+        });
+    }
+    
+    if (zoomOutBtn) {
+        zoomOutBtn.addEventListener('click', function() {
+            zoomOut();
+        });
+    }
+    
+    if (zoomResetBtn) {
+        zoomResetBtn.addEventListener('click', function() {
+            resetZoom();
+        });
+    }
+    
+    if (fitToScreenBtn) {
+        fitToScreenBtn.addEventListener('click', function() {
+            calculateAndApplySmartFit();
+        });
+    }
+    
+    // Mouse wheel zoom (optional enhancement)
+    if (pageViewer) {
+        pageViewer.addEventListener('wheel', function(e) {
+            if (e.ctrlKey) {
+                e.preventDefault();
+                if (e.deltaY < 0) {
+                    zoomIn();
+                } else {
+                    zoomOut();
+                }
+            }
+        });
+    }
+}
+
+function zoomIn() {
+    if (currentZoom < maxZoom) {
+        currentZoom += zoomStep;
+        applyZoom();
+    }
+}
+
+function zoomOut() {
+    if (currentZoom > minZoom) {
+        currentZoom -= zoomStep;
+        applyZoom();
+    }
+}
+
+function resetZoom() {
+    currentZoom = 1.0;
+    applyZoom();
+}
+
+function applyZoom() {
+    const pageContainer = document.getElementById('pageContainer');
+    const pageImage = document.getElementById('pageImage');
+    const zoomLevel = document.getElementById('zoomLevel');
+    
+    if (pageContainer && pageImage) {
+        // Apply zoom transform
+        pageContainer.style.transform = `scale(${currentZoom})`;
+        pageContainer.style.transformOrigin = 'top left';
+        
+        // Update zoom level display
+        if (zoomLevel) {
+            zoomLevel.textContent = Math.round(currentZoom * 100) + '%';
+        }
+        
+        // Update button states
+        const zoomInBtn = document.getElementById('zoomInBtn');
+        const zoomOutBtn = document.getElementById('zoomOutBtn');
+        
+        if (zoomInBtn) {
+            zoomInBtn.disabled = currentZoom >= maxZoom;
+        }
+        if (zoomOutBtn) {
+            zoomOutBtn.disabled = currentZoom <= minZoom;
+        }
+        
+        // Adjust container size to accommodate zoom
+        const viewer = document.getElementById('pageViewer');
+        if (viewer) {
+            const naturalWidth = pageImage.naturalWidth || pageImage.width;
+            const naturalHeight = pageImage.naturalHeight || pageImage.height;
+            
+            // Set container size based on zoom
+            pageContainer.style.width = (naturalWidth * currentZoom) + 'px';
+            pageContainer.style.height = (naturalHeight * currentZoom) + 'px';
+        }
+    }
+}
+
+// Special Edition Interface
+function setupSpecialEditionInterface() {
+    const pageContainer = document.getElementById('pageContainer');
+    const contextMenu = document.getElementById('contextMenu');
+    let clickX, clickY;
+    
+    // Right-click context menu
+    pageContainer.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        
+        const rect = pageContainer.getBoundingClientRect();
+        // Adjust coordinates for zoom level
+        clickX = (e.clientX - rect.left) / currentZoom;
+        clickY = (e.clientY - rect.top) / currentZoom;
+        
+        contextMenu.style.left = e.clientX + 'px';
+        contextMenu.style.top = e.clientY + 'px';
+        contextMenu.style.display = 'block';
+    });
+    
+    // Hide context menu when clicking elsewhere
+    document.addEventListener('click', function() {
+        contextMenu.style.display = 'none';
+    });
+    
+    // Handle context menu selections
+    document.querySelectorAll('.context-menu-item').forEach(item => {
+        item.addEventListener('click', function(e) {
+            e.stopPropagation();
+            
+            const adType = this.dataset.adType;
+            const inches = parseInt(this.dataset.inches);
+            
+            createSpecialEditionAd(clickX, clickY, adType, inches);
+            contextMenu.style.display = 'none';
+        });
+    });
+    
+    // Handle marker clicks for deletion
+    document.querySelectorAll('.ad-marker').forEach(marker => {
+        marker.addEventListener('click', function(e) {
+            e.stopPropagation();
+            const boxId = this.dataset.boxId;
+            
+            if (confirm('Delete this advertisement?')) {
+                deleteSpecialEditionAd(boxId);
+            }
+        });
+    });
+}
+
+function createSpecialEditionAd(x, y, adType, inches) {
+    const data = {
+        x: x - 15, // Offset for marker center
+        y: y - 15,
+        width: 30,  // Marker size
+        height: 30,
+        ad_type: adType,
+        column_inches: inches
+    };
+    
+    fetch(`/api/add_special_edition_ad/{{ page.id }}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(data)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Create marker element
+            const marker = document.createElement('div');
+            marker.className = 'ad-marker';
+            marker.dataset.boxId = data.box_id;
+            marker.style.left = x + 'px';
+            marker.style.top = y + 'px';
+            marker.textContent = markerCounter++;
+            marker.title = 'Click to delete';
+            
+            marker.addEventListener('click', function(e) {
+                e.stopPropagation();
+                if (confirm('Delete this advertisement?')) {
+                    deleteSpecialEditionAd(data.box_id);
+                }
+            });
+            
+            document.getElementById('pageContainer').appendChild(marker);
+            
+            // Add to list
+            addSpecialEditionAdToList(data, markerCounter - 1);
+            
+            // Update totals
+            updatePageTotal();
+        } else {
+            alert('Error creating ad: ' + data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error creating ad:', error);
+        alert('Error creating ad. Please try again.');
+    });
+}
+
+function deleteSpecialEditionAd(boxId) {
+    fetch(`/api/delete_box/${boxId}`, {
+        method: 'DELETE'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Remove marker
+            const marker = document.querySelector(`[data-box-id="${boxId}"]`);
+            if (marker) {
+                marker.remove();
+            }
+            
+            // Remove list item
+            const listItem = document.querySelector(`.ad-item[data-box-id="${boxId}"]`);
+            if (listItem) {
+                listItem.remove();
+            }
+            
+            updatePageTotal();
+        } else {
+            alert('Error deleting ad: ' + data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error deleting ad:', error);
+        alert('Error deleting ad. Please try again.');
+    });
+}
+
+function addSpecialEditionAdToList(adData, adNumber) {
+    const listContainer = document.getElementById('adBoxesList');
+    
+    const adItem = document.createElement('div');
+    adItem.className = 'ad-item';
+    adItem.dataset.boxId = adData.box_id;
+    
+    let adTypeName = '';
+    if (adData.column_inches === 15) adTypeName = '1/8 Page';
+    if (adData.column_inches === 30) adTypeName = '1/4 Page';
+    if (adData.column_inches === 60) adTypeName = '1/2 Page';
+    if (adData.column_inches === 125) adTypeName = 'Full Page';
+    
+    adItem.innerHTML = `
+        <div class="d-flex justify-content-between align-items-start">
+            <div>
+                <div class="fw-bold text-primary">Ad #${adNumber}</div>
+                <div class="text-success">${adData.column_inches}" inches</div>
+                <div class="small text-muted">${adTypeName}</div>
+            </div>
+            <div class="text-end">
+                <i class="fas fa-check-circle text-success" title="User verified"></i>
+            </div>
+        </div>
+    `;
+    
+    listContainer.appendChild(adItem);
+}
+
+function updatePageTotal() {
+    // Calculate new total from all ads
+    let total = 0;
+    document.querySelectorAll('.ad-item').forEach(item => {
+        const inchesText = item.querySelector('.text-success').textContent;
+        const value = parseInt(inchesText.replace('" inches', ''));
+        if (!isNaN(value)) {
+            total += value;
+        }
+    });
+    
+    const totalElement = document.getElementById('pageTotalInches');
+    totalElement.textContent = total;
+    
+    // Add visual feedback
+    totalElement.parentElement.classList.add('measurements-updated');
+    setTimeout(() => {
+        totalElement.parentElement.classList.remove('measurements-updated');
+    }, 500);
+}
+
+// Broadsheet interface with intelligent click detection
+function initializeBroadsheetInterface() {
+    const pageContainer = document.getElementById('pageContainer');
+    let contextMenu = null;
+    
+    // Left click for intelligent detection
+    pageContainer.addEventListener('click', function(e) {
+        // Don't detect if clicking on existing boxes, handles, or buttons
+        if (e.target.closest('.ad-box') || 
+            e.target.closest('.manual-box') || 
+            e.target.closest('.measurement-box') ||
+            e.target.classList.contains('resize-handle') ||
+            e.target.classList.contains('delete-btn') ||
+            e.target.classList.contains('delete-handle') ||
+            e.target.classList.contains('ad-label')) {
+            return; // Let the box handle its own interaction
+        }
+        
+        const pageImage = document.getElementById('pageImage');
+        const imageRect = pageImage.getBoundingClientRect();
+        
+        // Calculate coordinates relative to the actual image, not the container
+        const x = Math.round((e.clientX - imageRect.left) / currentZoom);
+        const y = Math.round((e.clientY - imageRect.top) / currentZoom);
+        
+        // Ensure coordinates are within image bounds
+        const maxX = pageImage.naturalWidth || pageImage.width;
+        const maxY = pageImage.naturalHeight || pageImage.height;
+        
+        if (x >= 0 && x < maxX && y >= 0 && y < maxY) {
+            // Default to open display ad detection
+            intelligentDetectAd(x, y, 'open_display');
+        }
+    });
+    
+    // Right click for manual box placement
+    pageContainer.addEventListener('contextmenu', function(e) {
+        e.preventDefault();
+        
+        // Don't create manual box on existing boxes, handles, or buttons
+        if (e.target.closest('.ad-box') || 
+            e.target.closest('.manual-box') ||
+            e.target.closest('.measurement-box') ||
+            e.target.classList.contains('resize-handle') ||
+            e.target.classList.contains('delete-btn') ||
+            e.target.classList.contains('delete-handle') ||
+            e.target.classList.contains('ad-label')) {
+            return; // Let existing boxes handle their own interaction
+        }
+        
+        const pageImage = document.getElementById('pageImage');
+        const imageRect = pageImage.getBoundingClientRect();
+        
+        // Calculate coordinates relative to the actual image
+        const x = Math.round((e.clientX - imageRect.left) / currentZoom);
+        const y = Math.round((e.clientY - imageRect.top) / currentZoom);
+        
+        // Ensure coordinates are within image bounds
+        const maxX = pageImage.naturalWidth || pageImage.width;
+        const maxY = pageImage.naturalHeight || pageImage.height;
+        
+        if (x >= 0 && x < maxX && y >= 0 && y < maxY) {
+            createManualBoxAtPosition(x, y);
+        }
+    });
+    
+    // Make existing ad boxes draggable
+    document.querySelectorAll('.ad-box').forEach(box => {
+        makeDraggable(box);
+    });
+}
+
+function createManualBoxAtPosition(x, y) {
+    console.log('Creating manual box at position:', x, y);
+    const pageContainer = document.getElementById('pageContainer');
+    const pageImage = document.getElementById('pageImage');
+    
+    // Get image dimensions
+    const imageWidth = pageImage.naturalWidth || pageImage.width;
+    const imageHeight = pageImage.naturalHeight || pageImage.height;
+    
+    // Create a medium-sized box at the clicked position
+    const boxWidth = Math.min(200, imageWidth * 0.2);
+    const boxHeight = Math.min(150, imageHeight * 0.15);
+    
+    // Center the box on the click position, but keep it within bounds
+    const boxX = Math.max(0, Math.min(x - boxWidth/2, imageWidth - boxWidth));
+    const boxY = Math.max(0, Math.min(y - boxHeight/2, imageHeight - boxHeight));
+    
+    // Create manual box data
+    const boxData = {
+        x: boxX,
+        y: boxY,
+        width: boxWidth,
+        height: boxHeight,
+        ad_type: 'manual'
+    };
+    
+    // Call API to create manual box
+    console.log('Making API call to create manual box with data:', boxData);
+    fetch(`/api/add_manual_box/{{ page.id }}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(boxData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Create visual manual box
+            createManualBoxElement(data);
+            
+            // Update measurements panel
+            addAdToSidebar(data);
+            
+            // Update page total
+            updatePageTotalRegular();
+            
+            // Show success message
+            showSuccessMessage('Manual box created! Drag and resize to fit.');
+            
+        } else {
+            showErrorMessage('Error creating manual box: ' + data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showErrorMessage('Network error occurred');
+    });
+}
+
+function intelligentDetectAd(x, y, adType) {
+    // Show loading indicator
+    showLoadingIndicator();
+    
+    fetch(`/api/intelligent_detect/{{ page.id }}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            x: x,
+            y: y,
+            ad_type: adType
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        hideLoadingIndicator();
+        
+        if (data.success) {
+            // Add detected ad box to the page
+            addDetectedAdBox(data);
+            updatePageTotalRegular();
+            
+            // Show success message
+            showSuccessMessage(`${adType.replace('_', ' ')} ad detected successfully!`);
+        } else {
+            showErrorMessage('Failed to detect ad: ' + data.error);
+        }
+    })
+    .catch(error => {
+        hideLoadingIndicator();
+        console.error('Error:', error);
+        showErrorMessage('Network error occurred');
+    });
+}
+
+function addDetectedAdBox(data) {
+    const pageContainer = document.getElementById('pageContainer');
+    
+    // Create ad box element
+    const adBox = document.createElement('div');
+    adBox.className = 'ad-box detected-ad';
+    adBox.dataset.boxId = data.box_id;
+    adBox.style.position = 'absolute';
+    // Don't multiply by currentZoom - coordinates from server are already in image pixels
+    adBox.style.left = data.x + 'px';
+    adBox.style.top = data.y + 'px';
+    adBox.style.width = data.width + 'px';
+    adBox.style.height = data.height + 'px';
+    adBox.style.border = '2px solid #28a745';
+    adBox.style.backgroundColor = 'rgba(40, 167, 69, 0.1)';
+    adBox.style.cursor = 'move';
+    
+    // Add label
+    const label = document.createElement('div');
+    label.className = 'ad-label';
+    label.innerHTML = `${data.column_inches.toFixed(1)}" (${data.ad_type.replace('_', ' ')})`;
+    adBox.appendChild(label);
+    
+    // Add delete button
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'delete-btn';
+    deleteBtn.innerHTML = '×';
+    deleteBtn.onclick = function(e) {
+        e.stopPropagation();
+        deleteAdBox(data.box_id);
+    };
+    adBox.appendChild(deleteBtn);
+    
+    pageContainer.appendChild(adBox);
+    
+    // Make it draggable
+    makeDraggable(adBox);
+    
+    // Add to sidebar list
+    addAdToSidebar(data);
+}
+
+
+function showLoadingIndicator() {
+    const indicator = document.createElement('div');
+    indicator.id = 'loadingIndicator';
+    indicator.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Detecting ad...';
+    indicator.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: rgba(0,0,0,0.8);
+        color: white;
+        padding: 20px;
+        border-radius: 5px;
+        z-index: 2000;
+    `;
+    document.body.appendChild(indicator);
+}
+
+function hideLoadingIndicator() {
+    const indicator = document.getElementById('loadingIndicator');
+    if (indicator) {
+        indicator.remove();
+    }
+}
+
+function showSuccessMessage(message) {
+    const msg = document.createElement('div');
+    msg.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: 15px;
+        border-radius: 5px;
+        z-index: 2000;
+        color: white;
+        background: #28a745;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    `;
+    msg.textContent = message;
+    document.body.appendChild(msg);
+    
+    setTimeout(() => {
+        msg.remove();
+    }, 3000);
+}
+
+function showErrorMessage(message) {
+    const msg = document.createElement('div');
+    msg.style.cssText = `
+        position: fixed;
+        top: 20px;
+        right: 20px;
+        padding: 15px;
+        border-radius: 5px;
+        z-index: 2000;
+        color: white;
+        background: #dc3545;
+        box-shadow: 0 4px 8px rgba(0,0,0,0.2);
+    `;
+    msg.textContent = message;
+    document.body.appendChild(msg);
+    
+    setTimeout(() => {
+        msg.remove();
+    }, 3000);
+}
+
+function addAdToSidebar(data) {
+    const adsList = document.getElementById('adBoxesList');
+    if (!adsList) return;
+    
+    const adItem = document.createElement('div');
+    adItem.className = 'ad-item';
+    adItem.dataset.boxId = data.box_id;
+    
+    const adTypeName = data.ad_type.replace('_', ' ').toUpperCase();
+    
+    adItem.innerHTML = `
+        <div class="d-flex justify-content-between align-items-start">
+            <div>
+                <div class="fw-bold text-primary">${data.column_inches.toFixed(1)}" inches</div>
+                <div class="small text-muted">
+                    ${data.width_raw.toFixed(2)}" × ${data.height_raw.toFixed(2)}"
+                </div>
+                <div class="small text-success">
+                    ${adTypeName}
+                </div>
+            </div>
+            <div class="text-end">
+                <i class="fas fa-check-circle text-success" title="Intelligently detected"></i>
+            </div>
+        </div>
+    `;
+    
+    adsList.appendChild(adItem);
+}
+
+function makeDraggable(element) {
+    let isDragging = false;
+    let startX = 0;
+    let startY = 0;
+    let initialLeft = 0;
+    let initialTop = 0;
+    
+    element.addEventListener('mousedown', function(e) {
+        e.preventDefault();
+        isDragging = true;
+        
+        startX = e.clientX;
+        startY = e.clientY;
+        initialLeft = parseInt(element.style.left) || 0;
+        initialTop = parseInt(element.style.top) || 0;
+        
+        document.addEventListener('mousemove', onMouseMove);
+        document.addEventListener('mouseup', onMouseUp);
+    });
+    
+    function onMouseMove(e) {
+        if (!isDragging) return;
+        
+        // Account for zoom when calculating movement
+        const dx = (e.clientX - startX) / currentZoom;
+        const dy = (e.clientY - startY) / currentZoom;
+        
+        // Get page bounds to constrain movement
+        const pageImage = document.getElementById('pageImage');
+        const maxX = (pageImage.naturalWidth || pageImage.width) - parseInt(element.style.width);
+        const maxY = (pageImage.naturalHeight || pageImage.height) - parseInt(element.style.height);
+        
+        const newLeft = Math.max(0, Math.min(initialLeft + dx, maxX));
+        const newTop = Math.max(0, Math.min(initialTop + dy, maxY));
+        
+        element.style.left = newLeft + 'px';
+        element.style.top = newTop + 'px';
+    }
+    
+    function onMouseUp() {
+        if (isDragging) {
+            isDragging = false;
+            
+            // Update position in database
+            const boxId = element.dataset.boxId;
+            const x = parseInt(element.style.left);
+            const y = parseInt(element.style.top);
+            const width = parseInt(element.style.width);
+            const height = parseInt(element.style.height);
+            
+            updateBoxInDatabase(boxId, { x, y, width, height });
+        }
+        
+        document.removeEventListener('mousemove', onMouseMove);
+        document.removeEventListener('mouseup', onMouseUp);
+    }
+}
+
+function deleteAdBox(boxId) {
+    if (!confirm('Are you sure you want to delete this ad?')) {
+        return;
+    }
+    
+    fetch(`/api/delete_box/${boxId}`, {
+        method: 'DELETE'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Remove visual element
+            const boxElement = document.querySelector(`[data-box-id="${boxId}"]`);
+            if (boxElement) {
+                boxElement.remove();
+            }
+            
+            // Remove from measurements list
+            const listItem = document.querySelector(`.ad-item[data-box-id="${boxId}"]`);
+            if (listItem) {
+                listItem.remove();
+            }
+            
+            updatePageTotalRegular();
+            showSuccessMessage('Ad deleted successfully');
+        } else {
+            showErrorMessage('Error deleting ad: ' + data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error deleting ad:', error);
+        showErrorMessage('Network error occurred');
+    });
+}
+
+// Regular interface (for non-special editions) - button-triggered box creation
+function initializeRegularInterface() {
+    const addBoxBtn = document.getElementById('addBoxBtn');
+    let isDrawingMode = false;
+    let isCreatingBox = false;
+    let creationStartX = 0;
+    let creationStartY = 0;
+    let tempBox = null;
+    
+    // Button click to enable drawing mode
+    if (addBoxBtn) {
+        addBoxBtn.addEventListener('click', function() {
+            isDrawingMode = !isDrawingMode;
+            const pageContainer = document.getElementById('pageContainer');
+            
+            if (isDrawingMode) {
+                addBoxBtn.innerHTML = '<i class="fas fa-times"></i> Cancel Drawing';
+                addBoxBtn.className = 'btn btn-danger';
+                pageContainer.style.cursor = 'crosshair';
+                
+                // Add click handler for drawing
+                pageContainer.addEventListener('mousedown', startBoxCreation);
+            } else {
+                addBoxBtn.innerHTML = '<i class="fas fa-plus"></i> Draw New Box';
+                addBoxBtn.className = 'btn btn-success';
+                pageContainer.style.cursor = '';
+                
+                // Remove click handler
+                pageContainer.removeEventListener('mousedown', startBoxCreation);
+            }
+        });
+    }
+    
+    function startBoxCreation(e) {
+        if (!isDrawingMode) return;
+        
+        // Don't create box if clicking on existing elements
+        if (e.target.classList.contains('measurement-box') || 
+            e.target.classList.contains('resize-handle') || 
+            e.target.classList.contains('delete-handle') ||
+            e.target.closest('.measurement-box')) {
+            return;
+        }
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        isCreatingBox = true;
+        const rect = e.currentTarget.getBoundingClientRect();
+        // Adjust coordinates for zoom level
+        creationStartX = (e.clientX - rect.left) / currentZoom;
+        creationStartY = (e.clientY - rect.top) / currentZoom;
+        
+        // Create temporary visual box
+        tempBox = document.createElement('div');
+        tempBox.className = 'measurement-box temp-box';
+        tempBox.style.left = creationStartX + 'px';
+        tempBox.style.top = creationStartY + 'px';
+        tempBox.style.width = '0px';
+        tempBox.style.height = '0px';
+        tempBox.style.borderStyle = 'dashed';
+        tempBox.style.opacity = '0.7';
+        e.currentTarget.appendChild(tempBox);
+        
+        document.addEventListener('mousemove', handleBoxCreation);
+        document.addEventListener('mouseup', handleBoxCreationEnd);
+    }
+    
+    function handleBoxCreation(e) {
+        if (!isCreatingBox || !tempBox) return;
+        
+        const rect = document.getElementById('pageContainer').getBoundingClientRect();
+        // Adjust coordinates for zoom level
+        const currentX = (e.clientX - rect.left) / currentZoom;
+        const currentY = (e.clientY - rect.top) / currentZoom;
+        
+        const width = Math.abs(currentX - creationStartX);
+        const height = Math.abs(currentY - creationStartY);
+        const left = Math.min(currentX, creationStartX);
+        const top = Math.min(currentY, creationStartY);
+        
+        tempBox.style.left = left + 'px';
+        tempBox.style.top = top + 'px';
+        tempBox.style.width = width + 'px';
+        tempBox.style.height = height + 'px';
+    }
+    
+    function handleBoxCreationEnd(e) {
+        if (!isCreatingBox || !tempBox) return;
+        
+        isCreatingBox = false;
+        
+        const width = parseInt(tempBox.style.width);
+        const height = parseInt(tempBox.style.height);
+        const left = parseInt(tempBox.style.left);
+        const top = parseInt(tempBox.style.top);
+        
+        // Remove temp box
+        tempBox.remove();
+        tempBox = null;
+        
+        // Only create box if it has reasonable size (at least 10x10 pixels)
+        if (width >= 10 && height >= 10) {
+            createNewBox(left, top, width, height);
+        }
+        
+        // Exit drawing mode
+        isDrawingMode = false;
+        addBoxBtn.innerHTML = '<i class="fas fa-plus"></i> Draw New Box';
+        addBoxBtn.className = 'btn btn-success';
+        document.getElementById('pageContainer').style.cursor = '';
+        document.getElementById('pageContainer').removeEventListener('mousedown', startBoxCreation);
+        
+        document.removeEventListener('mousemove', handleBoxCreation);
+        document.removeEventListener('mouseup', handleBoxCreationEnd);
+    }
+    
+    // Initialize existing boxes
+    initializeExistingBoxes();
+}
+
+function createNewBox(x, y, width, height) {
+    // Create the box data
+    const boxData = {
+        x: Math.max(0, x),
+        y: Math.max(0, y),
+        width: width,
+        height: height
+    };
+    
+    // Send to server to create in database
+    fetch(`/api/add_box/{{ page.id }}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(boxData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Create the visual box element
+            const boxElement = createBoxElement(data.box_id, boxData.x, boxData.y, boxData.width, boxData.height);
+            document.getElementById('pageContainer').appendChild(boxElement);
+            
+            // Add to measurements list
+            addBoxToMeasurementsList(data);
+            
+            // Update page total
+            updatePageTotalRegular();
+            
+            // Make it immediately interactive
+            initializeBoxInteraction(boxElement);
+        } else {
+            alert('Error creating box: ' + data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error creating box:', error);
+        alert('Error creating box. Please try again.');
+    });
+}
+
+function createBoxElement(boxId, x, y, width, height) {
+    const box = document.createElement('div');
+    box.className = 'measurement-box';
+    box.dataset.boxId = boxId;
+    box.style.left = x + 'px';
+    box.style.top = y + 'px';
+    box.style.width = width + 'px';
+    box.style.height = height + 'px';
+    
+    // Add resize handles
+    const handles = ['nw', 'ne', 'sw', 'se', 'n', 's', 'w', 'e'];
+    handles.forEach(handle => {
+        const handleElement = document.createElement('div');
+        handleElement.className = `resize-handle ${handle}`;
+        box.appendChild(handleElement);
+    });
+    
+    // Add delete button
+    const deleteHandle = document.createElement('div');
+    deleteHandle.className = 'delete-handle';
+    deleteHandle.innerHTML = '×';
+    deleteHandle.title = 'Delete this box';
+    box.appendChild(deleteHandle);
+    
+    return box;
+}
+
+function initializeExistingBoxes() {
+    document.querySelectorAll('.measurement-box').forEach(box => {
+        initializeBoxInteraction(box);
+    });
+}
+
+function initializeBoxInteraction(box) {
+    const boxId = box.dataset.boxId;
+    let startX, startY, startWidth, startHeight, startMouseX, startMouseY;
+    let localIsDragging = false;
+    let localIsResizing = false;
+    let localSelectedBox = null;
+    let localResizeHandle = null;
+    let localDragOffset = { x: 0, y: 0 };
+    
+    // Delete functionality
+    const deleteHandle = box.querySelector('.delete-handle');
+    if (deleteHandle) {
+        deleteHandle.addEventListener('click', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (confirm('Delete this advertisement box?')) {
+                deleteBox(boxId);
+            }
+        });
+    }
+    
+    // Box moving - only on the box itself, not handles
+    box.addEventListener('mousedown', function(e) {
+        // Don't move if clicking on handles
+        if (e.target.classList.contains('resize-handle') || 
+            e.target.classList.contains('delete-handle')) {
+            return;
+        }
+        
+        e.preventDefault();
+        e.stopPropagation();
+        
+        localIsDragging = true;
+        localSelectedBox = box;
+        box.classList.add('selected');
+        
+        const rect = box.getBoundingClientRect();
+        const containerRect = document.getElementById('pageContainer').getBoundingClientRect();
+        
+        // Adjust drag offset for zoom level
+        localDragOffset.x = (e.clientX - rect.left) / currentZoom;
+        localDragOffset.y = (e.clientY - rect.top) / currentZoom;
+        
+        const handleDrag = function(e) {
+            if (!localIsDragging || !localSelectedBox) return;
+            
+            const containerRect = document.getElementById('pageContainer').getBoundingClientRect();
+            // Adjust coordinates for zoom level
+            const newX = (e.clientX - containerRect.left) / currentZoom - localDragOffset.x;
+            const newY = (e.clientY - containerRect.top) / currentZoom - localDragOffset.y;
+            
+            // Get container bounds at current zoom
+            const pageImage = document.getElementById('pageImage');
+            const maxX = (pageImage.naturalWidth || pageImage.width) - localSelectedBox.offsetWidth;
+            const maxY = (pageImage.naturalHeight || pageImage.height) - localSelectedBox.offsetHeight;
+            
+            const constrainedX = Math.max(0, Math.min(newX, maxX));
+            const constrainedY = Math.max(0, Math.min(newY, maxY));
+            
+            localSelectedBox.style.left = constrainedX + 'px';
+            localSelectedBox.style.top = constrainedY + 'px';
+        };
+        
+        const handleDragEnd = function(e) {
+            if (!localIsDragging || !localSelectedBox) return;
+            
+            localIsDragging = false;
+            
+            // Update box in database
+            const boxData = {
+                x: parseInt(localSelectedBox.style.left),
+                y: parseInt(localSelectedBox.style.top),
+                width: parseInt(localSelectedBox.style.width),
+                height: parseInt(localSelectedBox.style.height)
+            };
+            
+            updateBoxInDatabase(localSelectedBox.dataset.boxId, boxData);
+            
+            localSelectedBox.classList.remove('selected');
+            localSelectedBox = null;
+            
+            document.removeEventListener('mousemove', handleDrag);
+            document.removeEventListener('mouseup', handleDragEnd);
+        };
+        
+        document.addEventListener('mousemove', handleDrag);
+        document.addEventListener('mouseup', handleDragEnd);
+    });
+    
+    // Resize functionality
+    box.querySelectorAll('.resize-handle').forEach(handle => {
+        handle.addEventListener('mousedown', function(e) {
+            e.preventDefault();
+            e.stopPropagation();
+            
+            localIsResizing = true;
+            localSelectedBox = box;
+            localResizeHandle = handle;
+            box.classList.add('selected');
+            
+            const rect = box.getBoundingClientRect();
+            const containerRect = document.getElementById('pageContainer').getBoundingClientRect();
+            
+            startX = rect.left - containerRect.left;
+            startY = rect.top - containerRect.top;
+            startWidth = rect.width;
+            startHeight = rect.height;
+            startMouseX = e.clientX;
+            startMouseY = e.clientY;
+            
+            const handleResize = function(e) {
+                if (!localIsResizing || !localSelectedBox || !localResizeHandle) return;
+                
+                const deltaX = e.clientX - startMouseX;
+                const deltaY = e.clientY - startMouseY;
+                
+                let newX = startX;
+                let newY = startY;
+                let newWidth = startWidth;
+                let newHeight = startHeight;
+                
+                const handleClass = localResizeHandle.className.split(' ')[1];
+                
+                switch (handleClass) {
+                    case 'nw':
+                        newX = startX + deltaX;
+                        newY = startY + deltaY;
+                        newWidth = startWidth - deltaX;
+                        newHeight = startHeight - deltaY;
+                        break;
+                    case 'ne':
+                        newY = startY + deltaY;
+                        newWidth = startWidth + deltaX;
+                        newHeight = startHeight - deltaY;
+                        break;
+                    case 'sw':
+                        newX = startX + deltaX;
+                        newWidth = startWidth - deltaX;
+                        newHeight = startHeight + deltaY;
+                        break;
+                    case 'se':
+                        newWidth = startWidth + deltaX;
+                        newHeight = startHeight + deltaY;
+                        break;
+                    case 'n':
+                        newY = startY + deltaY;
+                        newHeight = startHeight - deltaY;
+                        break;
+                    case 's':
+                        newHeight = startHeight + deltaY;
+                        break;
+                    case 'w':
+                        newX = startX + deltaX;
+                        newWidth = startWidth - deltaX;
+                        break;
+                    case 'e':
+                        newWidth = startWidth + deltaX;
+                        break;
+                }
+                
+                // Enforce minimum size
+                if (newWidth < 20) {
+                    newWidth = 20;
+                    if (handleClass.includes('w')) {
+                        newX = startX + startWidth - 20;
+                    }
+                }
+                if (newHeight < 20) {
+                    newHeight = 20;
+                    if (handleClass.includes('n')) {
+                        newY = startY + startHeight - 20;
+                    }
+                }
+                
+                // Keep within container bounds
+                const containerRect = document.getElementById('pageContainer').getBoundingClientRect();
+                newX = Math.max(0, Math.min(newX, containerRect.width - newWidth));
+                newY = Math.max(0, Math.min(newY, containerRect.height - newHeight));
+                
+                localSelectedBox.style.left = newX + 'px';
+                localSelectedBox.style.top = newY + 'px';
+                localSelectedBox.style.width = newWidth + 'px';
+                localSelectedBox.style.height = newHeight + 'px';
+            };
+            
+            const handleResizeEnd = function(e) {
+                if (!localIsResizing || !localSelectedBox) return;
+                
+                localIsResizing = false;
+                
+                // Update box in database
+                const boxData = {
+                    x: parseInt(localSelectedBox.style.left),
+                    y: parseInt(localSelectedBox.style.top),
+                    width: parseInt(localSelectedBox.style.width),
+                    height: parseInt(localSelectedBox.style.height)
+                };
+                
+                updateBoxInDatabase(localSelectedBox.dataset.boxId, boxData);
+                
+                localSelectedBox.classList.remove('selected');
+                localSelectedBox = null;
+                localResizeHandle = null;
+                
+                document.removeEventListener('mousemove', handleResize);
+                document.removeEventListener('mouseup', handleResizeEnd);
+            };
+            
+            document.addEventListener('mousemove', handleResize);
+            document.addEventListener('mouseup', handleResizeEnd);
+        });
+    });
+}
+
+function updateBoxInDatabase(boxId, boxData) {
+    // Check if this is a manual box by looking at the element
+    const boxElement = document.querySelector(`[data-box-id="${boxId}"]`);
+    const isManualBox = boxElement && boxElement.classList.contains('manual-box');
+    
+    // Use appropriate API endpoint
+    const endpoint = isManualBox ? `/api/update_manual_box/${boxId}` : `/api/update_box/${boxId}`;
+    
+    fetch(endpoint, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(boxData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Update measurements in the list
+            if (isManualBox) {
+                updateManualBoxInSidebar(boxId, data);
+            } else {
+                updateBoxInMeasurementsList(boxId, data);
+            }
+            updatePageTotalRegular();
+            
+            // Update the label on the box
+            if (isManualBox && boxElement) {
+                const label = boxElement.querySelector('.ad-label');
+                if (label) {
+                    label.innerHTML = `${data.column_inches.toFixed(1)}" (manual)`;
+                }
+            }
+        } else {
+            console.error('Error updating box:', data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error updating box:', error);
+    });
+}
+
+function deleteBox(boxId) {
+    fetch(`/api/delete_box/${boxId}`, {
+        method: 'DELETE'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Remove visual element
+            const boxElement = document.querySelector(`[data-box-id="${boxId}"]`);
+            if (boxElement) {
+                boxElement.remove();
+            }
+            
+            // Remove from measurements list
+            const listItem = document.querySelector(`.ad-item[data-box-id="${boxId}"]`);
+            if (listItem) {
+                listItem.remove();
+            }
+            
+            updatePageTotalRegular();
+        } else {
+            alert('Error deleting box: ' + data.error);
+        }
+    })
+    .catch(error => {
+        console.error('Error deleting box:', error);
+        alert('Error deleting box. Please try again.');
+    });
+}
+
+function addBoxToMeasurementsList(boxData) {
+    const listContainer = document.getElementById('adBoxesList');
+    
+    const adItem = document.createElement('div');
+    adItem.className = 'ad-item';
+    adItem.dataset.boxId = boxData.box_id;
+    
+    adItem.innerHTML = `
+        <div class="d-flex justify-content-between align-items-start">
+            <div>
+                <div class="fw-bold text-primary">${boxData.column_inches.toFixed(1)}" inches</div>
+                <div class="small text-muted">
+                    ${boxData.width_raw.toFixed(2)}" × ${boxData.height_raw.toFixed(2)}"
+                </div>
+            </div>
+            <div class="text-end">
+                <i class="fas fa-check-circle text-success" title="User verified"></i>
+            </div>
+        </div>
+    `;
+    
+    listContainer.appendChild(adItem);
+}
+
+function updateBoxInMeasurementsList(boxId, boxData) {
+    const listItem = document.querySelector(`.ad-item[data-box-id="${boxId}"]`);
+    if (listItem) {
+        listItem.innerHTML = `
+            <div class="d-flex justify-content-between align-items-start">
+                <div>
+                    <div class="fw-bold text-primary">${boxData.column_inches.toFixed(1)}" inches</div>
+                    <div class="small text-muted">
+                        ${boxData.width_raw.toFixed(2)}" × ${boxData.height_raw.toFixed(2)}"
+                    </div>
+                </div>
+                <div class="text-end">
+                    <i class="fas fa-check-circle text-success" title="User verified"></i>
+                </div>
+            </div>
+        `;
+        
+        // Add visual feedback
+        listItem.classList.add('measurements-updated');
+        setTimeout(() => {
+            listItem.classList.remove('measurements-updated');
+        }, 500);
+    }
+}
+
+function updatePageTotalRegular() {
+    // Calculate new total from all ads
+    let total = 0;
+    document.querySelectorAll('.ad-item').forEach(item => {
+        const inchesText = item.querySelector('.fw-bold').textContent;
+        const value = parseFloat(inchesText.replace('" inches', ''));
+        if (!isNaN(value)) {
+            total += value;
+        }
+    });
+    
+    const totalElement = document.getElementById('pageTotalInches');
+    totalElement.textContent = Math.round(total);
+    
+    // Add visual feedback
+    totalElement.parentElement.classList.add('measurements-updated');
+    setTimeout(() => {
+        totalElement.parentElement.classList.remove('measurements-updated');
+    }, 500);
+}
+
+// Prevent default drag behavior on images
+document.getElementById('pageImage').addEventListener('dragstart', function(e) {
+    e.preventDefault();
+});
+</script>
+{% endblock %}

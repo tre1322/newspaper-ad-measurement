@@ -1,0 +1,173 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row justify-content-center">
+    <div class="col-md-8">
+        <div class="card">
+            <div class="card-header">
+                <h4><i class="fas fa-upload"></i> Upload Newspaper Publication</h4>
+            </div>
+            <div class="card-body">
+                <form method="post" enctype="multipart/form-data">
+                    <div class="mb-3">
+                        <label for="pdf_file" class="form-label">
+                            <i class="fas fa-file-pdf"></i> Select PDF File
+                        </label>
+                        <input type="file" class="form-control" id="pdf_file" name="pdf_file" 
+                               accept=".pdf" required>
+                        <div class="form-text">
+                            Select your newspaper PDF file.
+                        </div>
+                    </div>
+                    
+                    <div class="mb-3">
+                        <label class="form-label">
+                            <i class="fas fa-newspaper"></i> Publication Type
+                        </label>
+                        <div class="form-text mb-3">
+                            Click on a publication type below to select it.
+                        </div>
+                        
+                        <!-- Hidden input to store selected publication type -->
+                        <input type="hidden" id="publication_type" name="publication_type" required>
+                        
+                        <div class="row">
+                            {% for key, config in pub_types.items() %}
+                            <div class="col-md-4 mb-3">
+                                <div class="card publication-card" data-pub-type="{{ key }}" style="cursor: pointer; transition: all 0.2s;">
+                                    <div class="card-body text-center">
+                                        <div class="publication-icon mb-2">
+                                            {% if key == 'broadsheet' %}
+                                                <i class="fas fa-newspaper fa-2x text-primary"></i>
+                                            {% elif key == 'special_edition' %}
+                                                <i class="fas fa-file-alt fa-2x text-warning"></i>
+                                            {% elif key == 'peach' %}
+                                                <i class="fas fa-book fa-2x text-success"></i>
+                                            {% endif %}
+                                        </div>
+                                        <h6 class="card-title">{{ config.name }}</h6>
+                                        <p class="card-text small text-muted">
+                                            {{ config.width_units }}" width<br>
+                                            {{ config.total_inches_per_page }}" per page
+                                        </p>
+                                        <div class="selection-indicator" style="display: none;">
+                                            <i class="fas fa-check-circle text-success fa-lg"></i>
+                                        </div>
+                                    </div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                        
+                        <div id="selection-feedback" class="alert alert-info" style="display: none;">
+                            <i class="fas fa-info-circle"></i> <span id="selected-type-name"></span> selected
+                        </div>
+                    </div>
+                    
+                    <div class="d-grid gap-2 d-md-flex justify-content-md-end">
+                        <a href="{{ url_for('index') }}" class="btn btn-secondary me-md-2">
+                            <i class="fas fa-arrow-left"></i> Cancel
+                        </a>
+                        <button type="submit" class="btn btn-primary">
+                            <i class="fas fa-upload"></i> Upload & Process
+                        </button>
+                    </div>
+                </form>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const publicationCards = document.querySelectorAll('.publication-card');
+    const hiddenInput = document.getElementById('publication_type');
+    const selectionFeedback = document.getElementById('selection-feedback');
+    const selectedTypeName = document.getElementById('selected-type-name');
+    
+    // Publication type names for display
+    const pubTypeNames = {
+        'broadsheet': 'Broadsheet',
+        'special_edition': 'Special Edition Tabloid',
+        'peach': 'Peach Supplement'
+    };
+    
+    publicationCards.forEach(card => {
+        // Add hover effects
+        card.addEventListener('mouseenter', function() {
+            if (!this.classList.contains('selected')) {
+                this.style.transform = 'translateY(-2px)';
+                this.style.boxShadow = '0 4px 8px rgba(0,0,0,0.1)';
+            }
+        });
+        
+        card.addEventListener('mouseleave', function() {
+            if (!this.classList.contains('selected')) {
+                this.style.transform = 'translateY(0)';
+                this.style.boxShadow = '';
+            }
+        });
+        
+        // Handle selection
+        card.addEventListener('click', function() {
+            const pubType = this.dataset.pubType;
+            
+            // Remove selection from all cards
+            publicationCards.forEach(c => {
+                c.classList.remove('selected');
+                c.style.borderColor = '';
+                c.style.backgroundColor = '';
+                c.style.transform = 'translateY(0)';
+                c.style.boxShadow = '';
+                c.querySelector('.selection-indicator').style.display = 'none';
+            });
+            
+            // Add selection to clicked card
+            this.classList.add('selected');
+            this.style.borderColor = '#28a745';
+            this.style.borderWidth = '2px';
+            this.style.backgroundColor = '#f8fff8';
+            this.style.transform = 'translateY(-2px)';
+            this.style.boxShadow = '0 4px 12px rgba(40, 167, 69, 0.2)';
+            this.querySelector('.selection-indicator').style.display = 'block';
+            
+            // Update hidden input and feedback
+            hiddenInput.value = pubType;
+            selectedTypeName.textContent = pubTypeNames[pubType];
+            selectionFeedback.style.display = 'block';
+            
+            // Update upload button state
+            updateUploadButton();
+        });
+    });
+    
+    function updateUploadButton() {
+        const uploadBtn = document.querySelector('button[type="submit"]');
+        const fileInput = document.getElementById('pdf_file');
+        const pubTypeSelected = hiddenInput.value !== '';
+        const fileSelected = fileInput.files.length > 0;
+        
+        if (pubTypeSelected && fileSelected) {
+            uploadBtn.disabled = false;
+            uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Upload & Process';
+        } else {
+            uploadBtn.disabled = true;
+            if (!fileSelected && !pubTypeSelected) {
+                uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Select file and publication type';
+            } else if (!fileSelected) {
+                uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Select PDF file';
+            } else if (!pubTypeSelected) {
+                uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Select publication type';
+            }
+        }
+    }
+    
+    // Monitor file input changes
+    document.getElementById('pdf_file').addEventListener('change', updateUploadButton);
+    
+    // Initial button state
+    updateUploadButton();
+});
+</script>
+
+{% endblock %}

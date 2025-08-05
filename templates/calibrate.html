@@ -1,0 +1,231 @@
+<!-- calibrate.html template -->
+{% extends "base.html" %}
+
+{% block title %}Screen Calibration{% endblock %}
+
+{% block content %}
+<div class="container-fluid">
+    <div class="row justify-content-center">
+        <div class="col-lg-10">
+            <div class="card">
+                <div class="card-header">
+                    <h4><i class="fas fa-ruler"></i> Screen Calibration</h4>
+                    <p class="mb-0 text-muted">Calibrate measurements for accurate results across different screens</p>
+                </div>
+                
+                <div class="card-body">
+                    {% if existing_calibration %}
+                    <div class="alert alert-success" role="alert">
+                        <i class="fas fa-check-circle"></i>
+                        <strong>Current Calibration Active</strong><br>
+                        Scaling Factor: {{ "%.3f"|format(existing_calibration.scaling_factor) }} 
+                        | Calibrated: {{ existing_calibration.calibration_date.strftime('%Y-%m-%d %H:%M') }}
+                        <br><small>You measured {{ "%.2f"|format(existing_calibration.measured_inches) }}" on your screen</small>
+                    </div>
+                    {% else %}
+                    <div class="alert alert-warning" role="alert">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <strong>No Calibration Found</strong> - Please calibrate for accurate measurements
+                    </div>
+                    {% endif %}
+
+                    <!-- Calibration Instructions -->
+                    <div class="row mb-4">
+                        <div class="col-md-8">
+                            <h5>Instructions:</h5>
+                            <ol>
+                                <li><strong>Get a real ruler or measuring tape</strong></li>
+                                <li><strong>Measure the ruler image below</strong> from 0 to 6 on your screen</li>
+                                <li><strong>Enter your measurement</strong> in the box</li>
+                                <li><strong>Click "Calibrate"</strong> to save settings</li>
+                            </ol>
+                            
+                            <div class="alert alert-info">
+                                <i class="fas fa-info-circle"></i>
+                                <strong>Important:</strong> Measure directly on your screen with a physical ruler. 
+                                Don't guess or estimate!
+                            </div>
+                        </div>
+                        
+                        <div class="col-md-4">
+                            <div class="card bg-light">
+                                <div class="card-body text-center">
+                                    <h6>Why Calibrate?</h6>
+                                    <p class="small">Different screens show the same image at different sizes. 
+                                    Calibration ensures measurements are consistent across all devices.</p>
+                                    
+                                    <div class="text-center">
+                                        <i class="fas fa-desktop fa-2x text-primary me-2"></i>
+                                        <i class="fas fa-laptop fa-2x text-success me-2"></i>
+                                        <i class="fas fa-tablet-alt fa-2x text-warning"></i>
+                                    </div>
+                                    <small class="text-muted">Same accuracy everywhere</small>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Calibration Ruler -->
+                    <div class="text-center mb-4">
+                        <div class="calibration-ruler-container p-3 border rounded bg-white" style="display: inline-block;">
+                            <img src="data:image/png;base64,{{ calibration_image }}" 
+                                 alt="Calibration Ruler" 
+                                 id="calibrationRuler"
+                                 style="max-width: 100%; height: auto; border: 2px solid #007bff;">
+                            
+                            <div class="mt-2">
+                                <small class="text-muted">
+                                    <i class="fas fa-arrows-alt-h"></i> 
+                                    Measure from the 0 mark to the 6 mark with a real ruler
+                                </small>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Calibration Input -->
+                    <div class="row justify-content-center">
+                        <div class="col-md-6">
+                            <div class="card">
+                                <div class="card-body">
+                                    <form id="calibrationForm">
+                                        <div class="mb-3">
+                                            <label for="measuredInches" class="form-label">
+                                                <strong>Your Measurement (inches):</strong>
+                                            </label>
+                                            <div class="input-group">
+                                                <input type="number" 
+                                                       class="form-control form-control-lg text-center" 
+                                                       id="measuredInches" 
+                                                       step="0.01" 
+                                                       min="0.1" 
+                                                       max="20" 
+                                                       placeholder="5.75"
+                                                       required>
+                                                <span class="input-group-text">"</span>
+                                            </div>
+                                            <div class="form-text">
+                                                Example: If you measure 5.75 inches, enter "5.75"
+                                            </div>
+                                        </div>
+
+                                        <div class="d-grid gap-2">
+                                            <button type="submit" class="btn btn-primary btn-lg">
+                                                <i class="fas fa-save"></i> Calibrate Screen
+                                            </button>
+                                            
+                                            {% if existing_calibration %}
+                                            <button type="button" class="btn btn-outline-secondary" onclick="skipCalibration()">
+                                                <i class="fas fa-forward"></i> Use Existing Calibration
+                                            </button>
+                                            {% endif %}
+                                        </div>
+                                    </form>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+
+                    <!-- Results Area -->
+                    <div id="calibrationResults" class="mt-4" style="display: none;">
+                        <div class="alert alert-success text-center">
+                            <h5><i class="fas fa-check-circle"></i> Calibration Complete!</h5>
+                            <p id="resultsText"></p>
+                            <a href="{{ url_for('index') }}" class="btn btn-success">
+                                <i class="fas fa-arrow-right"></i> Continue to Measurements
+                            </a>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.getElementById('calibrationForm').addEventListener('submit', function(e) {
+    e.preventDefault();
+    
+    const measuredInches = parseFloat(document.getElementById('measuredInches').value);
+    
+    if (!measuredInches || measuredInches <= 0) {
+        alert('Please enter a valid measurement');
+        return;
+    }
+    
+    // Get device information
+    const deviceInfo = {
+        screen_width: screen.width,
+        screen_height: screen.height,
+        device_pixel_ratio: window.devicePixelRatio || 1,
+        inner_width: window.innerWidth,
+        inner_height: window.innerHeight
+    };
+    
+    // Show loading
+    const submitBtn = document.querySelector('button[type="submit"]');
+    const originalText = submitBtn.innerHTML;
+    submitBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Calibrating...';
+    submitBtn.disabled = true;
+    
+    // Save calibration
+    fetch('/api/save_calibration', {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            measured_inches: measuredInches,
+            device_info: deviceInfo
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Show success
+            document.getElementById('resultsText').innerHTML = `
+                <strong>Success!</strong><br>
+                Scaling Factor: ${data.scaling_factor.toFixed(3)}<br>
+                ${data.message}
+            `;
+            document.getElementById('calibrationResults').style.display = 'block';
+            
+            // Hide form
+            document.getElementById('calibrationForm').style.display = 'none';
+            
+        } else {
+            alert('Calibration failed: ' + data.error);
+            submitBtn.innerHTML = originalText;
+            submitBtn.disabled = false;
+        }
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        alert('Network error occurred');
+        submitBtn.innerHTML = originalText;
+        submitBtn.disabled = false;
+    });
+});
+
+function skipCalibration() {
+    window.location.href = "{{ url_for('index') }}";
+}
+
+// Auto-focus measurement input
+document.getElementById('measuredInches').focus();
+</script>
+
+<style>
+.calibration-ruler-container {
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
+#calibrationRuler {
+    user-select: none;
+    -webkit-user-drag: none;
+}
+
+.card {
+    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+}
+</style>
+{% endblock %}

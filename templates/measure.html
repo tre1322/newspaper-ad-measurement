@@ -1,0 +1,193 @@
+{% extends "base.html" %}
+
+{% block title %}Measure - {{ publication.original_filename }}{% endblock %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2><i class="fas fa-ruler"></i> {{ publication.original_filename }}</h2>
+                <p class="text-muted mb-0">
+                    {{ publication.publication_type|title }} • {{ publication.total_pages }} pages • 
+                    <strong>{{ total_boxes }}</strong> boxes detected • 
+                    <strong>{{ "%.1f"|format(publication.ad_percentage) }}%</strong> advertising
+                </p>
+            </div>
+            <div>
+                <a href="{{ url_for('index') }}" class="btn btn-secondary me-2">
+                    <i class="fas fa-arrow-left"></i> Back to Home
+                </a>
+                <a href="{{ url_for('publication_report', pub_id=publication.id) }}" class="btn btn-success">
+                    <i class="fas fa-chart-bar"></i> Generate Report
+                </a>
+            </div>
+        </div>
+        
+        <!-- Quick Navigation -->
+        <div class="alert alert-primary">
+            <i class="fas fa-keyboard"></i> 
+            <strong>Quick Start:</strong> Click any page below to start editing, then use ← → arrow keys to scroll through pages
+        </div>
+        
+        <div class="card">
+            <div class="card-body">
+                <div class="row">
+                    <div class="col-md-8">
+                        <h5><i class="fas fa-images"></i> Pages Overview - Click to Edit</h5>
+                        
+                        <!-- Scrollable Pages Grid -->
+                        <div style="max-height: 600px; overflow-y: auto; border: 1px solid #dee2e6; border-radius: 0.375rem; padding: 15px;">
+                            <div class="row">
+                                {% for page in pages %}
+                                <div class="col-md-6 col-lg-4 col-xl-3 mb-3">
+                                    <div class="card h-100 shadow-sm" style="cursor: pointer; transition: transform 0.2s;" 
+                                         onmouseover="this.style.transform='translateY(-2px)'" 
+                                         onmouseout="this.style.transform='translateY(0)'"
+                                         onclick="window.location.href='{{ url_for('measure_page', pub_id=publication.id, page_num=page.page_number) }}'">
+                                        <div class="card-body text-center p-2">
+                                            <h6 class="card-title mb-2">Page {{ page.page_number }}</h6>
+                                            
+                                            <!-- Page thumbnail -->
+                                            <img src="{{ url_for('serve_page_image', page_id=page.id) }}" 
+                                                 alt="Page {{ page.page_number }}" 
+                                                 class="img-fluid mb-2" 
+                                                 style="max-height: 120px; border: 1px solid #ddd;">
+                                            
+                                            <div class="small">
+                                                <strong>{{ "%.1f"|format(page.page_ad_inches) }}"</strong> column inches
+                                                <br>
+                                                <span class="text-muted">
+                                                    {% set box_count = [] %}
+                                                    {% for box in ad_boxes if box.page_id == page.id %}
+                                                        {% set _ = box_count.append(1) %}
+                                                    {% endfor %}
+                                                    {{ box_count|length }} boxes
+                                                </span>
+                                                <br>
+                                                <span class="badge bg-primary btn-sm mt-1">
+                                                    <i class="fas fa-edit"></i> Edit
+                                                </span>
+                                            </div>
+                                        </div>
+                                    </div>
+                                </div>
+                                {% endfor %}
+                            </div>
+                        </div>
+                        
+                        <!-- Navigation Hint -->
+                        <div class="mt-3 p-3 bg-light rounded">
+                            <h6><i class="fas fa-lightbulb text-warning"></i> Navigation Tips:</h6>
+                            <ul class="small mb-0">
+                                <li><strong>Click any page</strong> to start editing measurements</li>
+                                <li><strong>Use ← → arrow keys</strong> to scroll between pages</li>
+                                <li><strong>Click detected boxes</strong> to select and modify them</li>
+                                <li><strong>Delete incorrect boxes</strong> using the × button</li>
+                                <li><strong>Add new boxes</strong> for missed advertisements</li>
+                                <li><strong>Generate report</strong> when finished to get totals and downloadable files</li>
+                            </ul>
+                        </div>
+                    </div>
+                    
+                    <div class="col-md-4">
+                        <div class="card bg-light">
+                            <div class="card-header">
+                                <h6><i class="fas fa-chart-pie"></i> Publication Summary</h6>
+                            </div>
+                            <div class="card-body">
+                                <table class="table table-sm">
+                                    <tr>
+                                        <td>Total Pages:</td>
+                                        <td><strong>{{ publication.total_pages }}</strong></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Total Space:</td>
+                                        <td><strong>{{ "%.0f"|format(publication.total_inches) }}"</strong></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Ad Space:</td>
+                                        <td><strong>{{ "%.1f"|format(publication.total_ad_inches) }}"</strong></td>
+                                    </tr>
+                                    <tr>
+                                        <td>Boxes Detected:</td>
+                                        <td><strong>{{ total_boxes }}</strong></td>
+                                    </tr>
+                                    <tr class="table-primary">
+                                        <td><strong>Ad Percentage:</strong></td>
+                                        <td><strong>{{ "%.2f"|format(publication.ad_percentage) }}%</strong></td>
+                                    </tr>
+                                </table>
+                                
+                                <div class="mt-3">
+                                    <div class="progress mb-2">
+                                        <div class="progress-bar" role="progressbar" 
+                                             style="width: {{ publication.ad_percentage }}%">
+                                            {{ "%.1f"|format(publication.ad_percentage) }}%
+                                        </div>
+                                    </div>
+                                    <small class="text-muted">
+                                        USPS compliance: 
+                                        {% if publication.ad_percentage > 0 %}
+                                            <span class="text-success">✅ Ready</span>
+                                        {% else %}
+                                            <span class="text-warning">⚠️ Pending</span>
+                                        {% endif %}
+                                    </small>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Quick Stats -->
+                        <div class="card mt-3">
+                            <div class="card-body">
+                                <h6><i class="fas fa-chart-bar"></i> Detection Stats</h6>
+                                <div class="row text-center">
+                                    <div class="col-6">
+                                        <div class="h4 text-primary mb-0">{{ total_boxes }}</div>
+                                        <small class="text-muted">Boxes Found</small>
+                                    </div>
+                                    <div class="col-6">
+                                        <div class="h4 text-success mb-0">{{ "%.0f"|format(publication.ad_percentage) }}%</div>
+                                        <small class="text-muted">Advertising</small>
+                                    </div>
+                                </div>
+                                
+                                <hr>
+                                
+                                <div class="d-grid gap-2">
+                                    <a href="{{ url_for('measure_page', pub_id=publication.id, page_num=1) }}" 
+                                       class="btn btn-success">
+                                        <i class="fas fa-play"></i> Start Editing Page 1
+                                    </a>
+                                    <a href="{{ url_for('publication_report', pub_id=publication.id) }}" 
+                                       class="btn btn-primary">
+                                        <i class="fas fa-chart-bar"></i> Generate Report
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                        
+                        <!-- Export Options -->
+                        <div class="card mt-3">
+                            <div class="card-body">
+                                <h6><i class="fas fa-download"></i> Export Options</h6>
+                                <div class="d-grid gap-2">
+                                    <a href="{{ url_for('download_pdf_report', pub_id=publication.id) }}" 
+                                       class="btn btn-outline-danger btn-sm">
+                                        <i class="fas fa-file-pdf"></i> Download PDF Report
+                                    </a>
+                                    <a href="{{ url_for('download_csv_report', pub_id=publication.id) }}" 
+                                       class="btn btn-outline-success btn-sm">
+                                        <i class="fas fa-file-csv"></i> Download CSV Data
+                                    </a>
+                                </div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(python:*)",
+      "Bash(del test_detection_types.py migrate_ad_type.py)",
+      "Bash(rm:*)"
+    ],
+    "deny": []
+  }
+}

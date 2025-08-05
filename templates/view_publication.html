@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block content %}
+<div class="row">
+    <div class="col-12">
+        <div class="d-flex justify-content-between align-items-center mb-4">
+            <div>
+                <h2><i class="fas fa-file-pdf"></i> {{ publication.original_filename }}</h2>
+                <p class="text-muted mb-0">
+                    {{ publication.publication_type|title }} • {{ publication.total_pages }} pages • 
+                    {{ "%.0f"|format(publication.total_inches) }} total column inches
+                    {% if publication.processed %}
+                        • <strong>{{ "%.1f"|format(publication.ad_percentage) }}%</strong> advertising
+                    {% endif %}
+                </p>
+            </div>
+            <div>
+                <a href="{{ url_for('index') }}" class="btn btn-secondary me-2">
+                    <i class="fas fa-arrow-left"></i> Back to Home
+                </a>
+                {% if publication.processed %}
+                    <a href="{{ url_for('measure_publication', pub_id=publication.id) }}" class="btn btn-success">
+                        <i class="fas fa-ruler"></i> Measure Ads
+                    </a>
+                {% endif %}
+            </div>
+        </div>
+        
+        {% if publication.processed %}
+            <div class="alert alert-success">
+                <i class="fas fa-check-circle"></i> 
+                <strong>Processing Complete!</strong> 
+                AI has detected potential ad boxes. Click "Measure Ads" to review and adjust them.
+            </div>
+        {% endif %}
+        
+        <div class="card">
+            <div class="card-body">
+                <h5>Pages ({{ pages|length }})</h5>
+                <div class="row">
+                    {% for page in pages %}
+                    <div class="col-md-3 col-lg-2 mb-3">
+                        <div class="card">
+                            <div class="card-body text-center">
+                                <h6 class="card-title">Page {{ page.page_number }}</h6>
+                                <img src="{{ url_for('serve_page_image', page_id=page.id) }}" 
+                                     alt="Page {{ page.page_number }}" 
+                                     class="img-fluid" 
+                                     style="max-height: 200px; cursor: pointer;"
+                                     onclick="{% if publication.processed %}window.location.href='{{ url_for('measure_page', pub_id=publication.id, page_num=page.page_number) }}'{% else %}alert('Process the publication first!'){% endif %}">
+                                <p class="card-text small mt-2">
+                                    {{ page.width_pixels }} × {{ page.height_pixels }} px
+                                    {% if publication.processed %}
+                                        <br><strong>{{ "%.1f"|format(page.page_ad_inches) }}"</strong> ad inches
+                                    {% endif %}
+                                </p>
+                            </div>
+                        </div>
+                    </div>
+                    {% endfor %}
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+{% endblock %}

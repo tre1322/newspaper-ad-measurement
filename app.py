@@ -42,7 +42,7 @@ else:
     app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///newspaper_ads.db')
 
 # Continue with your existing configuration
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', '14f39d4f19a6bcecab0b1b98c3a3a1a32562cfde12c7973f9bd21c8feea5ce2e
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', '14f39d4f19a6bcecab0b1b98c3a3a1a32562cfde12c7973f9bd21c8feea5ce2e')
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Upload configuration

@@ -4,11 +4,12 @@ import fitz  # PyMuPDF
 import cv2
 import numpy as np
 import math
-from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, send_file
+from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, send_file, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
 from datetime import datetime
 from dotenv import load_dotenv
+from functools import wraps
 from werkzeug.utils import secure_filename
 from PIL import Image, ImageDraw, ImageFont
 import io
@@ -60,6 +61,17 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 # Initialize extensions
 db = SQLAlchemy(app)
 migrate = Migrate(app, db)
+
+# Authentication configuration
+LOGIN_PASSWORD = os.environ.get('LOGIN_PASSWORD', 'CCCitizen56101!')
+
+def login_required(f):
+    @wraps(f)
+    def decorated_function(*args, **kwargs):
+        if not session.get('logged_in'):
+            return redirect(url_for('login'))
+        return f(*args, **kwargs)
+    return decorated_function
 
 # Create upload directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -698,12 +710,33 @@ class AdBoxDetector:
         return 0
 
 # Routes
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        password = request.form.get('password')
+        if password == LOGIN_PASSWORD:
+            session['logged_in'] = True
+            flash('Successfully logged in!', 'success')
+            return redirect(url_for('index'))
+        else:
+            flash('Incorrect password. Please try again.', 'error')
+    
+    return render_template('login.html')
+
+@app.route('/logout')
+def logout():
+    session.pop('logged_in', None)
+    flash('You have been logged out.', 'info')
+    return redirect(url_for('login'))
+
 @app.route('/')
+@login_required
 def index():
     publications = Publication.query.order_by(Publication.upload_date.desc()).all()
     return render_template('index.html', publications=publications)
 
 @app.route('/upload', methods=['GET', 'POST'])
+@login_required
 def upload():
     if request.method == 'POST':
         if 'pdf_file' not in request.files:
@@ -756,6 +789,7 @@ def upload():
     return render_template('upload.html', pub_types=PUBLICATION_CONFIGS)
 
 @app.route('/process/<int:pub_id>')
+@login_required
 def process_publication(pub_id):
     publication = Publication.query.get_or_404(pub_id)
     
@@ -876,12 +910,14 @@ def process_publication(pub_id):
         return redirect(url_for('index'))
 
 @app.route('/view/<int:pub_id>')
+@login_required
 def view_publication(pub_id):
     publication = Publication.query.get_or_404(pub_id)
     pages = Page.query.filter_by(publication_id=pub_id).order_by(Page.page_number).all()
     return render_template('view_publication.html', publication=publication, pages=pages)
 
 @app.route('/measure/<int:pub_id>')
+@login_required
 def measure_publication(pub_id):
     publication = Publication.query.get_or_404(pub_id)
     pages = Page.query.filter_by(publication_id=pub_id).order_by(Page.page_number).all()
@@ -898,6 +934,7 @@ def measure_publication(pub_id):
                          total_boxes=total_boxes)
 
 @app.route('/measure/<int:pub_id>/page/<int:page_num>')
+@login_required
 def measure_page(pub_id, page_num):
     publication = Publication.query.get_or_404(pub_id)
     page = Page.query.filter_by(publication_id=pub_id, page_number=page_num).first_or_404()
@@ -989,6 +1026,7 @@ def save_calibration():
 
 # Report Generation Routes
 @app.route('/report/<int:pub_id>')
+@login_required
 def publication_report(pub_id):
     """Generate comprehensive publication report"""
     publication = Publication.query.get_or_404(pub_id)

@@ -24,21 +24,25 @@ import csv
 from io import StringIO
 import os
 
-# Production configuration
-if os.environ.get('RAILWAY_ENVIRONMENT'):
-    # Railway-specific configurations
-    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///newspaper_ads.db')
-    # Ensure proper database URL format for SQLAlchemy 2.0+
-    if app.config['SQLALCHEMY_DATABASE_URI'].startswith('postgres://'):
-        app.config['SQLALCHEMY_DATABASE_URI'] = app.config['SQLALCHEMY_DATABASE_URI'].replace('postgres://', 'postgresql://', 1)
-
 # Load environment variables
 load_dotenv()
 
 # Initialize Flask app
 app = Flask(__name__)
-app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')
-app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///newspaper_ads.db')
+
+# Production configuration - MOVED HERE AFTER app is created
+if os.environ.get('RAILWAY_ENVIRONMENT'):
+    # Railway-specific configurations
+    database_url = os.environ.get('DATABASE_URL', 'sqlite:///newspaper_ads.db')
+    # Ensure proper database URL format for SQLAlchemy 2.0+
+    if database_url.startswith('postgres://'):
+        database_url = database_url.replace('postgres://', 'postgresql://', 1)
+    app.config['SQLALCHEMY_DATABASE_URI'] = database_url
+else:
+    app.config['SQLALCHEMY_DATABASE_URI'] = os.environ.get('DATABASE_URL', 'sqlite:///newspaper_ads.db')
+
+# Continue with your existing configuration
+app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', '14f39d4f19a6bcecab0b1b98c3a3a1a32562cfde12c7973f9bd21c8feea5ce2e
 app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 
 # Upload configuration

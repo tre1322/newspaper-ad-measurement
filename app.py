@@ -1325,11 +1325,16 @@ def update_box(box_id):
         
         return jsonify({
             'success': True,
+            'x': int(data['x']),
+            'y': int(data['y']),
+            'width': int(data['width']),
+            'height': int(data['height']),
             'width_raw': float(width_inches_raw),
             'height_raw': float(height_inches_raw),
             'width_rounded': float(width_rounded),
             'height_rounded': float(height_rounded),
-            'column_inches': float(ad_box.column_inches)
+            'column_inches': float(ad_box.column_inches),
+            'ad_type': ad_box.ad_type or 'manual'
         })
         
     except Exception as e:
@@ -1820,11 +1825,16 @@ def update_manual_box(box_id):
         
         return jsonify({
             'success': True,
+            'x': int(data['x']),
+            'y': int(data['y']),
+            'width': int(data['width']),
+            'height': int(data['height']),
             'width_raw': float(width_inches_raw),
             'height_raw': float(height_inches_raw),
             'width_rounded': float(width_rounded),
             'height_rounded': float(height_rounded),
-            'column_inches': float(width_inches_raw * height_inches_raw)
+            'column_inches': float(width_inches_raw * height_inches_raw),
+            'ad_type': 'manual'
         })
         
     except Exception as e:

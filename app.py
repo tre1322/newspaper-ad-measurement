@@ -117,7 +117,7 @@ class AdBox(db.Model):
     width_inches_rounded = db.Column(db.Float, nullable=False)
     height_inches_rounded = db.Column(db.Float, nullable=False)
     column_inches = db.Column(db.Float, nullable=False)
-    ad_type = db.Column(db.String(50), default='manual')  # manual, open_display, entertainment, classified, public_notice
+    ad_type = db.Column(db.String(50), default='manual')  # manual, open_display, classified, public_notice
     is_ad = db.Column(db.Boolean, default=True)
     user_verified = db.Column(db.Boolean, default=False)
     created_date = db.Column(db.DateTime, default=datetime.utcnow)
@@ -144,9 +144,6 @@ PUBLICATION_CONFIGS = {
         'column_standards': {
             'open_display': {
                 1: 1.75, 2: 3.67, 3: 5.6, 4: 7.5, 5: 9.42, 6: 11.33
-            },
-            'entertainment': {
-                1: 1.6, 2: 3.33, 3: 5.1, 4: 6.83, 5: 9.1, 6: 11.0
             },
             'classified': {
                 1: 1.17, 2: 2.5, 3: 3.83, 4: 5.17, 5: 6.5, 6: 7.83, 7: 9.17, 8: 10.5, 9: 11.83
@@ -315,9 +312,7 @@ class IntelligentAdDetector:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
             # Different detection strategies based on ad type
-            if ad_type == 'entertainment':
-                return IntelligentAdDetector._detect_entertainment_ad(gray, click_x, click_y)
-            elif ad_type == 'classified':
+            if ad_type == 'classified':
                 return IntelligentAdDetector._detect_classified_ad(gray, click_x, click_y)
             elif ad_type == 'public_notice':
                 return IntelligentAdDetector._detect_public_notice(gray, click_x, click_y)
@@ -414,130 +409,6 @@ class IntelligentAdDetector:
         y = max(0, min(click_y - default_h//2, img_height - default_h))
         
         return {'x': int(x), 'y': int(y), 'width': int(default_w), 'height': int(default_h)}
-    
-    @staticmethod
-    def _detect_entertainment_ad(gray, click_x, click_y):
-        """Detect individual entertainment ad within the gray entertainment section"""
-        img_height, img_width = gray.shape
-        
-        # First, check if we're in a gray background area (entertainment section)
-        try:
-            # Look for gray background regions
-            lower_gray = np.array([160])
-            upper_gray = np.array([220])
-            mask = cv2.inRange(gray, lower_gray, upper_gray)
-            
-            # Check if click point is in a gray region
-            if click_y < mask.shape[0] and click_x < mask.shape[1] and mask[click_y, click_x] > 0:
-                # We're in an entertainment section - now find individual ads within it
-                return IntelligentAdDetector._detect_individual_entertainment_ad(gray, click_x, click_y, mask)
-        except:
-            pass
-        
-        # Fallback to regular border detection if not in gray area
-        return IntelligentAdDetector._detect_display_ad(gray, click_x, click_y)
-    
-    @staticmethod
-    def _detect_individual_entertainment_ad(gray, click_x, click_y, entertainment_mask):
-        """Detect individual ad within entertainment section"""
-        img_height, img_width = gray.shape
-        
-        # Strategy 1: Look for text blocks or content regions within the entertainment area
-        # Create a region of interest around the click point
-        search_radius = 100
-        roi_x1 = max(0, click_x - search_radius)
-        roi_y1 = max(0, click_y - search_radius)
-        roi_x2 = min(img_width, click_x + search_radius)
-        roi_y2 = min(img_height, click_y + search_radius)
-        
-        roi_gray = gray[roi_y1:roi_y2, roi_x1:roi_x2]
-        roi_mask = entertainment_mask[roi_y1:roi_y2, roi_x1:roi_x2]
-        
-        # Strategy 2: Look for internal structure within the entertainment section
-        # Use more sensitive edge detection to find internal boundaries
-        edges = cv2.Canny(roi_gray, 30, 100, apertureSize=3)
-        
-        # Apply morphological operations to connect text elements
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
-        edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-        
-        # Find contours in the ROI
-        contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        
-        # Adjust click coordinates to ROI space
-        roi_click_x = click_x - roi_x1
-        roi_click_y = click_y - roi_y1
-        
-        # Find contours that contain or are near the click point
-        best_box = None
-        min_distance = float('inf')
-        
-        for contour in contours:
-            x, y, w, h = cv2.boundingRect(contour)
-            
-            # Filter for reasonable ad sizes within entertainment section
-            min_ad_width = 40
-            min_ad_height = 25
-            max_ad_width = roi_gray.shape[1] * 0.9
-            max_ad_height = roi_gray.shape[0] * 0.7
-            
-            if w < min_ad_width or h < min_ad_height or w > max_ad_width or h > max_ad_height:
-                continue
-            
-            # Check if click point is inside or near this rectangle
-            margin = 15
-            if (x - margin <= roi_click_x <= x + w + margin and 
-                y - margin <= roi_click_y <= y + h + margin):
-                
-                # Calculate distance from click point to rectangle center
-                center_x = x + w // 2
-                center_y = y + h // 2
-                distance = ((roi_click_x - center_x) ** 2 + (roi_click_y - center_y) ** 2) ** 0.5
-                
-                if distance < min_distance:
-                    # Check aspect ratio for reasonable ads
-                    aspect_ratio = w / h if h > 0 else 0
-                    if 0.3 <= aspect_ratio <= 4.0:  # Reasonable aspect ratio for ads
-                        # Convert back to full image coordinates
-                        best_box = {
-                            'x': int(x + roi_x1), 
-                            'y': int(y + roi_y1), 
-                            'width': int(w), 
-                            'height': int(h)
-                        }
-                        min_distance = distance
-        
-        if best_box:
-            return best_box
-        
-        # Strategy 3: If no good contours, create a reasonable-sized box around click point
-        # This happens when the ad content is very uniform (solid color, minimal text)
-        default_width = min(120, img_width // 6)  # Reasonable entertainment ad width
-        default_height = min(80, img_height // 10)  # Reasonable entertainment ad height
-        
-        # Center on click point but keep within entertainment area
-        x = max(0, min(click_x - default_width // 2, img_width - default_width))
-        y = max(0, min(click_y - default_height // 2, img_height - default_height))
-        
-        # Make sure the default box is within a gray (entertainment) area
-        if (y + default_height // 2 < entertainment_mask.shape[0] and 
-            x + default_width // 2 < entertainment_mask.shape[1] and
-            entertainment_mask[y + default_height // 2, x + default_width // 2] > 0):
-            
-            return {
-                'x': int(x), 
-                'y': int(y), 
-                'width': int(default_width), 
-                'height': int(default_height)
-            }
-        
-        # Final fallback - very small box at click point
-        return {
-            'x': max(0, click_x - 30), 
-            'y': max(0, click_y - 20), 
-            'width': 60, 
-            'height': 40
-        }
     
     @staticmethod
     def _detect_classified_ad(gray, click_x, click_y):

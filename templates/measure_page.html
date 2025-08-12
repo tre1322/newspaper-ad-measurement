@@ -945,6 +945,9 @@ function copyLastMeasuredAd() {
         column_inches: lastMeasuredAd.column_inches || 0
     };
     
+    console.log('Copying ad with data:', copiedAdData);
+    console.log('Last measured ad was:', lastMeasuredAd);
+    
     // Use the copy API endpoint to preserve exact measurements if we have them,
     // otherwise fall back to manual box creation
     let apiEndpoint = '/api/copy_ad_box/{{ page.id }}';
@@ -1070,6 +1073,8 @@ function createCopiedAdBox(data) {
 
 // Update last measured ad and enable copy button
 function updateLastMeasuredAd(adData) {
+    console.log('updateLastMeasuredAd called with data:', adData);
+    
     lastMeasuredAd = {
         x: adData.x,
         y: adData.y,
@@ -1083,6 +1088,8 @@ function updateLastMeasuredAd(adData) {
         width_rounded: adData.width_rounded,
         height_rounded: adData.height_rounded
     };
+    
+    console.log('lastMeasuredAd updated to:', lastMeasuredAd);
     
     // Enable the copy button
     const copyAdBtn = document.getElementById('copyAdBtn');
@@ -1525,6 +1532,9 @@ function updateManualBoxInDatabase(boxId, boxData) {
             // Update measurements in the sidebar list
             updateManualBoxInSidebar(boxId, data);
             updatePageTotalRegular();
+            
+            // Update last measured ad for copying (this was missing!)
+            updateLastMeasuredAd(data);
         } else {
             console.error('Error updating manual box:', data.error);
         }
@@ -2699,6 +2709,8 @@ function updateBoxInDatabase(boxId, boxData) {
             // Update measurements in the list
             if (isManualBox) {
                 updateManualBoxInSidebar(boxId, data);
+                // Update last measured ad for copying when manual box is resized/moved
+                updateLastMeasuredAd(data);
             } else {
                 updateBoxInMeasurementsList(boxId, data);
             }

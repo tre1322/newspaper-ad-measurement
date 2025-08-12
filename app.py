@@ -117,7 +117,7 @@ class AdBox(db.Model):
     width_inches_rounded = db.Column(db.Float, nullable=False)
     height_inches_rounded = db.Column(db.Float, nullable=False)
     column_inches = db.Column(db.Float, nullable=False)
-    ad_type = db.Column(db.String(50), default='manual')  # manual, open_display, classified, public_notice
+    ad_type = db.Column(db.String(50), default='manual')  # manual, open_display, entertainment, classified, public_notice
     is_ad = db.Column(db.Boolean, default=True)
     user_verified = db.Column(db.Boolean, default=False)
     created_date = db.Column(db.DateTime, default=datetime.utcnow)
@@ -144,6 +144,9 @@ PUBLICATION_CONFIGS = {
         'column_standards': {
             'open_display': {
                 1: 1.75, 2: 3.67, 3: 5.6, 4: 7.5, 5: 9.42, 6: 11.33
+            },
+            'entertainment': {
+                1: 1.6, 2: 3.33, 3: 5.1, 4: 6.83, 5: 9.1, 6: 11.0
             },
             'classified': {
                 1: 1.17, 2: 2.5, 3: 3.83, 4: 5.17, 5: 6.5, 6: 7.83, 7: 9.17, 8: 10.5, 9: 11.83
@@ -312,7 +315,9 @@ class IntelligentAdDetector:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             
             # Different detection strategies based on ad type
-            if ad_type == 'classified':
+            if ad_type == 'entertainment':
+                return IntelligentAdDetector._detect_entertainment_ad(gray, click_x, click_y)
+            elif ad_type == 'classified':
                 return IntelligentAdDetector._detect_classified_ad(gray, click_x, click_y)
             elif ad_type == 'public_notice':
                 return IntelligentAdDetector._detect_public_notice(gray, click_x, click_y)
@@ -329,11 +334,11 @@ class IntelligentAdDetector:
         img_height, img_width = gray.shape
         
         # Primary method: Find contours and match to click point
-        # Use more sensitive edge detection to find internal boundaries
-        edges = cv2.Canny(gray, 30, 120, apertureSize=3)
+        # Use moderate edge detection parameters
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
         
         # Apply slight morphological closing to connect broken edges
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
         
         # Find contours
@@ -347,9 +352,8 @@ class IntelligentAdDetector:
             # Get bounding rectangle
             x, y, w, h = cv2.boundingRect(contour)
             
-            # More restrictive size filter to avoid section containers
-            # Skip very large boxes that are likely section containers (like entertainment sections)
-            if w < 30 or h < 20 or w > img_width * 0.4 or h > img_height * 0.3:
+            # Quick size filter - reasonable ad dimensions
+            if w < 30 or h < 20 or w > img_width * 0.9 or h > img_height * 0.9:
                 continue
             
             # Check if click point is inside or very close to this rectangle
@@ -363,22 +367,17 @@ class IntelligentAdDetector:
                 center_y = y + h // 2
                 distance = ((click_x - center_x) ** 2 + (click_y - center_y) ** 2) ** 0.5
                 
-                # Prefer rectangles closer to click point, but also prefer smaller boxes
-                # This helps avoid large section containers in favor of individual ads
-                area = w * h
-                size_penalty = area / (img_width * img_height)  # Penalty for large boxes (0-1)
-                adjusted_distance = distance + (size_penalty * 1000)  # Add penalty to distance
-                
-                if adjusted_distance < min_distance:
+                # Prefer rectangles closer to click point
+                if distance < min_distance:
                     # Additional validation for reasonable ad proportions
                     aspect_ratio = w / h if h > 0 else 0
+                    area = w * h
                     
                     if (0.2 <= aspect_ratio <= 8.0 and  # Reasonable aspect ratio
-                        area >= 600 and  # Minimum area for an ad
-                        area <= img_width * img_height * 0.15):  # Maximum 15% of page area
+                        area >= 600):  # Minimum area for an ad
                         
                         best_box = {'x': int(x), 'y': int(y), 'width': int(w), 'height': int(h)}
-                        min_distance = adjusted_distance
+                        min_distance = distance
         
         if best_box:
             return best_box
@@ -415,6 +414,43 @@ class IntelligentAdDetector:
         y = max(0, min(click_y - default_h//2, img_height - default_h))
         
         return {'x': int(x), 'y': int(y), 'width': int(default_w), 'height': int(default_h)}
+    
+    @staticmethod
+    def _detect_entertainment_ad(gray, click_x, click_y):
+        """Detect entertainment ad with gray background"""
+        # Try gray background detection first
+        try:
+            # Look for gray background regions
+            lower_gray = np.array([160])
+            upper_gray = np.array([220])
+            mask = cv2.inRange(gray, lower_gray, upper_gray)
+            
+            # Find connected components
+            num_labels, labels = cv2.connectedComponents(mask)
+            
+            # Check if click point is in a gray region
+            if (click_y < labels.shape[0] and click_x < labels.shape[1] and 
+                labels[click_y, click_x] > 0):
+                
+                label = labels[click_y, click_x]
+                coords = np.where(labels == label)
+                y_min, y_max = coords[0].min(), coords[0].max()
+                x_min, x_max = coords[1].min(), coords[1].max()
+                
+                width = x_max - x_min
+                height = y_max - y_min
+                
+                # Validate reasonable size
+                if width > 50 and height > 30 and width < gray.shape[1] * 0.8 and height < gray.shape[0] * 0.8:
+                    return {
+                        'x': int(x_min), 'y': int(y_min), 
+                        'width': int(width), 'height': int(height)
+                    }
+        except:
+            pass
+        
+        # Fallback to regular border detection
+        return IntelligentAdDetector._detect_display_ad(gray, click_x, click_y)
     
     @staticmethod
     def _detect_classified_ad(gray, click_x, click_y):

@@ -1831,6 +1831,55 @@ def update_manual_box(box_id):
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)})
 
+@app.route('/api/copy_ad_box/<int:page_id>', methods=['POST'])
+def copy_ad_box(page_id):
+    """Copy an ad box with exact measurements"""
+    page = Page.query.get_or_404(page_id)
+    publication = Publication.query.get(page.publication_id)
+    data = request.json
+    
+    try:
+        # Create ad box record with the exact measurements from the original
+        ad_box = AdBox(
+            page_id=page_id,
+            x=data['x'],
+            y=data['y'],
+            width=data['width'],
+            height=data['height'],
+            width_inches_raw=data.get('width_raw', 0),
+            height_inches_raw=data.get('height_raw', 0),
+            width_inches_rounded=data.get('width_rounded', 0),
+            height_inches_rounded=data.get('height_rounded', 0),
+            column_inches=data.get('column_inches', 0),
+            ad_type=data.get('ad_type', 'manual'),
+            user_verified=True
+        )
+        
+        db.session.add(ad_box)
+        db.session.commit()
+        
+        # Recalculate totals
+        update_totals(page_id)
+        
+        return jsonify({
+            'success': True,
+            'box_id': ad_box.id,
+            'x': int(data['x']),
+            'y': int(data['y']),
+            'width': int(data['width']),
+            'height': int(data['height']),
+            'width_raw': float(data.get('width_raw', 0)),
+            'height_raw': float(data.get('height_raw', 0)),
+            'width_rounded': float(data.get('width_rounded', 0)),
+            'height_rounded': float(data.get('height_rounded', 0)),
+            'column_inches': float(data.get('column_inches', 0)),
+            'ad_type': data.get('ad_type', 'manual')
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
 # Create database tables
 with app.app_context():
     db.create_all()

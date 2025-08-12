@@ -936,16 +936,29 @@ function copyLastMeasuredAd() {
         y: lastMeasuredAd.y + offset,
         width: lastMeasuredAd.width,
         height: lastMeasuredAd.height,
-        ad_type: lastMeasuredAd.ad_type || 'manual'
+        ad_type: lastMeasuredAd.ad_type || 'manual',
+        // Pass the exact measurements to preserve them
+        width_raw: lastMeasuredAd.width_raw || 0,
+        height_raw: lastMeasuredAd.height_raw || 0,
+        width_rounded: lastMeasuredAd.width_rounded || 0,
+        height_rounded: lastMeasuredAd.height_rounded || 0,
+        column_inches: lastMeasuredAd.column_inches || 0
     };
     
-    // Call the appropriate API based on ad type
-    let apiEndpoint = '/api/add_manual_box/{{ page.id }}';
-    if (lastMeasuredAd.ad_type && lastMeasuredAd.ad_type !== 'manual') {
-        // For intelligent detection types, use the intelligent detect API
-        apiEndpoint = '/api/intelligent_detect/{{ page.id }}';
-        // But we'll create it as a manual box since we already have the measurements
+    // Use the copy API endpoint to preserve exact measurements if we have them,
+    // otherwise fall back to manual box creation
+    let apiEndpoint = '/api/copy_ad_box/{{ page.id }}';
+    
+    // If we don't have detailed measurements (e.g., from page load initialization),
+    // fall back to regular manual box creation
+    if (!lastMeasuredAd.width_raw && !lastMeasuredAd.height_raw && !lastMeasuredAd.column_inches) {
         apiEndpoint = '/api/add_manual_box/{{ page.id }}';
+        // Remove the measurement fields for the manual API
+        delete copiedAdData.width_raw;
+        delete copiedAdData.height_raw;
+        delete copiedAdData.width_rounded;
+        delete copiedAdData.height_rounded;
+        delete copiedAdData.column_inches;
     }
     
     fetch(apiEndpoint, {
@@ -1063,7 +1076,12 @@ function updateLastMeasuredAd(adData) {
         width: adData.width,
         height: adData.height,
         ad_type: adData.ad_type || 'manual',
-        column_inches: adData.column_inches
+        column_inches: adData.column_inches,
+        // Store the exact measurements returned by the server
+        width_raw: adData.width_raw,
+        height_raw: adData.height_raw,
+        width_rounded: adData.width_rounded,
+        height_rounded: adData.height_rounded
     };
     
     // Enable the copy button

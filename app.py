@@ -329,11 +329,11 @@ class IntelligentAdDetector:
         img_height, img_width = gray.shape
         
         # Primary method: Find contours and match to click point
-        # Use moderate edge detection parameters
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        # Use more sensitive edge detection to find internal boundaries
+        edges = cv2.Canny(gray, 30, 120, apertureSize=3)
         
         # Apply slight morphological closing to connect broken edges
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
         edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
         
         # Find contours
@@ -347,8 +347,9 @@ class IntelligentAdDetector:
             # Get bounding rectangle
             x, y, w, h = cv2.boundingRect(contour)
             
-            # Quick size filter - reasonable ad dimensions
-            if w < 30 or h < 20 or w > img_width * 0.9 or h > img_height * 0.9:
+            # More restrictive size filter to avoid section containers
+            # Skip very large boxes that are likely section containers (like entertainment sections)
+            if w < 30 or h < 20 or w > img_width * 0.4 or h > img_height * 0.3:
                 continue
             
             # Check if click point is inside or very close to this rectangle
@@ -362,17 +363,22 @@ class IntelligentAdDetector:
                 center_y = y + h // 2
                 distance = ((click_x - center_x) ** 2 + (click_y - center_y) ** 2) ** 0.5
                 
-                # Prefer rectangles closer to click point
-                if distance < min_distance:
+                # Prefer rectangles closer to click point, but also prefer smaller boxes
+                # This helps avoid large section containers in favor of individual ads
+                area = w * h
+                size_penalty = area / (img_width * img_height)  # Penalty for large boxes (0-1)
+                adjusted_distance = distance + (size_penalty * 1000)  # Add penalty to distance
+                
+                if adjusted_distance < min_distance:
                     # Additional validation for reasonable ad proportions
                     aspect_ratio = w / h if h > 0 else 0
-                    area = w * h
                     
                     if (0.2 <= aspect_ratio <= 8.0 and  # Reasonable aspect ratio
-                        area >= 600):  # Minimum area for an ad
+                        area >= 600 and  # Minimum area for an ad
+                        area <= img_width * img_height * 0.15):  # Maximum 15% of page area
                         
                         best_box = {'x': int(x), 'y': int(y), 'width': int(w), 'height': int(h)}
-                        min_distance = distance
+                        min_distance = adjusted_distance
         
         if best_box:
             return best_box

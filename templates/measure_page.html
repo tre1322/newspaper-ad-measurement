@@ -374,6 +374,9 @@
                     <button type="button" class="btn btn-warning" id="fullPageAdBtn" title="Add Full-page Ad (258 inches)">
                         <i class="fas fa-newspaper"></i> Full-page Ad
                     </button>
+                    <button type="button" class="btn btn-info" id="copyAdBtn" title="Copy last measured ad box" disabled>
+                        <i class="fas fa-copy"></i> Copy Ad Measurement
+                    </button>
                     {% endif %}
                     <a href="{{ url_for('publication_report', pub_id=publication.id) }}" class="btn btn-success" title="Generate comprehensive report">
                         <i class="fas fa-chart-bar"></i> Generate Report
@@ -602,6 +605,7 @@ let currentZoom = 1.0;
 let minZoom = 0.25;
 let maxZoom = 3.0;
 let zoomStep = 0.25;
+let lastMeasuredAd = null; // Store the last measured ad for copying
 
 // Initialize when page loads
 document.addEventListener('DOMContentLoaded', function() {
@@ -619,6 +623,12 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Initialize full-page ad functionality
     setupFullPageAdButton();
+    
+    // Initialize copy ad functionality
+    setupCopyAdButton();
+    
+    // Initialize copy button based on existing ad boxes
+    initializeCopyButtonState();
     
     // Auto-fit the page to container width
     autoFitPageToContainer();
@@ -709,6 +719,21 @@ function setupFullPageAdButton() {
             
             if (confirm(confirmMessage)) {
                 addFullPageAd();
+            }
+        });
+    }
+}
+
+// Copy Ad functionality
+function setupCopyAdButton() {
+    const copyAdBtn = document.getElementById('copyAdBtn');
+    
+    if (copyAdBtn) {
+        copyAdBtn.addEventListener('click', function() {
+            if (lastMeasuredAd) {
+                copyLastMeasuredAd();
+            } else {
+                showErrorMessage('No ad measurement to copy. Please create or measure an ad first.');
             }
         });
     }
@@ -891,6 +916,213 @@ function updatePageTotalForFullPage() {
     }, 1000);
 }
 
+// Copy the last measured ad functionality
+function copyLastMeasuredAd() {
+    if (!lastMeasuredAd) {
+        showErrorMessage('No ad measurement to copy.');
+        return;
+    }
+    
+    // Show loading indicator
+    const copyAdBtn = document.getElementById('copyAdBtn');
+    const originalText = copyAdBtn.innerHTML;
+    copyAdBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Copying...';
+    copyAdBtn.disabled = true;
+    
+    // Create a copy of the last measured ad with a slight offset so it's visible
+    const offset = 20;
+    const copiedAdData = {
+        x: lastMeasuredAd.x + offset,
+        y: lastMeasuredAd.y + offset,
+        width: lastMeasuredAd.width,
+        height: lastMeasuredAd.height,
+        ad_type: lastMeasuredAd.ad_type || 'manual'
+    };
+    
+    // Call the appropriate API based on ad type
+    let apiEndpoint = '/api/add_manual_box/{{ page.id }}';
+    if (lastMeasuredAd.ad_type && lastMeasuredAd.ad_type !== 'manual') {
+        // For intelligent detection types, use the intelligent detect API
+        apiEndpoint = '/api/intelligent_detect/{{ page.id }}';
+        // But we'll create it as a manual box since we already have the measurements
+        apiEndpoint = '/api/add_manual_box/{{ page.id }}';
+    }
+    
+    fetch(apiEndpoint, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(copiedAdData)
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            // Create the visual ad box
+            createCopiedAdBox(data);
+            
+            // Update measurements panel
+            addBoxToMeasurementsList(data);
+            
+            // Update page total
+            updatePageTotalRegular();
+            
+            // Update lastMeasuredAd to the new copied ad
+            updateLastMeasuredAd(data);
+            
+            showSuccessMessage('Ad measurement copied successfully!');
+        } else {
+            showErrorMessage('Error copying ad measurement: ' + data.error);
+        }
+        
+        // Reset button
+        copyAdBtn.innerHTML = originalText;
+        copyAdBtn.disabled = false;
+    })
+    .catch(error => {
+        console.error('Error:', error);
+        showErrorMessage('Network error occurred while copying ad');
+        
+        // Reset button
+        copyAdBtn.innerHTML = originalText;
+        copyAdBtn.disabled = false;
+    });
+}
+
+function createCopiedAdBox(data) {
+    const pageContainer = document.getElementById('pageContainer');
+    
+    // Create the ad box element
+    const adBox = document.createElement('div');
+    adBox.className = 'ad-box manual-box';
+    adBox.dataset.boxId = data.box_id;
+    adBox.style.position = 'absolute';
+    adBox.style.left = data.x + 'px';
+    adBox.style.top = data.y + 'px';
+    adBox.style.width = data.width + 'px';
+    adBox.style.height = data.height + 'px';
+    adBox.style.border = '2px solid #007bff';
+    adBox.style.background = 'rgba(0, 123, 255, 0.1)';
+    adBox.style.cursor = 'move';
+    adBox.style.userSelect = 'none';
+    
+    // Add label
+    const label = document.createElement('div');
+    label.className = 'ad-label';
+    label.style.position = 'absolute';
+    label.style.top = '2px';
+    label.style.left = '2px';
+    label.style.background = 'rgba(0, 123, 255, 0.9)';
+    label.style.color = 'white';
+    label.style.padding = '2px 6px';
+    label.style.fontSize = '11px';
+    label.style.borderRadius = '3px';
+    label.style.fontWeight = 'bold';
+    label.style.pointerEvents = 'none';
+    label.textContent = data.column_inches.toFixed(1) + '"';
+    adBox.appendChild(label);
+    
+    // Add delete button
+    const deleteBtn = document.createElement('button');
+    deleteBtn.className = 'delete-btn';
+    deleteBtn.innerHTML = '×';
+    deleteBtn.style.position = 'absolute';
+    deleteBtn.style.top = '-8px';
+    deleteBtn.style.right = '-8px';
+    deleteBtn.style.background = '#dc3545';
+    deleteBtn.style.color = 'white';
+    deleteBtn.style.border = 'none';
+    deleteBtn.style.borderRadius = '50%';
+    deleteBtn.style.width = '18px';
+    deleteBtn.style.height = '18px';
+    deleteBtn.style.fontSize = '12px';
+    deleteBtn.style.cursor = 'pointer';
+    deleteBtn.style.display = 'flex';
+    deleteBtn.style.alignItems = 'center';
+    deleteBtn.style.justifyContent = 'center';
+    deleteBtn.style.zIndex = '10';
+    deleteBtn.onclick = function(e) {
+        e.stopPropagation();
+        if (confirm('Delete this advertisement box?')) {
+            deleteAdBox(data.box_id);
+        }
+    };
+    adBox.appendChild(deleteBtn);
+    
+    // Make it draggable
+    makeDraggable(adBox);
+    
+    pageContainer.appendChild(adBox);
+}
+
+// Update last measured ad and enable copy button
+function updateLastMeasuredAd(adData) {
+    lastMeasuredAd = {
+        x: adData.x,
+        y: adData.y,
+        width: adData.width,
+        height: adData.height,
+        ad_type: adData.ad_type || 'manual',
+        column_inches: adData.column_inches
+    };
+    
+    // Enable the copy button
+    const copyAdBtn = document.getElementById('copyAdBtn');
+    if (copyAdBtn) {
+        copyAdBtn.disabled = false;
+        copyAdBtn.title = `Copy last measured ad (${adData.column_inches.toFixed(1)}" inches)`;
+    }
+}
+
+// Initialize copy button state based on existing ad boxes
+function initializeCopyButtonState() {
+    // Check if there are any existing ad boxes
+    const existingBoxes = document.querySelectorAll('.ad-box, .measurement-box');
+    if (existingBoxes.length > 0) {
+        // Get the last (most recently added) box's data
+        const lastBox = existingBoxes[existingBoxes.length - 1];
+        const boxId = lastBox.dataset.boxId;
+        
+        // Extract box dimensions and position
+        const rect = lastBox.getBoundingClientRect();
+        const pageContainer = document.getElementById('pageContainer');
+        const containerRect = pageContainer.getBoundingClientRect();
+        
+        // Calculate relative position to page container
+        const x = parseInt(lastBox.style.left) || 0;
+        const y = parseInt(lastBox.style.top) || 0;
+        const width = parseInt(lastBox.style.width) || rect.width;
+        const height = parseInt(lastBox.style.height) || rect.height;
+        
+        // Try to get column inches from the ad label or calculate it
+        let columnInches = 0;
+        const label = lastBox.querySelector('.ad-label');
+        if (label && label.textContent) {
+            const match = label.textContent.match(/(\d+\.?\d*)/);
+            if (match) {
+                columnInches = parseFloat(match[1]);
+            }
+        }
+        
+        // Set up lastMeasuredAd with the most recent box
+        lastMeasuredAd = {
+            x: x,
+            y: y,
+            width: width,
+            height: height,
+            ad_type: 'manual', // Default to manual for existing boxes
+            column_inches: columnInches
+        };
+        
+        // Enable the copy button
+        const copyAdBtn = document.getElementById('copyAdBtn');
+        if (copyAdBtn && columnInches > 0) {
+            copyAdBtn.disabled = false;
+            copyAdBtn.title = `Copy last measured ad (${columnInches.toFixed(1)}" inches)`;
+        }
+    }
+}
+
 function deleteFullPageAd(boxId) {
     fetch(`/api/delete_box/${boxId}`, {
         method: 'DELETE'
@@ -1054,6 +1286,9 @@ function createManualBoxElement(data) {
     
     // Initialize custom manual box interaction
     initializeManualBoxInteraction(manualBox);
+    
+    // Update last measured ad for copying
+    updateLastMeasuredAd(data);
 }
 
 function initializeManualBoxInteraction(box) {
@@ -1819,6 +2054,9 @@ function addDetectedAdBox(data) {
     
     // Add to sidebar list
     addAdToSidebar(data);
+    
+    // Update last measured ad for copying
+    updateLastMeasuredAd(data);
 }
 
 

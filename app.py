@@ -1823,6 +1823,40 @@ def update_box(box_id):
         
         db.session.commit()
         
+        # Automatically extract features for ML training when user modifies ad
+        try:
+            image_filename = f"{publication.filename}_page_{page.page_number}.png"
+            image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+            
+            if os.path.exists(image_path):
+                box_coords = {'x': data['x'], 'y': data['y'], 'width': data['width'], 'height': data['height']}
+                features = AdLearningEngine.extract_features(image_path, box_coords)
+                
+                if features:
+                    # Update or create training data
+                    existing = TrainingData.query.filter_by(ad_box_id=ad_box.id).first()
+                    if existing:
+                        # Update existing training data
+                        existing.features = json.dumps(features)
+                        existing.label = ad_box.ad_type or 'manual'
+                        existing.extracted_date = datetime.utcnow()
+                        print(f"Updated ML features for modified ad box {ad_box.id}")
+                    else:
+                        # Create new training data
+                        training_data = TrainingData(
+                            ad_box_id=ad_box.id,
+                            publication_type=publication.publication_type,
+                            features=json.dumps(features),
+                            label=ad_box.ad_type or 'manual',
+                            confidence_score=1.0
+                        )
+                        db.session.add(training_data)
+                        print(f"Extracted ML features for updated ad box {ad_box.id}")
+                    
+                    db.session.commit()
+        except Exception as e:
+            print(f"Warning: Could not extract features for training: {e}")
+        
         # Recalculate page and publication totals
         update_totals(ad_box.page_id)
         
@@ -1908,6 +1942,32 @@ def add_box(page_id):
         
         db.session.add(ad_box)
         db.session.commit()
+        
+        # Automatically extract features for ML training
+        try:
+            image_filename = f"{publication.filename}_page_{page.page_number}.png"
+            image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+            
+            if os.path.exists(image_path):
+                box_coords = {'x': data['x'], 'y': data['y'], 'width': data['width'], 'height': data['height']}
+                features = AdLearningEngine.extract_features(image_path, box_coords)
+                
+                if features:
+                    # Check if training data already exists
+                    existing = TrainingData.query.filter_by(ad_box_id=ad_box.id).first()
+                    if not existing:
+                        training_data = TrainingData(
+                            ad_box_id=ad_box.id,
+                            publication_type=publication.publication_type,
+                            features=json.dumps(features),
+                            label=ad_box.ad_type,
+                            confidence_score=1.0
+                        )
+                        db.session.add(training_data)
+                        db.session.commit()
+                        print(f"Extracted ML features for new ad box {ad_box.id}")
+        except Exception as e:
+            print(f"Warning: Could not extract features for training: {e}")
         
         # Recalculate totals
         update_totals(page_id)
@@ -2006,6 +2066,28 @@ def intelligent_detect_ad(page_id):
         
         db.session.add(ad_box)
         db.session.commit()
+        
+        # Automatically extract features for ML training
+        try:
+            box_coords = {'x': detected_box['x'], 'y': detected_box['y'], 'width': detected_box['width'], 'height': detected_box['height']}
+            features = AdLearningEngine.extract_features(image_path, box_coords)
+            
+            if features:
+                # Check if training data already exists
+                existing = TrainingData.query.filter_by(ad_box_id=ad_box.id).first()
+                if not existing:
+                    training_data = TrainingData(
+                        ad_box_id=ad_box.id,
+                        publication_type=publication.publication_type,
+                        features=json.dumps(features),
+                        label=ad_type,
+                        confidence_score=1.0
+                    )
+                    db.session.add(training_data)
+                    db.session.commit()
+                    print(f"Extracted ML features for intelligent detection ad {ad_box.id}")
+        except Exception as e:
+            print(f"Warning: Could not extract features for training: {e}")
         
         # Update totals
         update_totals(page_id)

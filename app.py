@@ -24,6 +24,15 @@ import tempfile
 import csv
 from io import StringIO
 import os
+import json
+import pickle
+import joblib
+from sklearn.ensemble import RandomForestClassifier, GradientBoostingClassifier
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import accuracy_score, classification_report
+from sklearn.preprocessing import StandardScaler
+from scipy import ndimage
+from datetime import timedelta
 
 # Load environment variables
 load_dotenv()
@@ -134,6 +143,30 @@ class ScreenCalibration(db.Model):
     calibration_date = db.Column(db.DateTime, default=datetime.utcnow)
     user_agent = db.Column(db.Text)
     is_active = db.Column(db.Boolean, default=True)
+
+class MLModel(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    model_name = db.Column(db.String(100), nullable=False)
+    model_type = db.Column(db.String(50), nullable=False)  # 'ad_detector', 'ad_classifier'
+    publication_type = db.Column(db.String(50), nullable=False)  # 'broadsheet', 'special_edition', 'peach'
+    version = db.Column(db.String(20), nullable=False)
+    model_data = db.Column(db.LargeBinary)  # Serialized model
+    training_accuracy = db.Column(db.Float)
+    validation_accuracy = db.Column(db.Float)
+    training_samples = db.Column(db.Integer)
+    feature_names = db.Column(db.Text)  # JSON list of feature names
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+    is_active = db.Column(db.Boolean, default=False)
+
+class TrainingData(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    ad_box_id = db.Column(db.Integer, db.ForeignKey('ad_box.id'), nullable=False)
+    publication_type = db.Column(db.String(50), nullable=False)
+    features = db.Column(db.Text)  # JSON serialized feature vector
+    label = db.Column(db.String(50), nullable=False)  # ad type or 'not_ad'
+    confidence_score = db.Column(db.Float)  # User confidence in this label
+    extracted_date = db.Column(db.DateTime, default=datetime.utcnow)
+    used_in_training = db.Column(db.Boolean, default=False)
 
 # Publication configurations
 PUBLICATION_CONFIGS = {
@@ -489,6 +522,456 @@ class IntelligentAdDetector:
         
         # Round up to next 0.5" increment
         return math.ceil(height_inches * 2) / 2
+
+# AI Learning Engine for Automatic Ad Detection
+class AdLearningEngine:
+    """
+    AI Learning system that learns from user-verified ad identifications
+    to automatically detect ads in future publications
+    """
+    
+    @staticmethod
+    def extract_features(image_path, box_coords):
+        """Extract comprehensive features from an ad region for ML training"""
+        try:
+            # Load image
+            img = cv2.imread(image_path)
+            if img is None:
+                return None
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            x, y, w, h = int(box_coords['x']), int(box_coords['y']), int(box_coords['width']), int(box_coords['height'])
+            
+            # Extract region of interest
+            roi = gray[y:y+h, x:x+w]
+            if roi.size == 0:
+                return None
+            
+            # Feature extraction
+            features = {}
+            
+            # 1. Basic geometric features
+            features['width'] = w
+            features['height'] = h
+            features['area'] = w * h
+            features['aspect_ratio'] = w / h if h > 0 else 0
+            features['perimeter'] = 2 * (w + h)
+            
+            # 2. Position features (normalized by image size)
+            img_h, img_w = gray.shape
+            features['x_normalized'] = x / img_w
+            features['y_normalized'] = y / img_h
+            features['center_x_normalized'] = (x + w/2) / img_w
+            features['center_y_normalized'] = (y + h/2) / img_h
+            
+            # 3. Content analysis features
+            features['mean_intensity'] = np.mean(roi)
+            features['std_intensity'] = np.std(roi)
+            features['min_intensity'] = np.min(roi)
+            features['max_intensity'] = np.max(roi)
+            features['intensity_range'] = features['max_intensity'] - features['min_intensity']
+            
+            # 4. Texture analysis
+            # Calculate local binary patterns
+            roi_padded = np.pad(roi, 1, mode='edge')
+            lbp_like = 0
+            for i in range(1, roi.shape[0]-1):
+                for j in range(1, roi.shape[1]-1):
+                    center = roi_padded[i+1, j+1]
+                    binary_str = ''
+                    for di in [-1, -1, -1, 0, 0, 1, 1, 1]:
+                        for dj in [-1, 0, 1, -1, 1, -1, 0, 1]:
+                            if roi_padded[i+1+di, j+1+dj] > center:
+                                binary_str += '1'
+                            else:
+                                binary_str += '0'
+                            break  # Only check one neighbor per direction
+                    if len(binary_str) > 0:
+                        lbp_like += int(binary_str, 2) % 256
+            features['texture_complexity'] = lbp_like / (roi.shape[0] * roi.shape[1]) if roi.size > 0 else 0
+            
+            # 5. Edge density features
+            edges = cv2.Canny(roi, 50, 150)
+            features['edge_density'] = np.sum(edges > 0) / edges.size
+            
+            # 6. Border analysis
+            border_thickness = min(3, min(w, h) // 4)
+            if border_thickness > 0:
+                try:
+                    top_border = roi[:border_thickness, :].mean()
+                    bottom_border = roi[-border_thickness:, :].mean()
+                    left_border = roi[:, :border_thickness].mean()
+                    right_border = roi[:, -border_thickness:].mean()
+                    center = roi[border_thickness:-border_thickness, border_thickness:-border_thickness].mean()
+                    
+                    features['border_contrast'] = (abs(top_border - center) + abs(bottom_border - center) + 
+                                                 abs(left_border - center) + abs(right_border - center)) / 4
+                    features['border_uniformity'] = np.std([top_border, bottom_border, left_border, right_border])
+                except:
+                    features['border_contrast'] = 0
+                    features['border_uniformity'] = 0
+            else:
+                features['border_contrast'] = 0
+                features['border_uniformity'] = 0
+            
+            # 7. White space analysis
+            binary_roi = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            features['white_ratio'] = np.sum(binary_roi == 255) / binary_roi.size
+            features['black_ratio'] = np.sum(binary_roi == 0) / binary_roi.size
+            
+            # 8. Connected components analysis
+            num_labels, labels = cv2.connectedComponents(binary_roi)
+            features['num_components'] = num_labels - 1  # Exclude background
+            
+            # 9. Gradient features
+            grad_x = cv2.Sobel(roi, cv2.CV_64F, 1, 0, ksize=3)
+            grad_y = cv2.Sobel(roi, cv2.CV_64F, 0, 1, ksize=3)
+            gradient_magnitude = np.sqrt(grad_x**2 + grad_y**2)
+            features['gradient_mean'] = np.mean(gradient_magnitude)
+            features['gradient_std'] = np.std(gradient_magnitude)
+            
+            # 10. Rectangularity (how rectangular the content is)
+            contours, _ = cv2.findContours(binary_roi, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            if contours:
+                largest_contour = max(contours, key=cv2.contourArea)
+                contour_area = cv2.contourArea(largest_contour)
+                bounding_area = w * h
+                features['rectangularity'] = contour_area / bounding_area if bounding_area > 0 else 0
+            else:
+                features['rectangularity'] = 0
+            
+            return features
+            
+        except Exception as e:
+            print(f"Error extracting features: {e}")
+            return None
+    
+    @staticmethod
+    def collect_training_data():
+        """Collect features from all user-verified ad boxes for training"""
+        training_samples = []
+        
+        # Get all user-verified ad boxes
+        verified_boxes = AdBox.query.filter_by(user_verified=True).all()
+        
+        for ad_box in verified_boxes:
+            try:
+                # Get page and publication info
+                page = Page.query.get(ad_box.page_id)
+                publication = Publication.query.get(page.publication_id)
+                
+                # Get image path
+                image_filename = f"{publication.filename}_page_{page.page_number}.png"
+                image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+                
+                if not os.path.exists(image_path):
+                    continue
+                
+                # Extract features
+                box_coords = {
+                    'x': ad_box.x, 'y': ad_box.y, 
+                    'width': ad_box.width, 'height': ad_box.height
+                }
+                features = AdLearningEngine.extract_features(image_path, box_coords)
+                
+                if features:
+                    # Check if training data already exists
+                    existing = TrainingData.query.filter_by(ad_box_id=ad_box.id).first()
+                    
+                    if not existing:
+                        # Create new training data record
+                        training_data = TrainingData(
+                            ad_box_id=ad_box.id,
+                            publication_type=publication.publication_type,
+                            features=json.dumps(features),
+                            label=ad_box.ad_type or 'manual',
+                            confidence_score=1.0  # User-verified = high confidence
+                        )
+                        db.session.add(training_data)
+                        training_samples.append(training_data)
+            
+            except Exception as e:
+                print(f"Error processing ad box {ad_box.id}: {e}")
+                continue
+        
+        db.session.commit()
+        return len(training_samples)
+    
+    @staticmethod
+    def train_model(publication_type='broadsheet', min_samples=20):
+        """Train ML model for ad detection"""
+        try:
+            # Collect fresh training data
+            AdLearningEngine.collect_training_data()
+            
+            # Get training data for this publication type
+            training_data = TrainingData.query.filter_by(publication_type=publication_type).all()
+            
+            if len(training_data) < min_samples:
+                return {
+                    'success': False, 
+                    'error': f'Need at least {min_samples} training samples, have {len(training_data)}'
+                }
+            
+            # Prepare training data
+            X = []  # Features
+            y = []  # Labels
+            feature_names = None
+            
+            for data in training_data:
+                features_dict = json.loads(data.features)
+                if feature_names is None:
+                    feature_names = sorted(features_dict.keys())
+                
+                # Convert to feature vector
+                feature_vector = [features_dict.get(name, 0) for name in feature_names]
+                X.append(feature_vector)
+                y.append(data.label)
+            
+            X = np.array(X)
+            y = np.array(y)
+            
+            # Split data
+            X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
+            
+            # Scale features
+            scaler = StandardScaler()
+            X_train_scaled = scaler.fit_transform(X_train)
+            X_test_scaled = scaler.transform(X_test)
+            
+            # Train model - use RandomForest for good interpretability
+            model = RandomForestClassifier(
+                n_estimators=100,
+                max_depth=10,
+                random_state=42,
+                class_weight='balanced'
+            )
+            
+            model.fit(X_train_scaled, y_train)
+            
+            # Evaluate
+            train_accuracy = accuracy_score(y_train, model.predict(X_train_scaled))
+            test_accuracy = accuracy_score(y_test, model.predict(X_test_scaled))
+            
+            # Create model package
+            model_package = {
+                'model': model,
+                'scaler': scaler,
+                'feature_names': feature_names,
+                'label_encoder': None  # Using string labels directly
+            }
+            
+            # Serialize model
+            model_data = pickle.dumps(model_package)
+            
+            # Deactivate old models
+            MLModel.query.filter_by(
+                publication_type=publication_type,
+                model_type='ad_detector'
+            ).update({'is_active': False})
+            
+            # Save new model
+            version = datetime.now().strftime("%Y%m%d_%H%M%S")
+            ml_model = MLModel(
+                model_name=f"ad_detector_{publication_type}_{version}",
+                model_type='ad_detector',
+                publication_type=publication_type,
+                version=version,
+                model_data=model_data,
+                training_accuracy=train_accuracy,
+                validation_accuracy=test_accuracy,
+                training_samples=len(training_data),
+                feature_names=json.dumps(feature_names),
+                is_active=True
+            )
+            
+            db.session.add(ml_model)
+            db.session.commit()
+            
+            return {
+                'success': True,
+                'model_id': ml_model.id,
+                'training_accuracy': train_accuracy,
+                'validation_accuracy': test_accuracy,
+                'training_samples': len(training_data),
+                'feature_count': len(feature_names)
+            }
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    @staticmethod
+    def predict_ads(image_path, publication_type='broadsheet', confidence_threshold=0.7):
+        """Use trained ML model to predict ad locations"""
+        try:
+            # Get active model
+            ml_model = MLModel.query.filter_by(
+                publication_type=publication_type,
+                model_type='ad_detector',
+                is_active=True
+            ).first()
+            
+            if not ml_model:
+                return {'success': False, 'error': 'No trained model available'}
+            
+            # Load model
+            model_package = pickle.loads(ml_model.model_data)
+            model = model_package['model']
+            scaler = model_package['scaler']
+            feature_names = model_package['feature_names']
+            
+            # First use existing CV detection to find candidate regions
+            img = cv2.imread(image_path)
+            if img is None:
+                return {'success': False, 'error': 'Could not load image'}
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            
+            # Use existing edge detection to find candidates
+            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
+            
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            predicted_ads = []
+            img_height, img_width = img.shape[:2]
+            
+            for contour in contours:
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # Basic size filtering
+                if (w < 30 or h < 20 or w > img_width * 0.9 or h > img_height * 0.9 or
+                    w * h < 600):  # Too small
+                    continue
+                
+                # Extract features for this candidate region
+                box_coords = {'x': x, 'y': y, 'width': w, 'height': h}
+                features_dict = AdLearningEngine.extract_features(image_path, box_coords)
+                
+                if not features_dict:
+                    continue
+                
+                # Convert to feature vector
+                feature_vector = [features_dict.get(name, 0) for name in feature_names]
+                feature_vector = np.array(feature_vector).reshape(1, -1)
+                
+                # Scale features
+                feature_vector_scaled = scaler.transform(feature_vector)
+                
+                # Get prediction and confidence
+                prediction = model.predict(feature_vector_scaled)[0]
+                confidence = np.max(model.predict_proba(feature_vector_scaled)[0])
+                
+                # Only include high-confidence predictions that are actual ad types
+                if (confidence >= confidence_threshold and 
+                    prediction in ['manual', 'open_display', 'entertainment', 'classified', 'public_notice']):
+                    
+                    predicted_ads.append({
+                        'x': int(x),
+                        'y': int(y),
+                        'width': int(w),
+                        'height': int(h),
+                        'predicted_type': prediction,
+                        'confidence': float(confidence),
+                        'features': features_dict
+                    })
+            
+            # Remove overlapping predictions (keep highest confidence)
+            predicted_ads = AdLearningEngine._remove_overlapping_predictions(predicted_ads)
+            
+            return {
+                'success': True,
+                'predictions': predicted_ads,
+                'model_version': ml_model.version,
+                'model_accuracy': ml_model.validation_accuracy
+            }
+            
+        except Exception as e:
+            return {'success': False, 'error': str(e)}
+    
+    @staticmethod
+    def _remove_overlapping_predictions(predictions, overlap_threshold=0.3):
+        """Remove overlapping predictions, keeping highest confidence"""
+        if not predictions:
+            return predictions
+        
+        # Sort by confidence (descending)
+        predictions = sorted(predictions, key=lambda x: x['confidence'], reverse=True)
+        
+        filtered_predictions = []
+        for pred in predictions:
+            overlap_found = False
+            for existing_pred in filtered_predictions:
+                if AdLearningEngine._calculate_overlap(pred, existing_pred) > overlap_threshold:
+                    overlap_found = True
+                    break
+            
+            if not overlap_found:
+                filtered_predictions.append(pred)
+        
+        return filtered_predictions
+    
+    @staticmethod
+    def _calculate_overlap(pred1, pred2):
+        """Calculate overlap ratio between two predictions"""
+        x1_min, y1_min = pred1['x'], pred1['y']
+        x1_max, y1_max = x1_min + pred1['width'], y1_min + pred1['height']
+        
+        x2_min, y2_min = pred2['x'], pred2['y']
+        x2_max, y2_max = x2_min + pred2['width'], y2_min + pred2['height']
+        
+        # Calculate intersection
+        inter_x_min = max(x1_min, x2_min)
+        inter_y_min = max(y1_min, y2_min)
+        inter_x_max = min(x1_max, x2_max)
+        inter_y_max = min(y1_max, y2_max)
+        
+        if inter_x_min < inter_x_max and inter_y_min < inter_y_max:
+            intersection = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+            area1 = pred1['width'] * pred1['height']
+            area2 = pred2['width'] * pred2['height']
+            union = area1 + area2 - intersection
+            return intersection / union if union > 0 else 0
+        
+        return 0
+    
+    @staticmethod
+    def get_training_stats(publication_type=None):
+        """Get statistics about available training data"""
+        query = TrainingData.query
+        if publication_type:
+            query = query.filter_by(publication_type=publication_type)
+        
+        training_data = query.all()
+        
+        stats = {
+            'total_samples': len(training_data),
+            'by_type': {},
+            'by_publication_type': {},
+            'recent_samples': 0
+        }
+        
+        recent_date = datetime.utcnow() - timedelta(days=7)
+        
+        for data in training_data:
+            # By label type
+            label = data.label
+            if label not in stats['by_type']:
+                stats['by_type'][label] = 0
+            stats['by_type'][label] += 1
+            
+            # By publication type
+            pub_type = data.publication_type
+            if pub_type not in stats['by_publication_type']:
+                stats['by_publication_type'][pub_type] = 0
+            stats['by_publication_type'][pub_type] += 1
+            
+            # Recent samples
+            if data.extracted_date >= recent_date:
+                stats['recent_samples'] += 1
+        
+        return stats
 
 # Measurement Calculator
 class MeasurementCalculator:
@@ -846,8 +1329,27 @@ def process_publication(pub_id):
             db.session.add(page_record)
             db.session.flush()  # Get the page ID
             
-            # AI Box Detection
-            detected_boxes = AdBoxDetector.detect_boxes(image_path)
+            # AI Box Detection - Use ML predictions if model is available, fallback to CV detection
+            detected_boxes = []
+            ml_predictions = AdLearningEngine.predict_ads(image_path, publication.publication_type, confidence_threshold=0.6)
+            
+            if ml_predictions['success'] and ml_predictions['predictions']:
+                # Use ML predictions
+                for pred in ml_predictions['predictions']:
+                    detected_boxes.append({
+                        'x': pred['x'],
+                        'y': pred['y'],
+                        'width': pred['width'],
+                        'height': pred['height'],
+                        'confidence': pred['confidence'],
+                        'predicted_type': pred['predicted_type']
+                    })
+                print(f"Used ML model for page {page_num + 1}: {len(detected_boxes)} ads predicted")
+            else:
+                # Fallback to traditional CV detection
+                detected_boxes = AdBoxDetector.detect_boxes(image_path)
+                print(f"Used CV detection for page {page_num + 1}: {len(detected_boxes)} ads detected")
+            
             page_total_inches = 0
             
             for box in detected_boxes:
@@ -883,6 +1385,7 @@ def process_publication(pub_id):
                     width_inches_rounded=width_rounded,
                     height_inches_rounded=height_rounded,
                     column_inches=column_inches,
+                    ad_type=box.get('predicted_type', 'ai_detected'),
                     user_verified=False
                 )
                 
@@ -1889,6 +2392,197 @@ def copy_ad_box(page_id):
     except Exception as e:
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)})
+
+# ML Learning System API Routes
+@app.route('/api/ml/train/<publication_type>', methods=['POST'])
+@login_required
+def train_ml_model(publication_type):
+    """Train ML model for ad detection"""
+    try:
+        # Validate publication type
+        if publication_type not in PUBLICATION_CONFIGS:
+            return jsonify({'success': False, 'error': 'Invalid publication type'})
+        
+        # Get minimum samples from request or use default
+        data = request.get_json() or {}
+        min_samples = data.get('min_samples', 20)
+        
+        # Train the model
+        result = AdLearningEngine.train_model(publication_type, min_samples)
+        
+        if result['success']:
+            flash(f'Successfully trained ML model for {publication_type}! '
+                  f'Accuracy: {result["validation_accuracy"]:.1%} '
+                  f'({result["training_samples"]} samples)')
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/ml/stats')
+@login_required  
+def get_ml_stats():
+    """Get ML training statistics"""
+    try:
+        # Get stats for each publication type
+        all_stats = {}
+        for pub_type in PUBLICATION_CONFIGS.keys():
+            all_stats[pub_type] = AdLearningEngine.get_training_stats(pub_type)
+        
+        # Get active models
+        active_models = MLModel.query.filter_by(is_active=True).all()
+        model_info = []
+        for model in active_models:
+            model_info.append({
+                'id': model.id,
+                'name': model.model_name,
+                'type': model.model_type,
+                'publication_type': model.publication_type,
+                'version': model.version,
+                'training_accuracy': model.training_accuracy,
+                'validation_accuracy': model.validation_accuracy,
+                'training_samples': model.training_samples,
+                'created_date': model.created_date.isoformat()
+            })
+        
+        return jsonify({
+            'success': True,
+            'training_stats': all_stats,
+            'active_models': model_info,
+            'total_verified_ads': AdBox.query.filter_by(user_verified=True).count()
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/ml/collect_training_data', methods=['POST'])
+@login_required
+def collect_training_data():
+    """Manually trigger training data collection"""
+    try:
+        samples_collected = AdLearningEngine.collect_training_data()
+        
+        return jsonify({
+            'success': True,
+            'samples_collected': samples_collected,
+            'message': f'Collected features from {samples_collected} new verified ads'
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/ml/predict/<int:page_id>')
+@login_required
+def get_ml_predictions(page_id):
+    """Get ML predictions for a specific page"""
+    try:
+        page = Page.query.get_or_404(page_id)
+        publication = Publication.query.get(page.publication_id)
+        
+        # Get image path
+        image_filename = f"{publication.filename}_page_{page.page_number}.png"
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+        
+        if not os.path.exists(image_path):
+            return jsonify({'success': False, 'error': 'Page image not found'})
+        
+        # Get ML predictions
+        confidence_threshold = request.args.get('confidence', 0.7, type=float)
+        predictions = AdLearningEngine.predict_ads(image_path, publication.publication_type, confidence_threshold)
+        
+        return jsonify(predictions)
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/ml/models')
+@login_required
+def list_ml_models():
+    """List all ML models"""
+    try:
+        models = MLModel.query.order_by(MLModel.created_date.desc()).all()
+        
+        model_list = []
+        for model in models:
+            model_list.append({
+                'id': model.id,
+                'name': model.model_name,
+                'type': model.model_type,
+                'publication_type': model.publication_type,
+                'version': model.version,
+                'training_accuracy': model.training_accuracy,
+                'validation_accuracy': model.validation_accuracy,
+                'training_samples': model.training_samples,
+                'created_date': model.created_date.isoformat(),
+                'is_active': model.is_active
+            })
+        
+        return jsonify({
+            'success': True,
+            'models': model_list
+        })
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/ml/models/<int:model_id>/activate', methods=['POST'])
+@login_required
+def activate_ml_model(model_id):
+    """Activate a specific ML model"""
+    try:
+        model = MLModel.query.get_or_404(model_id)
+        
+        # Deactivate other models of the same type and publication
+        MLModel.query.filter_by(
+            model_type=model.model_type,
+            publication_type=model.publication_type
+        ).update({'is_active': False})
+        
+        # Activate this model
+        model.is_active = True
+        db.session.commit()
+        
+        return jsonify({
+            'success': True,
+            'message': f'Activated model {model.model_name}'
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/ml')
+@login_required
+def ml_dashboard():
+    """Machine Learning Dashboard"""
+    try:
+        # Get training statistics
+        stats = {}
+        for pub_type in PUBLICATION_CONFIGS.keys():
+            stats[pub_type] = AdLearningEngine.get_training_stats(pub_type)
+        
+        # Get active models
+        active_models = MLModel.query.filter_by(is_active=True).all()
+        
+        # Get recent training data
+        recent_training = TrainingData.query.order_by(TrainingData.extracted_date.desc()).limit(10).all()
+        
+        # Check if we have enough data to train
+        ready_to_train = {}
+        for pub_type in PUBLICATION_CONFIGS.keys():
+            ready_to_train[pub_type] = stats[pub_type]['total_samples'] >= 20
+        
+        return render_template('ml_dashboard.html',
+                             stats=stats,
+                             active_models=active_models,
+                             recent_training=recent_training,
+                             ready_to_train=ready_to_train,
+                             publication_types=list(PUBLICATION_CONFIGS.keys()))
+                             
+    except Exception as e:
+        flash(f'Error loading ML dashboard: {str(e)}', 'error')
+        return redirect(url_for('index'))
 
 # Create database tables
 with app.app_context():

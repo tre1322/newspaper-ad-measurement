@@ -103,29 +103,34 @@
                         </button>
                     </div>
                     
-                    <!-- Processing indicator (hidden by default) -->
-                    <div id="processing-indicator" class="mt-4 text-center" style="display: none;">
-                        <div class="d-flex justify-content-center align-items-center">
-                            <div class="spinner-border text-primary me-3" role="status">
-                                <span class="visually-hidden">Loading...</span>
-                            </div>
-                            <div>
-                                <h5 class="mb-1">Processing your publication...</h5>
-                                <p class="mb-0 text-muted">
-                                    <span id="processing-step">Uploading file and extracting pages</span>
-                                    <span class="dots"></span>
-                                </p>
-                                <div class="progress mt-2" style="width: 300px;">
-                                    <div class="progress-bar progress-bar-striped progress-bar-animated" 
-                                         role="progressbar" style="width: 0%" id="progress-bar">
+                    <!-- Inline Progress Bar (right below the button) -->
+                    <div id="upload-progress" class="mt-3" style="display: none;">
+                        <div class="row">
+                            <div class="col-12">
+                                <div class="d-flex align-items-center mb-2">
+                                    <div class="spinner-border spinner-border-sm text-primary me-2" role="status">
+                                        <span class="visually-hidden">Loading...</span>
+                                    </div>
+                                    <span id="progress-step" class="fw-bold">Uploading file and validating format</span>
+                                    <span class="dots ms-1"></span>
+                                </div>
+                                
+                                <div class="progress" style="height: 25px;">
+                                    <div class="progress-bar progress-bar-striped progress-bar-animated bg-primary" 
+                                         role="progressbar" 
+                                         style="width: 0%" 
+                                         id="main-progress-bar">
+                                        <span id="progress-percentage">0%</span>
                                     </div>
                                 </div>
+                                
+                                <div class="mt-2 text-center">
+                                    <small class="text-muted">
+                                        <i class="fas fa-info-circle"></i>
+                                        Processing may take several minutes depending on file size and number of pages
+                                    </small>
+                                </div>
                             </div>
-                        </div>
-                        <div class="alert alert-info mt-3">
-                            <i class="fas fa-info-circle"></i>
-                            <strong>Please wait...</strong> This process may take several minutes depending on the file size and number of pages.
-                            <br><small>Do not close this window or navigate away.</small>
                         </div>
                     </div>
                 </form>
@@ -224,28 +229,34 @@ document.addEventListener('DOMContentLoaded', function() {
     // Initial button state
     updateUploadButton();
     
-    // Handle form submission to show processing indicator
+    // Handle form submission to show inline progress
     const uploadForm = document.querySelector('form');
-    const processingIndicator = document.getElementById('processing-indicator');
+    const uploadProgress = document.getElementById('upload-progress');
     const uploadBtn = document.getElementById('uploadBtn');
     const cancelBtn = document.getElementById('cancelBtn');
-    const progressBar = document.getElementById('progress-bar');
-    const processingStep = document.getElementById('processing-step');
+    const mainProgressBar = document.getElementById('main-progress-bar');
+    const progressPercentage = document.getElementById('progress-percentage');
+    const progressStep = document.getElementById('progress-step');
     
     uploadForm.addEventListener('submit', function(e) {
+        e.preventDefault(); // Prevent normal form submission
+        
         // Only show processing if form is valid
         const fileInput = document.getElementById('pdf_file');
         const pubType = document.getElementById('publication_type').value;
         
         if (fileInput.files.length > 0 && pubType) {
-            showProcessingIndicator();
+            uploadWithProgress();
         }
     });
     
-    function showProcessingIndicator() {
-        // Hide the form and show processing indicator
-        uploadForm.style.display = 'none';
-        processingIndicator.style.display = 'block';
+    function uploadWithProgress() {
+        // Show inline progress bar
+        uploadProgress.style.display = 'block';
+        
+        // Disable buttons during upload
+        uploadBtn.disabled = true;
+        uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
         
         // Add processing class to body to prevent navigation
         document.body.classList.add('processing-active');
@@ -253,8 +264,11 @@ document.addEventListener('DOMContentLoaded', function() {
         // Warn user if they try to leave the page
         window.addEventListener('beforeunload', preventNavigation);
         
-        // Simulate progress steps (since we don't have real-time feedback from server)
-        simulateProgress();
+        // Create FormData for AJAX upload
+        const formData = new FormData(uploadForm);
+        
+        // Start progress simulation and upload
+        simulateProgressAndUpload(formData);
     }
     
     function preventNavigation(e) {
@@ -263,32 +277,96 @@ document.addEventListener('DOMContentLoaded', function() {
         return 'Your file is still being processed. Are you sure you want to leave?';
     }
     
-    function simulateProgress() {
+    function updateProgress(percentage, stepText) {
+        mainProgressBar.style.width = percentage + '%';
+        progressPercentage.textContent = percentage + '%';
+        progressStep.textContent = stepText;
+    }
+    
+    function simulateProgressAndUpload(formData) {
         const steps = [
-            { text: 'Uploading file and validating format', progress: 20 },
-            { text: 'Extracting pages from PDF', progress: 40 },
-            { text: 'Converting pages to images', progress: 60 },
-            { text: 'Running AI ad detection', progress: 80 },
-            { text: 'Finalizing publication setup', progress: 95 }
+            { text: 'Uploading file and validating format', progress: 15 },
+            { text: 'Extracting pages from PDF', progress: 35 },
+            { text: 'Converting pages to images', progress: 55 },
+            { text: 'Running AI ad detection', progress: 75 },
+            { text: 'Finalizing publication setup', progress: 90 }
         ];
         
         let currentStep = 0;
+        let uploadStarted = false;
         
         function updateStep() {
             if (currentStep < steps.length) {
                 const step = steps[currentStep];
-                processingStep.textContent = step.text;
-                progressBar.style.width = step.progress + '%';
+                updateProgress(step.progress, step.text);
                 currentStep++;
                 
-                // Randomize timing to make it feel more realistic
-                const delay = Math.random() * 3000 + 2000; // 2-5 seconds
+                // Start actual upload after first step
+                if (!uploadStarted && currentStep === 1) {
+                    uploadStarted = true;
+                    startActualUpload(formData);
+                }
+                
+                // Continue simulation
+                const delay = Math.random() * 2000 + 2000; // 2-4 seconds
                 setTimeout(updateStep, delay);
             }
         }
         
         // Start progress simulation
-        setTimeout(updateStep, 1000);
+        updateStep();
+    }
+    
+    function startActualUpload(formData) {
+        fetch(uploadForm.action || '/upload', {
+            method: 'POST',
+            body: formData
+        })
+        .then(response => {
+            if (response.redirected) {
+                // Upload successful, complete progress and redirect
+                completeUpload(response.url);
+            } else {
+                return response.text().then(text => {
+                    throw new Error('Upload failed');
+                });
+            }
+        })
+        .catch(error => {
+            console.error('Upload error:', error);
+            showUploadError('Upload failed. Please try again.');
+        });
+    }
+    
+    function completeUpload(redirectUrl) {
+        // Complete the progress bar
+        updateProgress(100, 'Upload complete! Redirecting...');
+        
+        // Remove navigation warning
+        window.removeEventListener('beforeunload', preventNavigation);
+        document.body.classList.remove('processing-active');
+        
+        // Redirect after a short delay
+        setTimeout(() => {
+            window.location.href = redirectUrl;
+        }, 1000);
+    }
+    
+    function showUploadError(message) {
+        // Show error and reset form
+        updateProgress(0, 'Upload failed');
+        uploadProgress.style.display = 'none';
+        
+        // Reset buttons
+        uploadBtn.disabled = false;
+        uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Upload & Process';
+        
+        // Remove navigation warning
+        window.removeEventListener('beforeunload', preventNavigation);
+        document.body.classList.remove('processing-active');
+        
+        // Show error message
+        alert(message);
     }
 });
 </script>

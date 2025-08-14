@@ -171,7 +171,10 @@
                     method: 'POST',
                     headers: {
                         'Content-Type': 'application/json',
-                    }
+                    },
+                    body: JSON.stringify({
+                        min_samples: 20
+                    })
                 });
                 
                 const result = await response.json();

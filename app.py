@@ -729,11 +729,13 @@ class AdLearningEngine:
         return len(training_samples)
     
     @staticmethod
-    def train_model(publication_type='broadsheet', min_samples=20):
+    def train_model(publication_type='broadsheet', min_samples=20, collect_new_data=False):
         """Train ML model for ad detection"""
         try:
-            # Collect fresh training data
-            AdLearningEngine.collect_training_data()
+            # Optionally collect fresh training data (can be slow)
+            if collect_new_data:
+                print("Collecting fresh training data...")
+                AdLearningEngine.collect_training_data(max_samples=50, batch_size=10)
             
             # Get training data for this publication type
             training_data = TrainingData.query.filter_by(publication_type=publication_type).all()
@@ -2516,12 +2518,13 @@ def train_ml_model(publication_type):
         if publication_type not in PUBLICATION_CONFIGS:
             return jsonify({'success': False, 'error': 'Invalid publication type'})
         
-        # Get minimum samples from request or use default
+        # Get parameters from request or use defaults
         data = request.get_json() or {}
         min_samples = data.get('min_samples', 20)
+        collect_new_data = data.get('collect_new_data', False)
         
         # Train the model
-        result = AdLearningEngine.train_model(publication_type, min_samples)
+        result = AdLearningEngine.train_model(publication_type, min_samples, collect_new_data)
         
         if result['success']:
             flash(f'Successfully trained ML model for {publication_type}! '

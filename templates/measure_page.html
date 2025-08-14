@@ -607,6 +607,60 @@ let maxZoom = 3.0;
 let zoomStep = 0.25;
 let lastMeasuredAd = null; // Store the last measured ad for copying
 
+// Auto-scroll function for when resizing ad boxes near viewport edges
+function autoScrollDuringResize(boxX, boxY, boxWidth, boxHeight, mouseX, mouseY) {
+    const pageViewer = document.querySelector('.page-viewer');
+    if (!pageViewer) return;
+    
+    const scrollBuffer = 50; // Distance from edge to start scrolling
+    const scrollSpeed = 10;  // Pixels to scroll per frame
+    
+    // Get viewport dimensions and scroll position
+    const viewerRect = pageViewer.getBoundingClientRect();
+    const scrollTop = pageViewer.scrollTop;
+    const scrollLeft = pageViewer.scrollLeft;
+    
+    // Calculate box edges in viewport coordinates
+    const pageContainer = document.getElementById('pageContainer');
+    const containerRect = pageContainer.getBoundingClientRect();
+    
+    // Convert box coordinates to viewport coordinates
+    const boxTop = containerRect.top + (boxY * currentZoom);
+    const boxBottom = boxTop + (boxHeight * currentZoom);
+    const boxLeft = containerRect.left + (boxX * currentZoom);
+    const boxRight = boxLeft + (boxWidth * currentZoom);
+    
+    let scrollX = 0;
+    let scrollY = 0;
+    
+    // Check if we need to scroll vertically
+    if (boxBottom > viewerRect.bottom - scrollBuffer) {
+        // Need to scroll down
+        scrollY = scrollSpeed;
+    } else if (boxTop < viewerRect.top + scrollBuffer) {
+        // Need to scroll up
+        scrollY = -scrollSpeed;
+    }
+    
+    // Check if we need to scroll horizontally
+    if (boxRight > viewerRect.right - scrollBuffer) {
+        // Need to scroll right
+        scrollX = scrollSpeed;
+    } else if (boxLeft < viewerRect.left + scrollBuffer) {
+        // Need to scroll left
+        scrollX = -scrollSpeed;
+    }
+    
+    // Apply scrolling if needed
+    if (scrollX !== 0 || scrollY !== 0) {
+        pageViewer.scrollTo({
+            left: scrollLeft + scrollX,
+            top: scrollTop + scrollY,
+            behavior: 'auto' // Instant scrolling for smooth resizing
+        });
+    }
+}
+
 // Initialize when page loads
 document.addEventListener('DOMContentLoaded', function() {
     if (isSpecialEdition) {
@@ -1367,6 +1421,11 @@ function initializeManualBoxInteraction(box) {
             
             box.style.left = constrainedX + 'px';
             box.style.top = constrainedY + 'px';
+            
+            // Auto-scroll functionality when dragging near viewport edges
+            const boxWidth = parseInt(box.style.width);
+            const boxHeight = parseInt(box.style.height);
+            autoScrollDuringResize(constrainedX, constrainedY, boxWidth, boxHeight, e.clientX, e.clientY);
         };
         
         const onMouseUp = function(e) {
@@ -1480,6 +1539,9 @@ function initializeManualBoxInteraction(box) {
                 box.style.top = newY + 'px';
                 box.style.width = newWidth + 'px';
                 box.style.height = newHeight + 'px';
+                
+                // Auto-scroll functionality when resizing near viewport edges
+                autoScrollDuringResize(newX, newY, newWidth, newHeight, e.clientX, e.clientY);
                 
                 // Update label
                 updateManualBoxLabel(box, newWidth, newHeight);
@@ -2222,6 +2284,11 @@ function makeDraggable(element) {
         
         element.style.left = newLeft + 'px';
         element.style.top = newTop + 'px';
+        
+        // Auto-scroll functionality when dragging near viewport edges
+        const elementWidth = parseInt(element.style.width);
+        const elementHeight = parseInt(element.style.height);
+        autoScrollDuringResize(newLeft, newTop, elementWidth, elementHeight, e.clientX, e.clientY);
     }
     
     function onMouseUp() {
@@ -2363,6 +2430,9 @@ function initializeRegularInterface() {
         tempBox.style.top = top + 'px';
         tempBox.style.width = width + 'px';
         tempBox.style.height = height + 'px';
+        
+        // Auto-scroll functionality when creating box near viewport edges
+        autoScrollDuringResize(left, top, width, height, e.clientX, e.clientY);
     }
     
     function handleBoxCreationEnd(e) {
@@ -2535,6 +2605,9 @@ function initializeBoxInteraction(box) {
             
             localSelectedBox.style.left = constrainedX + 'px';
             localSelectedBox.style.top = constrainedY + 'px';
+            
+            // Auto-scroll functionality when dragging near viewport edges
+            autoScrollDuringResize(constrainedX, constrainedY, localSelectedBox.offsetWidth, localSelectedBox.offsetHeight, e.clientX, e.clientY);
         };
         
         const handleDragEnd = function(e) {
@@ -2657,6 +2730,9 @@ function initializeBoxInteraction(box) {
                 localSelectedBox.style.top = newY + 'px';
                 localSelectedBox.style.width = newWidth + 'px';
                 localSelectedBox.style.height = newHeight + 'px';
+                
+                // Auto-scroll functionality when resizing near viewport edges
+                autoScrollDuringResize(newX, newY, newWidth, newHeight, e.clientX, e.clientY);
             };
             
             const handleResizeEnd = function(e) {

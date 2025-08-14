@@ -640,6 +640,13 @@ class AdLearningEngine:
             else:
                 features['rectangularity'] = 0
             
+            # Convert numpy types to native Python types for JSON serialization
+            for key, value in features.items():
+                if hasattr(value, 'item'):  # numpy scalar
+                    features[key] = value.item()
+                elif isinstance(value, np.ndarray):
+                    features[key] = value.tolist()
+            
             return features
             
         except Exception as e:
@@ -647,18 +654,37 @@ class AdLearningEngine:
             return None
     
     @staticmethod
-    def collect_training_data():
-        """Collect features from all user-verified ad boxes for training"""
+    def collect_training_data(batch_size=50, max_samples=None):
+        """Collect features from user-verified ad boxes for training (optimized with batching)"""
         training_samples = []
         
-        # Get all user-verified ad boxes
-        verified_boxes = AdBox.query.filter_by(user_verified=True).all()
+        # Get user-verified ad boxes that don't have training data yet
+        subquery = db.session.query(TrainingData.ad_box_id)
+        verified_boxes_query = AdBox.query.filter_by(user_verified=True).filter(
+            ~AdBox.id.in_(subquery)
+        )
         
-        for ad_box in verified_boxes:
+        if max_samples:
+            verified_boxes_query = verified_boxes_query.limit(max_samples)
+            
+        verified_boxes = verified_boxes_query.all()
+        total_boxes = len(verified_boxes)
+        
+        print(f"Processing {total_boxes} verified ads for training data collection...")
+        
+        for i, ad_box in enumerate(verified_boxes):
             try:
+                if i % 10 == 0:
+                    print(f"Progress: {i}/{total_boxes} ({i/total_boxes*100:.1f}%)")
+                
                 # Get page and publication info
-                page = Page.query.get(ad_box.page_id)
-                publication = Publication.query.get(page.publication_id)
+                page = db.session.get(Page, ad_box.page_id)
+                if not page:
+                    continue
+                    
+                publication = db.session.get(Publication, page.publication_id)
+                if not publication:
+                    continue
                 
                 # Get image path
                 image_filename = f"{publication.filename}_page_{page.page_number}.png"
@@ -675,26 +701,31 @@ class AdLearningEngine:
                 features = AdLearningEngine.extract_features(image_path, box_coords)
                 
                 if features:
-                    # Check if training data already exists
-                    existing = TrainingData.query.filter_by(ad_box_id=ad_box.id).first()
+                    # Create new training data record
+                    training_data = TrainingData(
+                        ad_box_id=ad_box.id,
+                        publication_type=publication.publication_type,
+                        features=json.dumps(features),
+                        label=ad_box.ad_type or 'manual',
+                        confidence_score=1.0  # User-verified = high confidence
+                    )
+                    db.session.add(training_data)
+                    training_samples.append(training_data)
                     
-                    if not existing:
-                        # Create new training data record
-                        training_data = TrainingData(
-                            ad_box_id=ad_box.id,
-                            publication_type=publication.publication_type,
-                            features=json.dumps(features),
-                            label=ad_box.ad_type or 'manual',
-                            confidence_score=1.0  # User-verified = high confidence
-                        )
-                        db.session.add(training_data)
-                        training_samples.append(training_data)
+                    # Commit in batches to prevent timeouts
+                    if len(training_samples) % batch_size == 0:
+                        db.session.commit()
+                        print(f"Committed batch of {batch_size} samples")
             
             except Exception as e:
                 print(f"Error processing ad box {ad_box.id}: {e}")
                 continue
         
-        db.session.commit()
+        # Final commit
+        if training_samples:
+            db.session.commit()
+            
+        print(f"Training data collection complete: {len(training_samples)} new samples")
         return len(training_samples)
     
     @staticmethod
@@ -2543,7 +2574,15 @@ def get_ml_stats():
 def collect_training_data():
     """Manually trigger training data collection"""
     try:
-        samples_collected = AdLearningEngine.collect_training_data()
+        # Process in smaller batches to avoid timeouts
+        data = request.get_json() or {}
+        max_samples = data.get('max_samples', 100)  # Process max 100 at a time
+        batch_size = data.get('batch_size', 25)      # Commit every 25 samples
+        
+        samples_collected = AdLearningEngine.collect_training_data(
+            batch_size=batch_size, 
+            max_samples=max_samples
+        )
         
         return jsonify({
             'success': True,

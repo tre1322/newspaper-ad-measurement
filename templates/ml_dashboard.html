@@ -208,8 +208,22 @@
             }
         }
 
-        function refreshStats() {
-            location.reload();
+        async function refreshStats() {
+            try {
+                showMessage('Refreshing statistics...', 'info');
+                
+                const response = await fetch('/api/ml/stats');
+                const result = await response.json();
+                
+                if (result.success) {
+                    showMessage('Statistics refreshed successfully!', 'success');
+                    setTimeout(() => location.reload(), 1000);
+                } else {
+                    showMessage(`Error refreshing statistics: ${result.error}`, 'danger');
+                }
+            } catch (error) {
+                showMessage(`Error refreshing statistics: ${error.message}`, 'danger');
+            }
         }
 
         function viewModels() {

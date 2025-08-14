@@ -192,14 +192,25 @@
                 showMessage('Collecting training data from verified ads...', 'info');
                 
                 const response = await fetch('/api/ml/collect_training_data', {
-                    method: 'POST'
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                    },
+                    body: JSON.stringify({
+                        max_samples: 25,  // Process max 25 at a time to avoid timeouts
+                        batch_size: 5     // Commit every 5 samples
+                    })
                 });
                 
                 const result = await response.json();
                 
                 if (result.success) {
-                    showMessage(result.message, 'success');
-                    setTimeout(() => location.reload(), 1000);
+                    let message = result.message;
+                    if (result.samples_collected === 25) {
+                        message += ' (Click again to process more ads if you have many verified ads)';
+                    }
+                    showMessage(message, 'success');
+                    setTimeout(() => location.reload(), 2000);
                 } else {
                     showMessage(`Error: ${result.error}`, 'danger');
                 }

@@ -1,0 +1,241 @@
+{% extends "base.html" %}
+
+{% block title %}Processing {{ publication.original_filename }}{% endblock %}
+
+{% block content %}
+<style>
+/* Processing status styling */
+.status-card {
+    max-width: 800px;
+    margin: 0 auto;
+}
+
+.progress-container {
+    margin: 30px 0;
+}
+
+.status-icon {
+    font-size: 3rem;
+    margin-bottom: 1rem;
+}
+
+.status-processing {
+    color: #007bff;
+    animation: spin 2s linear infinite;
+}
+
+.status-completed {
+    color: #28a745;
+}
+
+.status-failed {
+    color: #dc3545;
+}
+
+@keyframes spin {
+    0% { transform: rotate(0deg); }
+    100% { transform: rotate(360deg); }
+}
+
+.processing-steps {
+    text-align: left;
+    max-width: 400px;
+    margin: 0 auto;
+}
+
+.step {
+    display: flex;
+    align-items: center;
+    padding: 8px 0;
+}
+
+.step-icon {
+    width: 24px;
+    margin-right: 12px;
+    text-align: center;
+}
+
+.step-text {
+    flex: 1;
+}
+
+.step.active {
+    color: #007bff;
+    font-weight: bold;
+}
+
+.step.completed {
+    color: #28a745;
+}
+</style>
+
+<div class="container mt-4">
+    <div class="row justify-content-center">
+        <div class="col-12">
+            <div class="card status-card">
+                <div class="card-header text-center">
+                    <h4><i class="fas fa-cogs"></i> Processing Publication</h4>
+                    <p class="mb-0 text-muted">{{ publication.original_filename }}</p>
+                </div>
+                <div class="card-body text-center">
+                    <!-- Status Icon -->
+                    <div id="status-icon" class="status-icon">
+                        <i class="fas fa-spinner status-processing"></i>
+                    </div>
+                    
+                    <!-- Status Message -->
+                    <h5 id="status-message" class="mb-4">Preparing to process...</h5>
+                    
+                    <!-- Progress Bar -->
+                    <div class="progress-container">
+                        <div class="progress" style="height: 20px;">
+                            <div class="progress-bar progress-bar-striped progress-bar-animated" 
+                                 id="progress-bar" 
+                                 role="progressbar" 
+                                 style="width: 10%">
+                                <span id="progress-text">10%</span>
+                            </div>
+                        </div>
+                    </div>
+                    
+                    <!-- Processing Steps -->
+                    <div class="processing-steps">
+                        <div class="step" id="step-uploaded">
+                            <div class="step-icon"><i class="fas fa-check"></i></div>
+                            <div class="step-text">File uploaded</div>
+                        </div>
+                        <div class="step" id="step-extracting">
+                            <div class="step-icon"><i class="fas fa-circle"></i></div>
+                            <div class="step-text">Extracting pages from PDF</div>
+                        </div>
+                        <div class="step" id="step-images">
+                            <div class="step-icon"><i class="fas fa-circle"></i></div>
+                            <div class="step-text">Converting pages to images</div>
+                        </div>
+                        <div class="step" id="step-ai">
+                            <div class="step-icon"><i class="fas fa-circle"></i></div>
+                            <div class="step-text">Running AI ad detection</div>
+                        </div>
+                        <div class="step" id="step-complete">
+                            <div class="step-icon"><i class="fas fa-circle"></i></div>
+                            <div class="step-text">Finalizing setup</div>
+                        </div>
+                    </div>
+                    
+                    <!-- Error Message -->
+                    <div id="error-message" class="alert alert-danger mt-4" style="display: none;">
+                        <i class="fas fa-exclamation-triangle"></i>
+                        <strong>Processing failed:</strong> <span id="error-text"></span>
+                        <div class="mt-3">
+                            <a href="{{ url_for('upload') }}" class="btn btn-primary">
+                                <i class="fas fa-upload"></i> Try Again
+                            </a>
+                        </div>
+                    </div>
+                    
+                    <!-- Information -->
+                    <div class="mt-4 text-muted">
+                        <small>
+                            <i class="fas fa-info-circle"></i>
+                            Processing may take several minutes depending on the number of pages.
+                            <br>You can safely close this page - processing will continue in the background.
+                        </small>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+</div>
+
+<script>
+document.addEventListener('DOMContentLoaded', function() {
+    const pubId = {{ publication.id }};
+    let checkInterval;
+    
+    // Status mapping
+    const statusSteps = {
+        'uploaded': { step: 1, message: 'File uploaded successfully', progress: 10 },
+        'processing': { step: 1, message: 'Starting processing...', progress: 20 },
+        'extracting_pages': { step: 2, message: 'Extracting pages from PDF', progress: 30 },
+        'creating_images': { step: 3, message: 'Converting pages to images', progress: 60 },
+        'ai_detection': { step: 4, message: 'Running AI ad detection', progress: 80 },
+        'completed': { step: 5, message: 'Processing complete!', progress: 100 },
+        'failed': { step: -1, message: 'Processing failed', progress: 0 }
+    };
+    
+    function updateStatus(status, error, redirectUrl) {
+        const statusInfo = statusSteps[status] || statusSteps['processing'];
+        
+        // Update progress bar
+        const progressBar = document.getElementById('progress-bar');
+        const progressText = document.getElementById('progress-text');
+        progressBar.style.width = statusInfo.progress + '%';
+        progressText.textContent = statusInfo.progress + '%';
+        
+        // Update status message
+        document.getElementById('status-message').textContent = statusInfo.message;
+        
+        // Update steps
+        document.querySelectorAll('.step').forEach((step, index) => {
+            step.classList.remove('active', 'completed');
+            const icon = step.querySelector('.step-icon i');
+            
+            if (index < statusInfo.step - 1) {
+                step.classList.add('completed');
+                icon.className = 'fas fa-check';
+            } else if (index === statusInfo.step - 1) {
+                step.classList.add('active');
+                icon.className = 'fas fa-spinner fa-spin';
+            } else {
+                icon.className = 'fas fa-circle';
+            }
+        });
+        
+        if (status === 'completed') {
+            // Success
+            document.getElementById('status-icon').innerHTML = '<i class="fas fa-check-circle status-completed"></i>';
+            document.getElementById('status-message').textContent = 'Processing complete! Redirecting...';
+            
+            // Mark all steps as completed
+            document.querySelectorAll('.step').forEach(step => {
+                step.classList.add('completed');
+                step.querySelector('.step-icon i').className = 'fas fa-check';
+            });
+            
+            // Stop checking and redirect
+            clearInterval(checkInterval);
+            setTimeout(() => {
+                window.location.href = redirectUrl || '/';
+            }, 2000);
+            
+        } else if (status === 'failed') {
+            // Error
+            document.getElementById('status-icon').innerHTML = '<i class="fas fa-times-circle status-failed"></i>';
+            document.getElementById('error-text').textContent = error || 'Unknown error occurred';
+            document.getElementById('error-message').style.display = 'block';
+            progressBar.classList.add('bg-danger');
+            
+            // Stop checking
+            clearInterval(checkInterval);
+        }
+    }
+    
+    function checkStatus() {
+        fetch(`/api/processing_status/${pubId}`)
+            .then(response => response.json())
+            .then(data => {
+                updateStatus(data.status, data.error, data.redirect_url);
+            })
+            .catch(error => {
+                console.error('Error checking status:', error);
+            });
+    }
+    
+    // Start checking status every 2 seconds
+    checkInterval = setInterval(checkStatus, 2000);
+    
+    // Check immediately
+    checkStatus();
+});
+</script>
+{% endblock %}

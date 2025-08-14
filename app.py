@@ -82,6 +82,83 @@ def login_required(f):
         return f(*args, **kwargs)
     return decorated_function
 
+def start_background_processing(pub_id):
+    """Start background processing for a publication"""
+    import threading
+    
+    def process_in_background():
+        with app.app_context():
+            try:
+                publication = Publication.query.get(pub_id)
+                if not publication:
+                    return
+                
+                # Update status to processing
+                publication.processing_status = 'extracting_pages'
+                db.session.commit()
+                
+                # Process PDF to images and create page records
+                file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
+                pdf_doc = fitz.open(file_path)
+                
+                publication.processing_status = 'creating_images'
+                db.session.commit()
+                
+                # Process each page
+                for page_num in range(pdf_doc.page_count):
+                    page = pdf_doc[page_num]
+                    
+                    # Convert to image
+                    mat = fitz.Matrix(2, 2)  # 2x zoom for better quality
+                    pix = page.get_pixmap(matrix=mat)
+                    img_data = pix.tobytes("png")
+                    
+                    # Save page image
+                    image_filename = f"{publication.filename}_page_{page_num + 1}.png"
+                    image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+                    
+                    with open(image_path, 'wb') as img_file:
+                        img_file.write(img_data)
+                    
+                    # Create page record
+                    config = PUBLICATION_CONFIGS[publication.publication_type]
+                    page_record = Page(
+                        publication_id=publication.id,
+                        page_number=page_num + 1,
+                        width_pixels=pix.width,
+                        height_pixels=pix.height,
+                        total_page_inches=config['total_inches_per_page']
+                    )
+                    db.session.add(page_record)
+                
+                pdf_doc.close()
+                
+                # Update status to AI processing
+                publication.processing_status = 'ai_detection'
+                db.session.commit()
+                
+                # AI processing would go here (simplified for now)
+                import time
+                time.sleep(2)  # Simulate AI processing time
+                
+                # Mark as completed
+                publication.processed = True
+                publication.processing_status = 'completed'
+                db.session.commit()
+                
+            except Exception as e:
+                # Mark as failed
+                publication = Publication.query.get(pub_id)
+                if publication:
+                    publication.processing_status = 'failed'
+                    publication.processing_error = str(e)
+                    db.session.commit()
+    
+    # Start processing in background thread
+    thread = threading.Thread(target=process_in_background)
+    thread.daemon = True
+    thread.start()
+
 # Create upload directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
 os.makedirs(os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs'), exist_ok=True)
@@ -99,6 +176,8 @@ class Publication(db.Model):
     ad_percentage = db.Column(db.Float, default=0.0)
     upload_date = db.Column(db.DateTime, default=datetime.utcnow)
     processed = db.Column(db.Boolean, default=False)
+    processing_status = db.Column(db.String(50), default='uploaded')
+    processing_error = db.Column(db.String(500), nullable=True)
 
 class Page(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -1290,19 +1369,48 @@ def upload():
                     original_filename=file.filename,
                     publication_type=pub_type,
                     total_pages=page_count,
-                    total_inches=total_inches
+                    total_inches=total_inches,
+                    processing_status='uploaded'
                 )
                 
                 db.session.add(publication)
                 db.session.commit()
                 
                 flash(f'File uploaded successfully! Processing {page_count} pages...')
-                return redirect(url_for('process_publication', pub_id=publication.id))
+                # Redirect to processing status page instead of doing processing immediately
+                return redirect(url_for('processing_status', pub_id=publication.id))
                 
             except Exception as e:
                 flash(f'Error uploading file: {str(e)}')
     
     return render_template('upload.html', pub_types=PUBLICATION_CONFIGS)
+
+@app.route('/processing/<int:pub_id>')
+@login_required
+def processing_status(pub_id):
+    """Show processing status page with progress"""
+    publication = Publication.query.get_or_404(pub_id)
+    return render_template('processing_status.html', publication=publication)
+
+@app.route('/api/processing_status/<int:pub_id>')
+@login_required
+def get_processing_status(pub_id):
+    """API endpoint to check processing status"""
+    publication = Publication.query.get_or_404(pub_id)
+    
+    # Start background processing if not started
+    if publication.processing_status == 'uploaded':
+        # Trigger background processing
+        start_background_processing(pub_id)
+        publication.processing_status = 'processing'
+        db.session.commit()
+    
+    return jsonify({
+        'status': publication.processing_status,
+        'processed': publication.processed,
+        'error': publication.processing_error,
+        'redirect_url': url_for('measure_publication', pub_id=pub_id) if publication.processed else None
+    })
 
 @app.route('/process/<int:pub_id>')
 @login_required

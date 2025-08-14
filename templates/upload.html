@@ -239,37 +239,23 @@ document.addEventListener('DOMContentLoaded', function() {
     const progressStep = document.getElementById('progress-step');
     
     uploadForm.addEventListener('submit', function(e) {
-        e.preventDefault(); // Prevent normal form submission
-        
         // Only show processing if form is valid
         const fileInput = document.getElementById('pdf_file');
         const pubType = document.getElementById('publication_type').value;
         
         if (fileInput.files.length > 0 && pubType) {
-            uploadWithProgress();
+            // Show progress immediately
+            uploadProgress.style.display = 'block';
+            uploadBtn.disabled = true;
+            uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
+            
+            // Start progress animation
+            startProgressAnimation();
+            
+            // Let the form submit normally - no need to prevent it
+            // The progress will continue until the redirect happens naturally
         }
     });
-    
-    function uploadWithProgress() {
-        // Show inline progress bar
-        uploadProgress.style.display = 'block';
-        
-        // Disable buttons during upload
-        uploadBtn.disabled = true;
-        uploadBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Processing...';
-        
-        // Add processing class to body to prevent navigation
-        document.body.classList.add('processing-active');
-        
-        // Warn user if they try to leave the page
-        window.addEventListener('beforeunload', preventNavigation);
-        
-        // Create FormData for AJAX upload
-        const formData = new FormData(uploadForm);
-        
-        // Start progress simulation and upload
-        simulateProgressAndUpload(formData);
-    }
     
     function preventNavigation(e) {
         e.preventDefault();
@@ -283,17 +269,23 @@ document.addEventListener('DOMContentLoaded', function() {
         progressStep.textContent = stepText;
     }
     
-    function simulateProgressAndUpload(formData) {
+    function startProgressAnimation() {
+        // Add processing class to body to prevent navigation
+        document.body.classList.add('processing-active');
+        
+        // Warn user if they try to leave the page
+        window.addEventListener('beforeunload', preventNavigation);
+        
         const steps = [
             { text: 'Uploading file and validating format', progress: 15 },
             { text: 'Extracting pages from PDF', progress: 35 },
             { text: 'Converting pages to images', progress: 55 },
             { text: 'Running AI ad detection', progress: 75 },
-            { text: 'Finalizing publication setup', progress: 90 }
+            { text: 'Finalizing publication setup', progress: 90 },
+            { text: 'Processing complete, redirecting...', progress: 100 }
         ];
         
         let currentStep = 0;
-        let uploadStarted = false;
         
         function updateStep() {
             if (currentStep < steps.length) {
@@ -301,72 +293,16 @@ document.addEventListener('DOMContentLoaded', function() {
                 updateProgress(step.progress, step.text);
                 currentStep++;
                 
-                // Start actual upload after first step
-                if (!uploadStarted && currentStep === 1) {
-                    uploadStarted = true;
-                    startActualUpload(formData);
-                }
-                
-                // Continue simulation
-                const delay = Math.random() * 2000 + 2000; // 2-4 seconds
+                // Continue animation at regular intervals
+                const delay = currentStep < steps.length - 1 ? 
+                    Math.random() * 2000 + 2000 : // 2-4 seconds for normal steps
+                    5000; // 5 seconds for final step
                 setTimeout(updateStep, delay);
             }
         }
         
-        // Start progress simulation
+        // Start progress animation
         updateStep();
-    }
-    
-    function startActualUpload(formData) {
-        fetch(uploadForm.action || '/upload', {
-            method: 'POST',
-            body: formData
-        })
-        .then(response => {
-            if (response.redirected) {
-                // Upload successful, complete progress and redirect
-                completeUpload(response.url);
-            } else {
-                return response.text().then(text => {
-                    throw new Error('Upload failed');
-                });
-            }
-        })
-        .catch(error => {
-            console.error('Upload error:', error);
-            showUploadError('Upload failed. Please try again.');
-        });
-    }
-    
-    function completeUpload(redirectUrl) {
-        // Complete the progress bar
-        updateProgress(100, 'Upload complete! Redirecting...');
-        
-        // Remove navigation warning
-        window.removeEventListener('beforeunload', preventNavigation);
-        document.body.classList.remove('processing-active');
-        
-        // Redirect after a short delay
-        setTimeout(() => {
-            window.location.href = redirectUrl;
-        }, 1000);
-    }
-    
-    function showUploadError(message) {
-        // Show error and reset form
-        updateProgress(0, 'Upload failed');
-        uploadProgress.style.display = 'none';
-        
-        // Reset buttons
-        uploadBtn.disabled = false;
-        uploadBtn.innerHTML = '<i class="fas fa-upload"></i> Upload & Process';
-        
-        // Remove navigation warning
-        window.removeEventListener('beforeunload', preventNavigation);
-        document.body.classList.remove('processing-active');
-        
-        // Show error message
-        alert(message);
     }
 });
 </script>

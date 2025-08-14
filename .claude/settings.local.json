@@ -5,7 +5,8 @@
       "Bash(del test_detection_types.py migrate_ad_type.py)",
       "Bash(rm:*)",
       "Bash(pip install:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(timeout:*)"
     ],
     "deny": []
   }

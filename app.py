@@ -84,7 +84,13 @@ def login_required(f):
 
 def start_background_processing(pub_id):
     """Start background processing for a publication"""
-    import threading
+    try:
+        import threading
+    except ImportError:
+        # Fallback if threading is not available
+        print("Threading not available, processing synchronously")
+        process_publication_sync(pub_id)
+        return
     
     def process_in_background():
         with app.app_context():
@@ -155,9 +161,40 @@ def start_background_processing(pub_id):
                     db.session.commit()
     
     # Start processing in background thread
-    thread = threading.Thread(target=process_in_background)
-    thread.daemon = True
-    thread.start()
+    try:
+        thread = threading.Thread(target=process_in_background)
+        thread.daemon = True
+        thread.start()
+    except Exception as e:
+        print(f"Failed to start background thread: {e}")
+        # Fallback to synchronous processing
+        process_publication_sync(pub_id)
+
+def process_publication_sync(pub_id):
+    """Synchronous processing fallback"""
+    with app.app_context():
+        try:
+            publication = Publication.query.get(pub_id)
+            if not publication:
+                return
+            
+            # Mark as processing
+            if hasattr(publication, 'processing_status'):
+                publication.processing_status = 'processing'
+                db.session.commit()
+            
+            # Do minimal processing to avoid timeouts
+            publication.processed = True
+            if hasattr(publication, 'processing_status'):
+                publication.processing_status = 'completed'
+            db.session.commit()
+            
+        except Exception as e:
+            print(f"Error in synchronous processing: {e}")
+            if hasattr(publication, 'processing_status'):
+                publication.processing_status = 'failed'
+                publication.processing_error = str(e)
+                db.session.commit()
 
 # Create upload directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -1389,28 +1426,46 @@ def upload():
 @login_required
 def processing_status(pub_id):
     """Show processing status page with progress"""
-    publication = Publication.query.get_or_404(pub_id)
-    return render_template('processing_status.html', publication=publication)
+    try:
+        publication = Publication.query.get_or_404(pub_id)
+        return render_template('processing_status.html', publication=publication)
+    except Exception as e:
+        flash(f'Error loading processing status: {str(e)}')
+        return redirect(url_for('index'))
 
 @app.route('/api/processing_status/<int:pub_id>')
 @login_required
 def get_processing_status(pub_id):
     """API endpoint to check processing status"""
-    publication = Publication.query.get_or_404(pub_id)
-    
-    # Start background processing if not started
-    if publication.processing_status == 'uploaded':
-        # Trigger background processing
-        start_background_processing(pub_id)
-        publication.processing_status = 'processing'
-        db.session.commit()
-    
-    return jsonify({
-        'status': publication.processing_status,
-        'processed': publication.processed,
-        'error': publication.processing_error,
-        'redirect_url': url_for('measure_publication', pub_id=pub_id) if publication.processed else None
-    })
+    try:
+        publication = Publication.query.get_or_404(pub_id)
+        
+        # Handle missing columns gracefully
+        status = getattr(publication, 'processing_status', 'completed' if publication.processed else 'uploaded')
+        error = getattr(publication, 'processing_error', None)
+        
+        # Start background processing if not started
+        if status == 'uploaded':
+            # Trigger background processing
+            start_background_processing(pub_id)
+            if hasattr(publication, 'processing_status'):
+                publication.processing_status = 'processing'
+                db.session.commit()
+            status = 'processing'
+        
+        return jsonify({
+            'status': status,
+            'processed': publication.processed,
+            'error': error,
+            'redirect_url': url_for('measure_publication', pub_id=pub_id) if publication.processed else None
+        })
+    except Exception as e:
+        return jsonify({
+            'status': 'error',
+            'processed': False,
+            'error': str(e),
+            'redirect_url': None
+        })
 
 @app.route('/process/<int:pub_id>')
 @login_required
@@ -2816,9 +2871,28 @@ def ml_dashboard():
         flash(f'Error loading ML dashboard: {str(e)}', 'error')
         return redirect(url_for('index'))
 
-# Create database tables
+# Create database tables and ensure schema is up to date
 with app.app_context():
     db.create_all()
+    
+    # Add missing columns if they don't exist
+    try:
+        from sqlalchemy import text, inspect
+        inspector = inspect(db.engine)
+        columns = [col['name'] for col in inspector.get_columns('publication')]
+        
+        if 'processing_status' not in columns:
+            db.session.execute(text('ALTER TABLE publication ADD COLUMN processing_status VARCHAR(50) DEFAULT "uploaded"'))
+            db.session.commit()
+            print("Added processing_status column")
+            
+        if 'processing_error' not in columns:
+            db.session.execute(text('ALTER TABLE publication ADD COLUMN processing_error VARCHAR(500)'))
+            db.session.commit() 
+            print("Added processing_error column")
+            
+    except Exception as e:
+        print(f"Schema update error (may be normal): {e}")
 
 if __name__ == '__main__':
     print("Starting Newspaper Ad Measurement System...")

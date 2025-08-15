@@ -1364,8 +1364,15 @@ def logout():
 @app.route('/')
 @login_required
 def index():
-    publications = Publication.query.order_by(Publication.upload_date.desc()).all()
-    return render_template('index.html', publications=publications)
+    try:
+        publications = Publication.query.order_by(Publication.upload_date.desc()).all()
+        return render_template('index.html', publications=publications)
+    except Exception as e:
+        print(f"Error in index route: {e}")
+        import traceback
+        traceback.print_exc()
+        flash('An error occurred loading publications. Please try again.', 'error')
+        return render_template('index.html', publications=[])
 
 @app.route('/upload', methods=['GET', 'POST'])
 @login_required
@@ -2894,13 +2901,31 @@ with app.app_context():
     except Exception as e:
         print(f"Schema update error (may be normal): {e}")
 
+def check_database_connection():
+    """Check if database connection is working"""
+    try:
+        with app.app_context():
+            # Try to query the database
+            publication_count = Publication.query.count()
+            print(f"Database connection OK - Found {publication_count} publications")
+            return True
+    except Exception as e:
+        print(f"Database connection ERROR: {e}")
+        return False
+
 if __name__ == '__main__':
     print("Starting Newspaper Ad Measurement System...")
     print(f"Upload folder: {app.config['UPLOAD_FOLDER']}")
-    print("Opening at: http://localhost:5000")
-    print("AI Box Detection: Enhanced & Improved")
-    print("Interactive Measurement Tools: Ready")
-    print("Professional Reporting System: Ready")
-    print("Intelligent Click Detection: Ready for Broadsheet")
-    print("Screen Calibration System: Ready")
-    app.run(debug=True)
+    
+    # Check database connection
+    if check_database_connection():
+        print("Opening at: http://localhost:5000")
+        print("AI Box Detection: Enhanced & Improved")
+        print("Interactive Measurement Tools: Ready")
+        print("Professional Reporting System: Ready")
+        print("Intelligent Click Detection: Ready for Broadsheet")
+        print("Screen Calibration System: Ready")
+        app.run(debug=True)
+    else:
+        print("Cannot start application - Database connection failed!")
+        exit(1)

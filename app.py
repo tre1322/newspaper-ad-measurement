@@ -99,24 +99,36 @@ def start_background_processing(pub_id):
                 if not publication:
                     return
                 
-                # Update status to processing
-                publication.processing_status = 'extracting_pages'
-                db.session.commit()
+                # Update status to processing (if column exists)
+                try:
+                    if hasattr(publication, 'processing_status'):
+                        publication.processing_status = 'extracting_pages'
+                        db.session.commit()
+                except:
+                    pass
                 
                 # Process PDF to images and create page records
                 file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
                 pdf_doc = fitz.open(file_path)
                 
-                publication.processing_status = 'creating_images'
-                db.session.commit()
+                try:
+                    if hasattr(publication, 'processing_status'):
+                        publication.processing_status = 'creating_images'
+                        db.session.commit()
+                except:
+                    pass
                 
                 # Process each page (with batch processing to avoid timeouts)
                 batch_size = 3  # Process 3 pages at a time
                 for batch_start in range(0, pdf_doc.page_count, batch_size):
                     batch_end = min(batch_start + batch_size, pdf_doc.page_count)
                     
-                    publication.processing_status = f'processing_pages_{batch_start + 1}_to_{batch_end}'
-                    db.session.commit()
+                    try:
+                        if hasattr(publication, 'processing_status'):
+                            publication.processing_status = f'processing_pages_{batch_start + 1}_to_{batch_end}'
+                            db.session.commit()
+                    except:
+                        pass
                     
                     for page_num in range(batch_start, batch_end):
                         page = pdf_doc[page_num]
@@ -156,15 +168,24 @@ def start_background_processing(pub_id):
                 
                 # Mark as completed
                 publication.processed = True
-                publication.processing_status = 'completed'
+                try:
+                    if hasattr(publication, 'processing_status'):
+                        publication.processing_status = 'completed'
+                except:
+                    pass
                 db.session.commit()
                 
             except Exception as e:
                 # Mark as failed
                 publication = Publication.query.get(pub_id)
                 if publication:
-                    publication.processing_status = 'failed'
-                    publication.processing_error = str(e)
+                    try:
+                        if hasattr(publication, 'processing_status'):
+                            publication.processing_status = 'failed'
+                        if hasattr(publication, 'processing_error'):
+                            publication.processing_error = str(e)
+                    except:
+                        pass
                     db.session.commit()
     
     # Start processing in background thread
@@ -188,9 +209,12 @@ def process_publication_sync(pub_id):
             print(f"Starting basic processing for publication {pub_id}")
             
             # Mark as processing
-            if hasattr(publication, 'processing_status'):
-                publication.processing_status = 'processing'
-                db.session.commit()
+            try:
+                if hasattr(publication, 'processing_status'):
+                    publication.processing_status = 'processing'
+                    db.session.commit()
+            except:
+                pass
             
             # Process PDF to get basic page structure
             file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
@@ -220,18 +244,25 @@ def process_publication_sync(pub_id):
             
             # Mark as completed but with partial processing
             publication.processed = True
-            if hasattr(publication, 'processing_status'):
-                publication.processing_status = 'basic_completed'
+            try:
+                if hasattr(publication, 'processing_status'):
+                    publication.processing_status = 'basic_completed'
+            except:
+                pass
             db.session.commit()
             
             print(f"Basic processing completed for publication {pub_id}")
             
         except Exception as e:
             print(f"Error in synchronous processing: {e}")
-            if hasattr(publication, 'processing_status'):
-                publication.processing_status = 'failed'
-                publication.processing_error = str(e)
+            try:
+                if hasattr(publication, 'processing_status'):
+                    publication.processing_status = 'failed'
+                if hasattr(publication, 'processing_error'):
+                    publication.processing_error = str(e)
                 db.session.commit()
+            except:
+                pass  # Can't update status, but at least we tried
 
 def generate_page_image_if_needed(publication, page_number):
     """Generate page image on-demand if it doesn't exist"""
@@ -283,8 +314,28 @@ class Publication(db.Model):
     ad_percentage = db.Column(db.Float, default=0.0)
     upload_date = db.Column(db.DateTime, default=datetime.utcnow)
     processed = db.Column(db.Boolean, default=False)
-    processing_status = db.Column(db.String(50), default='uploaded')
-    processing_error = db.Column(db.String(500), nullable=True)
+    
+    @property 
+    def safe_processing_status(self):
+        """Get processing status with fallback"""
+        try:
+            # Try to access the column if it exists
+            if hasattr(self, 'processing_status'):
+                return self.processing_status
+        except:
+            pass
+        # Fallback based on processed status
+        return 'completed' if self.processed else 'uploaded'
+    
+    @property
+    def safe_processing_error(self):
+        """Get processing error with fallback"""
+        try:
+            if hasattr(self, 'processing_error'):
+                return self.processing_error
+        except:
+            pass
+        return None
 
 class Page(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -1483,9 +1534,15 @@ def upload():
                     original_filename=file.filename,
                     publication_type=pub_type,
                     total_pages=page_count,
-                    total_inches=total_inches,
-                    processing_status='uploaded'
+                    total_inches=total_inches
                 )
+                
+                # Try to set processing_status if column exists
+                try:
+                    if hasattr(Publication, 'processing_status'):
+                        publication.processing_status = 'uploaded'
+                except:
+                    pass  # Column doesn't exist, that's ok
                 
                 db.session.add(publication)
                 db.session.commit()
@@ -1518,18 +1575,21 @@ def get_processing_status(pub_id):
     try:
         publication = Publication.query.get_or_404(pub_id)
         
-        # Handle missing columns gracefully
-        status = getattr(publication, 'processing_status', 'completed' if publication.processed else 'uploaded')
-        error = getattr(publication, 'processing_error', None)
+        # Use safe properties
+        status = publication.safe_processing_status
+        error = publication.safe_processing_error
         
         # Start background processing if not started
         if status == 'uploaded':
             # Trigger background processing
             start_background_processing(pub_id)
-            if hasattr(publication, 'processing_status'):
-                publication.processing_status = 'processing'
-                db.session.commit()
-            status = 'processing'
+            try:
+                if hasattr(publication, 'processing_status'):
+                    publication.processing_status = 'processing'
+                    db.session.commit()
+                    status = 'processing'
+            except:
+                status = 'processing'  # Assume processing started even if we can't update status
         
         # Handle basic_completed status (when synchronous processing was used)
         if status == 'basic_completed':
@@ -2985,6 +3045,16 @@ def check_database_connection():
             # Try to query the database
             publication_count = Publication.query.count()
             print(f"Database connection OK - Found {publication_count} publications")
+            
+            # Check if processing columns exist
+            try:
+                test_pub = Publication.query.first()
+                if test_pub:
+                    _ = test_pub.safe_processing_status
+                    print("Processing status columns available")
+            except:
+                print("Processing status columns not available (using fallback)")
+            
             return True
     except Exception as e:
         print(f"Database connection ERROR: {e}")

@@ -110,21 +110,28 @@ def start_background_processing(pub_id):
                 publication.processing_status = 'creating_images'
                 db.session.commit()
                 
-                # Process each page
-                for page_num in range(pdf_doc.page_count):
-                    page = pdf_doc[page_num]
+                # Process each page (with batch processing to avoid timeouts)
+                batch_size = 3  # Process 3 pages at a time
+                for batch_start in range(0, pdf_doc.page_count, batch_size):
+                    batch_end = min(batch_start + batch_size, pdf_doc.page_count)
                     
-                    # Convert to image
-                    mat = fitz.Matrix(2, 2)  # 2x zoom for better quality
-                    pix = page.get_pixmap(matrix=mat)
-                    img_data = pix.tobytes("png")
+                    publication.processing_status = f'processing_pages_{batch_start + 1}_to_{batch_end}'
+                    db.session.commit()
                     
-                    # Save page image
-                    image_filename = f"{publication.filename}_page_{page_num + 1}.png"
-                    image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
-                    
-                    with open(image_path, 'wb') as img_file:
-                        img_file.write(img_data)
+                    for page_num in range(batch_start, batch_end):
+                        page = pdf_doc[page_num]
+                        
+                        # Convert to image with lower resolution for faster processing
+                        mat = fitz.Matrix(1.5, 1.5)  # Reduced from 2x to 1.5x for speed
+                        pix = page.get_pixmap(matrix=mat)
+                        img_data = pix.tobytes("png")
+                        
+                        # Save page image
+                        image_filename = f"{publication.filename}_page_{page_num + 1}.png"
+                        image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+                        
+                        with open(image_path, 'wb') as img_file:
+                            img_file.write(img_data)
                     
                     # Create page record
                     config = PUBLICATION_CONFIGS[publication.publication_type]
@@ -171,23 +178,53 @@ def start_background_processing(pub_id):
         process_publication_sync(pub_id)
 
 def process_publication_sync(pub_id):
-    """Synchronous processing fallback"""
+    """Synchronous processing fallback - does basic setup only"""
     with app.app_context():
         try:
             publication = Publication.query.get(pub_id)
             if not publication:
                 return
             
+            print(f"Starting basic processing for publication {pub_id}")
+            
             # Mark as processing
             if hasattr(publication, 'processing_status'):
                 publication.processing_status = 'processing'
                 db.session.commit()
             
-            # Do minimal processing to avoid timeouts
+            # Process PDF to get basic page structure
+            file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
+            pdf_doc = fitz.open(file_path)
+            
+            # Create minimal page records without heavy image processing
+            config = PUBLICATION_CONFIGS[publication.publication_type]
+            for page_num in range(pdf_doc.page_count):
+                # Check if page already exists
+                existing_page = Page.query.filter_by(
+                    publication_id=publication.id, 
+                    page_number=page_num + 1
+                ).first()
+                
+                if not existing_page:
+                    page_record = Page(
+                        publication_id=publication.id,
+                        page_number=page_num + 1,
+                        total_inches=config['total_inches_per_page'],
+                        total_ad_inches=0.0,
+                        ad_percentage=0.0,
+                        image_filename=f"{publication.filename}_page_{page_num + 1}.png"
+                    )
+                    db.session.add(page_record)
+            
+            pdf_doc.close()
+            
+            # Mark as completed but with partial processing
             publication.processed = True
             if hasattr(publication, 'processing_status'):
-                publication.processing_status = 'completed'
+                publication.processing_status = 'basic_completed'
             db.session.commit()
+            
+            print(f"Basic processing completed for publication {pub_id}")
             
         except Exception as e:
             print(f"Error in synchronous processing: {e}")
@@ -195,6 +232,39 @@ def process_publication_sync(pub_id):
                 publication.processing_status = 'failed'
                 publication.processing_error = str(e)
                 db.session.commit()
+
+def generate_page_image_if_needed(publication, page_number):
+    """Generate page image on-demand if it doesn't exist"""
+    image_filename = f"{publication.filename}_page_{page_number}.png"
+    image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+    
+    # Check if image already exists
+    if os.path.exists(image_path):
+        return image_filename
+    
+    try:
+        # Generate image from PDF
+        pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
+        pdf_doc = fitz.open(pdf_path)
+        
+        if page_number <= pdf_doc.page_count:
+            page = pdf_doc[page_number - 1]  # 0-based indexing
+            mat = fitz.Matrix(1.5, 1.5)  # Good quality but not too heavy
+            pix = page.get_pixmap(matrix=mat)
+            img_data = pix.tobytes("png")
+            
+            # Save image
+            with open(image_path, 'wb') as img_file:
+                img_file.write(img_data)
+            
+            print(f"Generated image for page {page_number} of publication {publication.id}")
+        
+        pdf_doc.close()
+        return image_filename
+        
+    except Exception as e:
+        print(f"Error generating page image: {e}")
+        return None
 
 # Create upload directories
 os.makedirs(app.config['UPLOAD_FOLDER'], exist_ok=True)
@@ -1420,7 +1490,8 @@ def upload():
                 db.session.add(publication)
                 db.session.commit()
                 
-                flash(f'File uploaded successfully! Processing {page_count} pages...')
+                flash(f'File uploaded successfully! Processing {page_count} pages...', 'success')
+                print(f"Upload completed for publication {publication.id}: {publication.original_filename}")
                 # Redirect to processing status page instead of doing processing immediately
                 return redirect(url_for('processing_status', pub_id=publication.id))
                 
@@ -1459,6 +1530,10 @@ def get_processing_status(pub_id):
                 publication.processing_status = 'processing'
                 db.session.commit()
             status = 'processing'
+        
+        # Handle basic_completed status (when synchronous processing was used)
+        if status == 'basic_completed':
+            status = 'completed'
         
         return jsonify({
             'status': status,
@@ -1658,17 +1733,19 @@ def measure_page(pub_id, page_num):
 
 @app.route('/page-image/<int:page_id>')
 def serve_page_image(page_id):
-    """Serve page images"""
+    """Serve page images with lazy generation"""
     page = Page.query.get_or_404(page_id)
     publication = Publication.query.get(page.publication_id)
     
-    image_filename = f"{publication.filename}_page_{page.page_number}.png"
-    image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+    # Try to generate image if it doesn't exist
+    image_filename = generate_page_image_if_needed(publication, page.page_number)
     
-    if os.path.exists(image_path):
-        return send_file(image_path, mimetype='image/png')
-    else:
-        return "Image not found", 404
+    if image_filename:
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+        if os.path.exists(image_path):
+            return send_file(image_path, mimetype='image/png')
+    
+    return "Image could not be generated", 404
 
 # CALIBRATION ROUTES
 @app.route('/calibrate')

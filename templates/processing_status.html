@@ -159,12 +159,30 @@ document.addEventListener('DOMContentLoaded', function() {
         'extracting_pages': { step: 2, message: 'Extracting pages from PDF', progress: 30 },
         'creating_images': { step: 3, message: 'Converting pages to images', progress: 60 },
         'ai_detection': { step: 4, message: 'Running AI ad detection', progress: 80 },
+        'basic_completed': { step: 5, message: 'Basic setup complete!', progress: 100 },
         'completed': { step: 5, message: 'Processing complete!', progress: 100 },
         'failed': { step: -1, message: 'Processing failed', progress: 0 }
     };
     
     function updateStatus(status, error, redirectUrl) {
+        // Handle dynamic page processing status
+        if (status.startsWith('processing_pages_')) {
+            const match = status.match(/processing_pages_(\d+)_to_(\d+)/);
+            if (match) {
+                const statusInfo = {
+                    step: 3,
+                    message: `Converting pages ${match[1]}-${match[2]} to images`,
+                    progress: Math.min(40 + parseInt(match[2]) * 2, 90)
+                };
+                return updateStatusDisplay(statusInfo, status, error, redirectUrl);
+            }
+        }
+        
         const statusInfo = statusSteps[status] || statusSteps['processing'];
+        return updateStatusDisplay(statusInfo, status, error, redirectUrl);
+    }
+    
+    function updateStatusDisplay(statusInfo, status, error, redirectUrl) {
         
         // Update progress bar
         const progressBar = document.getElementById('progress-bar');
@@ -191,7 +209,7 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         });
         
-        if (status === 'completed') {
+        if (status === 'completed' || status === 'basic_completed') {
             // Success
             document.getElementById('status-icon').innerHTML = '<i class="fas fa-check-circle status-completed"></i>';
             document.getElementById('status-message').textContent = 'Processing complete! Redirecting...';

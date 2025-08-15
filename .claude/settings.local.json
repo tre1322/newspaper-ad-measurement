@@ -6,7 +6,8 @@
       "Bash(rm:*)",
       "Bash(pip install:*)",
       "Bash(git add:*)",
-      "Bash(timeout:*)"
+      "Bash(timeout:*)",
+      "Bash(echo:*)"
     ],
     "deny": [],
     "defaultMode": "acceptEdits"

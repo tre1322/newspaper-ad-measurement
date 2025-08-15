@@ -129,6 +129,14 @@ def start_background_processing(pub_id):
                 if not publication:
                     return
                 
+                # Check if already processed or processing to prevent duplicates
+                current_status = publication.safe_processing_status
+                if publication.processed or current_status in ['processing', 'extracting_pages', 'creating_images', 'ai_detection', 'completed']:
+                    print(f"Publication {pub_id} already processed or processing (status: {current_status}), skipping")
+                    return
+                
+                print(f"Starting background processing for publication {pub_id}")
+                
                 # Update status to processing
                 publication.set_processing_status('extracting_pages')
                 db.session.commit()
@@ -146,7 +154,6 @@ def start_background_processing(pub_id):
                     batch_end = min(batch_start + batch_size, pdf_doc.page_count)
                     
                     publication.set_processing_status(f'processing_pages_{batch_start + 1}_to_{batch_end}')
-                    db.session.commit()
                     
                     for page_num in range(batch_start, batch_end):
                         page = pdf_doc[page_num]
@@ -163,16 +170,30 @@ def start_background_processing(pub_id):
                         with open(image_path, 'wb') as img_file:
                             img_file.write(img_data)
                         
-                        # Create page record for this specific page
-                        config = PUBLICATION_CONFIGS[publication.publication_type]
-                        page_record = Page(
+                        # Check if page record already exists to prevent duplicates
+                        existing_page = Page.query.filter_by(
                             publication_id=publication.id,
-                            page_number=page_num + 1,
-                            width_pixels=pix.width,
-                            height_pixels=pix.height,
-                            total_page_inches=config['total_inches_per_page']
-                        )
-                        db.session.add(page_record)
+                            page_number=page_num + 1
+                        ).first()
+                        
+                        if not existing_page:
+                            # Create page record for this specific page
+                            config = PUBLICATION_CONFIGS[publication.publication_type]
+                            page_record = Page(
+                                publication_id=publication.id,
+                                page_number=page_num + 1,
+                                width_pixels=pix.width,
+                                height_pixels=pix.height,
+                                total_page_inches=config['total_inches_per_page']
+                            )
+                            db.session.add(page_record)
+                            print(f"Created page record for page {page_num + 1}")
+                        else:
+                            print(f"Page record for page {page_num + 1} already exists, skipping")
+                    
+                    # Commit the batch of page records
+                    db.session.commit()
+                    print(f"Committed batch {batch_start + 1}-{batch_end}")
                 
                 pdf_doc.close()
                 

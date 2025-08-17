@@ -304,7 +304,7 @@ def start_background_processing(pub_id):
                         signal.alarm(300)  # 5 minutes
                     
                     try:
-                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.6)
+                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.4)
                         
                         if result['success']:
                             print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
@@ -2177,7 +2177,7 @@ def process_publication(pub_id):
             
             # AI Box Detection - Use ML predictions if model is available, fallback to CV detection
             detected_boxes = []
-            ml_predictions = AdLearningEngine.predict_ads(image_path, publication.publication_type, confidence_threshold=0.6)
+            ml_predictions = AdLearningEngine.predict_ads(image_path, publication.publication_type, confidence_threshold=0.4)
             
             if ml_predictions['success'] and ml_predictions['predictions']:
                 # Use ML predictions
@@ -3561,12 +3561,10 @@ with app.app_context():
     try:
         from sqlalchemy import text, inspect
         
-        # Temporarily allow schema updates in production for critical column addition
-        # Skip schema updates in production to prevent worker timeout
-        # if os.environ.get('RAILWAY_ENVIRONMENT'):
-        #     print("Skipping schema updates in production environment")
-        # else:
-        if True:
+        # Skip schema updates in production to prevent worker timeout (re-enabled after column fix)
+        if os.environ.get('RAILWAY_ENVIRONMENT'):
+            print("Skipping schema updates in production environment")
+        else:
             inspector = inspect(db.engine)
             columns = [col['name'] for col in inspector.get_columns('publication')]
             

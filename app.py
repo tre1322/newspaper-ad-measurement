@@ -283,17 +283,20 @@ def start_background_processing(pub_id):
                 publication.set_processing_status('ai_detection')
                 db.session.commit()
                 
-                # Run AI ad detection
-                print(f"Running AI ad detection for publication {publication.id}")
+                # Run AI ad detection at the end of processing
+                print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                 result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.6)
                 
                 if result['success']:
-                    print(f"AI detection complete: {result['detections']} ads detected across {result['pages_processed']} pages")
+                    print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
                     if result['detections'] > 0:
-                        print(f"Used model: {result.get('model_used', 'Unknown')}")
+                        print(f"📊 Model used: {result.get('model_used', 'Unknown')}")
+                        print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
+                    else:
+                        print(f"ℹ️  No ads detected above confidence threshold - you can manually mark ads as usual")
                 else:
-                    print(f"AI detection failed or no model available: {result['error']}")
-                    # Continue processing even if AI detection fails
+                    print(f"⚠️  AI detection not available: {result['error']}")
+                    print(f"📝 Continue with manual ad marking as usual")
                 
                 # Mark as completed
                 publication.processed = True
@@ -2604,9 +2607,8 @@ def update_box(box_id):
         
         db.session.commit()
         
-        # Automatically extract features for ML training when user modifies ad (disabled during deployment)
-        if False:  # Temporarily disabled to prevent deployment hanging
-            try:
+        # Automatically extract features for ML training when user modifies ad
+        try:
             image_filename = f"{publication.filename}_page_{page.page_number}.png"
             image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
             
@@ -2732,9 +2734,8 @@ def add_box(page_id):
         db.session.add(ad_box)
         db.session.commit()
         
-        # Automatically extract features for ML training (disabled during deployment)
-        if False:  # Temporarily disabled to prevent deployment hanging
-            try:
+        # Automatically extract features for ML training
+        try:
             image_filename = f"{publication.filename}_page_{page.page_number}.png"
             image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
             
@@ -2857,11 +2858,10 @@ def intelligent_detect_ad(page_id):
         db.session.add(ad_box)
         db.session.commit()
         
-        # Automatically extract features for ML training (disabled during deployment)
-        if False:  # Temporarily disabled to prevent deployment hanging
-            try:
-                box_coords = {'x': detected_box['x'], 'y': detected_box['y'], 'width': detected_box['width'], 'height': detected_box['height']}
-                features = AdLearningEngine.extract_features(image_path, box_coords)
+        # Automatically extract features for ML training
+        try:
+            box_coords = {'x': detected_box['x'], 'y': detected_box['y'], 'width': detected_box['width'], 'height': detected_box['height']}
+            features = AdLearningEngine.extract_features(image_path, box_coords)
             
             if features:
                 # Check if training data already exists
@@ -3466,52 +3466,6 @@ def ml_dashboard():
         flash(f'Error loading ML dashboard: {str(e)}', 'error')
         return redirect(url_for('index'))
 
-@app.route('/api/ml/auto_detect/<int:publication_id>', methods=['POST'])
-@login_required
-def api_auto_detect_ads(publication_id):
-    """Manually trigger auto-detection for a publication"""
-    try:
-        data = request.get_json() or {}
-        confidence_threshold = data.get('confidence_threshold', 0.7)
-        
-        result = AdLearningEngine.auto_detect_ads(publication_id, confidence_threshold)
-        
-        if result['success']:
-            return jsonify({
-                'success': True,
-                'message': f"Detected {result['detections']} ads across {result['pages_processed']} pages",
-                'detections': result['detections'],
-                'pages_processed': result['pages_processed'],
-                'model_used': result.get('model_used', 'Unknown'),
-                'confidence_threshold': result['confidence_threshold']
-            })
-        else:
-            return jsonify({'success': False, 'error': result['error']})
-            
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/api/publications')
-@login_required
-def api_get_publications():
-    """Get list of publications for auto-detection"""
-    try:
-        publications = Publication.query.filter_by(processed=True).order_by(Publication.upload_date.desc()).all()
-        
-        result = []
-        for pub in publications:
-            result.append({
-                'id': pub.id,
-                'filename': pub.filename,
-                'publication_type': pub.publication_type,
-                'upload_date': pub.upload_date.strftime('%Y-%m-%d'),
-                'page_count': len(pub.pages)
-            })
-        
-        return jsonify({'success': True, 'publications': result})
-        
-    except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
 
 # Create database tables and ensure schema is up to date
 with app.app_context():

@@ -283,9 +283,17 @@ def start_background_processing(pub_id):
                 publication.set_processing_status('ai_detection')
                 db.session.commit()
                 
-                # AI processing would go here (simplified for now)
-                import time
-                time.sleep(2)  # Simulate AI processing time
+                # Run AI ad detection
+                print(f"Running AI ad detection for publication {publication.id}")
+                result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.6)
+                
+                if result['success']:
+                    print(f"AI detection complete: {result['detections']} ads detected across {result['pages_processed']} pages")
+                    if result['detections'] > 0:
+                        print(f"Used model: {result.get('model_used', 'Unknown')}")
+                else:
+                    print(f"AI detection failed or no model available: {result['error']}")
+                    # Continue processing even if AI detection fails
                 
                 # Mark as completed
                 publication.processed = True
@@ -494,6 +502,8 @@ class AdBox(db.Model):
     ad_type = db.Column(db.String(50), default='manual')  # manual, open_display, entertainment, classified, public_notice
     is_ad = db.Column(db.Boolean, default=True)
     user_verified = db.Column(db.Boolean, default=False)
+    detected_automatically = db.Column(db.Boolean, default=False)
+    confidence_score = db.Column(db.Float)  # AI detection confidence
     created_date = db.Column(db.DateTime, default=datetime.utcnow)
 
 class ScreenCalibration(db.Model):
@@ -1372,6 +1382,276 @@ class AdLearningEngine:
                 stats['recent_samples'] += 1
         
         return stats
+    
+    @staticmethod
+    def auto_detect_ads(publication_id, confidence_threshold=0.7):
+        """Automatically detect ads in a publication using trained models"""
+        try:
+            publication = Publication.query.get(publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
+            
+            # Get the active model for this publication type
+            model_record = MLModel.query.filter_by(
+                publication_type=publication.publication_type,
+                model_type='ad_detector',
+                is_active=True
+            ).first()
+            
+            if not model_record:
+                print(f"No active model found for publication type: {publication.publication_type}")
+                return {'success': False, 'error': f'No trained model available for {publication.publication_type}'}
+            
+            # Load the trained model
+            import pickle
+            model = pickle.loads(model_record.model_data)
+            feature_names = json.loads(model_record.feature_names) if model_record.feature_names else []
+            
+            detections = []
+            pages_processed = 0
+            
+            # Process each page
+            for page in publication.pages:
+                image_path = os.path.join('static', 'uploads', page.image_filename)
+                if not os.path.exists(image_path):
+                    continue
+                
+                # Use sliding window approach to scan for ads
+                detected_boxes = AdLearningEngine._scan_page_for_ads(
+                    image_path, model, feature_names, confidence_threshold
+                )
+                
+                for box in detected_boxes:
+                    # Create AdBox record
+                    config = PUBLICATION_CONFIGS[publication.publication_type]
+                    calculator = MeasurementCalculator()
+                    
+                    column_inches = calculator.pixels_to_inches(
+                        box['height'] * box['width'],
+                        config['page_height_pixels'] * config['page_width_pixels'],
+                        config['page_total_inches']
+                    )
+                    
+                    ad_box = AdBox(
+                        page_id=page.id,
+                        x=box['x'],
+                        y=box['y'],
+                        width=box['width'],
+                        height=box['height'],
+                        column_inches=column_inches,
+                        is_ad=True,
+                        confidence_score=box['confidence'],
+                        detected_automatically=True
+                    )
+                    
+                    db.session.add(ad_box)
+                    detections.append({
+                        'page_id': page.id,
+                        'x': box['x'],
+                        'y': box['y'],
+                        'width': box['width'],
+                        'height': box['height'],
+                        'confidence': box['confidence']
+                    })
+                
+                pages_processed += 1
+            
+            db.session.commit()
+            
+            # Update publication totals
+            from app import update_totals
+            for page in publication.pages:
+                update_totals(page.id)
+            
+            return {
+                'success': True,
+                'detections': len(detections),
+                'pages_processed': pages_processed,
+                'model_used': model_record.model_name,
+                'confidence_threshold': confidence_threshold
+            }
+            
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error in auto_detect_ads: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+    
+    @staticmethod
+    def _scan_page_for_ads(image_path, model, feature_names, confidence_threshold=0.7, window_size=(200, 200), stride=50):
+        """Scan page using sliding window to detect ads"""
+        try:
+            import cv2
+            import numpy as np
+            
+            # Load image
+            img = cv2.imread(image_path)
+            if img is None:
+                return []
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            height, width = gray.shape
+            
+            detections = []
+            window_w, window_h = window_size
+            
+            # Sliding window scan
+            for y in range(0, height - window_h, stride):
+                for x in range(0, width - window_w, stride):
+                    # Extract window
+                    window = gray[y:y+window_h, x:x+window_w]
+                    
+                    # Extract features for this window
+                    features = AdLearningEngine._extract_window_features(window, x, y, width, height)
+                    if features is None:
+                        continue
+                    
+                    # Make prediction
+                    try:
+                        # Reshape for sklearn
+                        features_array = np.array(features).reshape(1, -1)
+                        
+                        # Get prediction and probability
+                        if hasattr(model, 'predict_proba'):
+                            proba = model.predict_proba(features_array)[0]
+                            # Assuming binary classification: [not_ad_prob, ad_prob]
+                            confidence = proba[1] if len(proba) > 1 else proba[0]
+                        else:
+                            # Fallback for models without predict_proba
+                            prediction = model.predict(features_array)[0]
+                            confidence = 0.8 if prediction == 1 else 0.2
+                        
+                        # If confidence is above threshold, consider it an ad
+                        if confidence >= confidence_threshold:
+                            # Expand window to capture full ad (simple approach)
+                            expanded_box = AdLearningEngine._expand_detection(
+                                gray, x, y, window_w, window_h, width, height
+                            )
+                            
+                            # Check for overlapping detections
+                            if not AdLearningEngine._overlaps_existing(expanded_box, detections, overlap_threshold=0.3):
+                                detections.append({
+                                    'x': expanded_box['x'],
+                                    'y': expanded_box['y'],
+                                    'width': expanded_box['width'],
+                                    'height': expanded_box['height'],
+                                    'confidence': confidence
+                                })
+                    
+                    except Exception as e:
+                        # Skip this window if prediction fails
+                        continue
+            
+            # Sort by confidence and return top detections
+            detections.sort(key=lambda x: x['confidence'], reverse=True)
+            return detections[:20]  # Limit to top 20 detections per page
+            
+        except Exception as e:
+            print(f"Error in _scan_page_for_ads: {e}")
+            return []
+    
+    @staticmethod
+    def _extract_window_features(window, x, y, page_width, page_height):
+        """Extract features from a window for ad detection"""
+        try:
+            if window.size == 0:
+                return None
+            
+            import cv2
+            import numpy as np
+            
+            # Basic geometric features
+            height, width = window.shape
+            aspect_ratio = width / height if height > 0 else 0
+            area = width * height
+            relative_x = x / page_width if page_width > 0 else 0
+            relative_y = y / page_height if page_height > 0 else 0
+            
+            # Statistical features
+            mean_intensity = np.mean(window)
+            std_intensity = np.std(window)
+            
+            # Edge detection
+            edges = cv2.Canny(window, 50, 150)
+            edge_density = np.sum(edges > 0) / (width * height)
+            
+            # Texture features (simplified)
+            if window.std() > 0:
+                # Compute local binary pattern approximation
+                texture_score = cv2.Laplacian(window, cv2.CV_64F).var()
+            else:
+                texture_score = 0
+            
+            # Contrast and brightness
+            min_val, max_val = np.min(window), np.max(window)
+            contrast = max_val - min_val if max_val > min_val else 0
+            
+            features = [
+                aspect_ratio,
+                area,
+                relative_x,
+                relative_y,
+                mean_intensity,
+                std_intensity,
+                edge_density,
+                texture_score,
+                contrast,
+                width,
+                height
+            ]
+            
+            return features
+            
+        except Exception as e:
+            print(f"Error extracting window features: {e}")
+            return None
+    
+    @staticmethod
+    def _expand_detection(gray, x, y, w, h, page_width, page_height, expansion_factor=1.5):
+        """Expand a detection window to capture the full ad"""
+        # Simple expansion - multiply dimensions by factor
+        new_w = min(int(w * expansion_factor), page_width - x)
+        new_h = min(int(h * expansion_factor), page_height - y)
+        
+        # Center the expansion
+        expand_x = max(0, x - int((new_w - w) / 2))
+        expand_y = max(0, y - int((new_h - h) / 2))
+        
+        # Ensure we don't go outside image bounds
+        if expand_x + new_w > page_width:
+            expand_x = page_width - new_w
+        if expand_y + new_h > page_height:
+            expand_y = page_height - new_h
+        
+        return {
+            'x': expand_x,
+            'y': expand_y,
+            'width': new_w,
+            'height': new_h
+        }
+    
+    @staticmethod
+    def _overlaps_existing(new_box, existing_detections, overlap_threshold=0.3):
+        """Check if a new detection overlaps with existing ones"""
+        for existing in existing_detections:
+            # Calculate intersection
+            x1 = max(new_box['x'], existing['x'])
+            y1 = max(new_box['y'], existing['y'])
+            x2 = min(new_box['x'] + new_box['width'], existing['x'] + existing['width'])
+            y2 = min(new_box['y'] + new_box['height'], existing['y'] + existing['height'])
+            
+            if x2 > x1 and y2 > y1:
+                intersection = (x2 - x1) * (y2 - y1)
+                new_area = new_box['width'] * new_box['height']
+                existing_area = existing['width'] * existing['height']
+                union = new_area + existing_area - intersection
+                
+                overlap = intersection / union if union > 0 else 0
+                if overlap > overlap_threshold:
+                    return True
+        
+        return False
 
 # Measurement Calculator
 class MeasurementCalculator:
@@ -3172,6 +3452,53 @@ def ml_dashboard():
         flash(f'Error loading ML dashboard: {str(e)}', 'error')
         return redirect(url_for('index'))
 
+@app.route('/api/ml/auto_detect/<int:publication_id>', methods=['POST'])
+@login_required
+def api_auto_detect_ads(publication_id):
+    """Manually trigger auto-detection for a publication"""
+    try:
+        data = request.get_json() or {}
+        confidence_threshold = data.get('confidence_threshold', 0.7)
+        
+        result = AdLearningEngine.auto_detect_ads(publication_id, confidence_threshold)
+        
+        if result['success']:
+            return jsonify({
+                'success': True,
+                'message': f"Detected {result['detections']} ads across {result['pages_processed']} pages",
+                'detections': result['detections'],
+                'pages_processed': result['pages_processed'],
+                'model_used': result.get('model_used', 'Unknown'),
+                'confidence_threshold': result['confidence_threshold']
+            })
+        else:
+            return jsonify({'success': False, 'error': result['error']})
+            
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/publications')
+@login_required
+def api_get_publications():
+    """Get list of publications for auto-detection"""
+    try:
+        publications = Publication.query.filter_by(processed=True).order_by(Publication.upload_date.desc()).all()
+        
+        result = []
+        for pub in publications:
+            result.append({
+                'id': pub.id,
+                'filename': pub.filename,
+                'publication_type': pub.publication_type,
+                'upload_date': pub.upload_date.strftime('%Y-%m-%d'),
+                'page_count': len(pub.pages)
+            })
+        
+        return jsonify({'success': True, 'publications': result})
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 # Create database tables and ensure schema is up to date
 with app.app_context():
     db.create_all()
@@ -3186,6 +3513,19 @@ with app.app_context():
             db.session.execute(text('ALTER TABLE publication ADD COLUMN processing_status VARCHAR(50) DEFAULT "uploaded"'))
             db.session.commit()
             print("Added processing_status column")
+        
+        # Check and add auto-detection columns to ad_box
+        ad_box_columns = [col['name'] for col in inspector.get_columns('ad_box')]
+        
+        if 'detected_automatically' not in ad_box_columns:
+            db.session.execute(text('ALTER TABLE ad_box ADD COLUMN detected_automatically BOOLEAN DEFAULT FALSE'))
+            db.session.commit()
+            print("Added detected_automatically column to ad_box")
+        
+        if 'confidence_score' not in ad_box_columns:
+            db.session.execute(text('ALTER TABLE ad_box ADD COLUMN confidence_score FLOAT'))
+            db.session.commit()
+            print("Added confidence_score column to ad_box")
             
         if 'processing_error' not in columns:
             db.session.execute(text('ALTER TABLE publication ADD COLUMN processing_error VARCHAR(500)'))

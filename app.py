@@ -910,6 +910,9 @@ class AdLearningEngine:
     def extract_features(image_path, box_coords):
         """Extract comprehensive features from an ad region for ML training"""
         try:
+            import time
+            start_time = time.time()
+            
             # Load image
             img = cv2.imread(image_path)
             if img is None:
@@ -918,9 +921,16 @@ class AdLearningEngine:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             x, y, w, h = int(box_coords['x']), int(box_coords['y']), int(box_coords['width']), int(box_coords['height'])
             
+            # Ensure coordinates are within image bounds
+            img_h, img_w = gray.shape
+            x = max(0, min(x, img_w - 1))
+            y = max(0, min(y, img_h - 1))
+            w = min(w, img_w - x)
+            h = min(h, img_h - y)
+            
             # Extract region of interest
             roi = gray[y:y+h, x:x+w]
-            if roi.size == 0:
+            if roi.size == 0 or w <= 0 or h <= 0:
                 return None
             
             # Feature extraction
@@ -947,24 +957,15 @@ class AdLearningEngine:
             features['max_intensity'] = np.max(roi)
             features['intensity_range'] = features['max_intensity'] - features['min_intensity']
             
-            # 4. Texture analysis
-            # Calculate local binary patterns
-            roi_padded = np.pad(roi, 1, mode='edge')
-            lbp_like = 0
-            for i in range(1, roi.shape[0]-1):
-                for j in range(1, roi.shape[1]-1):
-                    center = roi_padded[i+1, j+1]
-                    binary_str = ''
-                    for di in [-1, -1, -1, 0, 0, 1, 1, 1]:
-                        for dj in [-1, 0, 1, -1, 1, -1, 0, 1]:
-                            if roi_padded[i+1+di, j+1+dj] > center:
-                                binary_str += '1'
-                            else:
-                                binary_str += '0'
-                            break  # Only check one neighbor per direction
-                    if len(binary_str) > 0:
-                        lbp_like += int(binary_str, 2) % 256
-            features['texture_complexity'] = lbp_like / (roi.shape[0] * roi.shape[1]) if roi.size > 0 else 0
+            # 4. Texture analysis (simplified and fast)
+            # Check timeout
+            if time.time() - start_time > 5:  # 5 second timeout
+                print(f"Feature extraction timeout for {image_path}")
+                return None
+                
+            # Fast texture measure using Laplacian variance
+            laplacian = cv2.Laplacian(roi, cv2.CV_64F)
+            features['texture_complexity'] = laplacian.var() / 10000.0  # Normalize
             
             # 5. Edge density features
             edges = cv2.Canny(roi, 50, 150)
@@ -1049,8 +1050,18 @@ class AdLearningEngine:
         
         print(f"Processing {total_boxes} verified ads for training data collection...")
         
+        # Add timeout protection
+        import time
+        start_time = time.time()
+        max_processing_time = 300  # 5 minutes max
+        
         for i, ad_box in enumerate(verified_boxes):
             try:
+                # Check overall timeout
+                if time.time() - start_time > max_processing_time:
+                    print(f"Training data collection timeout after {max_processing_time}s, processed {i}/{total_boxes}")
+                    break
+                    
                 if i % 10 == 0:
                     print(f"Progress: {i}/{total_boxes} ({i/total_boxes*100:.1f}%)")
                 
@@ -2593,8 +2604,9 @@ def update_box(box_id):
         
         db.session.commit()
         
-        # Automatically extract features for ML training when user modifies ad
-        try:
+        # Automatically extract features for ML training when user modifies ad (disabled during deployment)
+        if False:  # Temporarily disabled to prevent deployment hanging
+            try:
             image_filename = f"{publication.filename}_page_{page.page_number}.png"
             image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
             
@@ -2720,8 +2732,9 @@ def add_box(page_id):
         db.session.add(ad_box)
         db.session.commit()
         
-        # Automatically extract features for ML training
-        try:
+        # Automatically extract features for ML training (disabled during deployment)
+        if False:  # Temporarily disabled to prevent deployment hanging
+            try:
             image_filename = f"{publication.filename}_page_{page.page_number}.png"
             image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
             
@@ -2844,10 +2857,11 @@ def intelligent_detect_ad(page_id):
         db.session.add(ad_box)
         db.session.commit()
         
-        # Automatically extract features for ML training
-        try:
-            box_coords = {'x': detected_box['x'], 'y': detected_box['y'], 'width': detected_box['width'], 'height': detected_box['height']}
-            features = AdLearningEngine.extract_features(image_path, box_coords)
+        # Automatically extract features for ML training (disabled during deployment)
+        if False:  # Temporarily disabled to prevent deployment hanging
+            try:
+                box_coords = {'x': detected_box['x'], 'y': detected_box['y'], 'width': detected_box['width'], 'height': detected_box['height']}
+                features = AdLearningEngine.extract_features(image_path, box_coords)
             
             if features:
                 # Check if training data already exists

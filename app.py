@@ -2262,6 +2262,9 @@ def delete_box(box_id):
         ad_box = AdBox.query.get_or_404(box_id)
         page_id = ad_box.page_id
         
+        # Delete related training data first
+        TrainingData.query.filter_by(ad_box_id=box_id).delete()
+        
         db.session.delete(ad_box)
         db.session.commit()
         

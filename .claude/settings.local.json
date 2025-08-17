@@ -10,7 +10,9 @@
       "Bash(echo:*)",
       "Bash(curl:*)",
       "Bash(flask db:*)",
-      "Bash(alembic:*)"
+      "Bash(alembic:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)"
     ],
     "deny": [],
     "defaultMode": "acceptEdits"

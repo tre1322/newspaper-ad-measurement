@@ -1998,7 +1998,17 @@ def upload():
                 file_path = os.path.join(pdf_dir, unique_filename)
                 print(f"💾 Saving file to: {file_path}")
                 file.save(file_path)
-                print(f"✅ File saved successfully")
+                
+                # Check file size after saving
+                if os.path.exists(file_path):
+                    file_size = os.path.getsize(file_path)
+                    print(f"✅ File saved successfully - Size: {file_size} bytes")
+                    if file_size < 1000:  # Less than 1KB is suspicious
+                        print(f"⚠️ Warning: File size is unusually small ({file_size} bytes)")
+                else:
+                    print(f"❌ Error: File was not saved properly")
+                    flash('File upload failed. Please try again.', 'error')
+                    return redirect(request.url)
                 
                 # Validate the uploaded file is actually a PDF
                 print(f"🔍 Validating PDF file...")

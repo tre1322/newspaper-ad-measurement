@@ -92,6 +92,11 @@ def check_processing_columns():
     if PROCESSING_COLUMNS_EXIST is not None:
         return PROCESSING_COLUMNS_EXIST
     
+    # Skip column checks in production to prevent hanging
+    if os.environ.get('RAILWAY_ENVIRONMENT'):
+        PROCESSING_COLUMNS_EXIST = False
+        return False
+    
     try:
         with db.engine.connect() as conn:
             # Check if processing_status column exists
@@ -283,20 +288,41 @@ def start_background_processing(pub_id):
                 publication.set_processing_status('ai_detection')
                 db.session.commit()
                 
-                # Run AI ad detection at the end of processing
-                print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
-                result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.6)
-                
-                if result['success']:
-                    print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
-                    if result['detections'] > 0:
-                        print(f"📊 Model used: {result.get('model_used', 'Unknown')}")
-                        print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
-                    else:
-                        print(f"ℹ️  No ads detected above confidence threshold - you can manually mark ads as usual")
-                else:
-                    print(f"⚠️  AI detection not available: {result['error']}")
-                    print(f"📝 Continue with manual ad marking as usual")
+                # Run AI ad detection at the end of processing (with timeout protection)
+                try:
+                    print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
+                    
+                    # Add timeout protection for auto-detection
+                    import signal
+                    
+                    def timeout_handler(signum, frame):
+                        raise TimeoutError("Auto-detection timeout")
+                    
+                    # Set 5 minute timeout for auto-detection
+                    if hasattr(signal, 'SIGALRM'):  # Unix systems only
+                        signal.signal(signal.SIGALRM, timeout_handler)
+                        signal.alarm(300)  # 5 minutes
+                    
+                    try:
+                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.6)
+                        
+                        if result['success']:
+                            print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
+                            if result['detections'] > 0:
+                                print(f"📊 Model used: {result.get('model_used', 'Unknown')}")
+                                print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
+                            else:
+                                print(f"ℹ️  No ads detected above confidence threshold - you can manually mark ads as usual")
+                        else:
+                            print(f"⚠️  AI detection not available: {result['error']}")
+                            print(f"📝 Continue with manual ad marking as usual")
+                    finally:
+                        if hasattr(signal, 'SIGALRM'):
+                            signal.alarm(0)  # Cancel alarm
+                            
+                except (TimeoutError, Exception) as e:
+                    print(f"⚠️  Auto-detection failed or timed out: {e}")
+                    print(f"📝 Publication processed successfully - continue with manual ad marking")
                 
                 # Mark as completed
                 publication.processed = True
@@ -1989,8 +2015,11 @@ def upload():
                     total_inches=total_inches
                 )
                 
-                # Set processing status if available
-                publication.set_processing_status('uploaded')
+                # Set processing status if available (with timeout protection)
+                try:
+                    publication.set_processing_status('uploaded')
+                except Exception as e:
+                    print(f"Warning: Could not set processing status: {e}")
                 
                 db.session.add(publication)
                 db.session.commit()

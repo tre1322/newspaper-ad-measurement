@@ -313,7 +313,7 @@ def start_background_processing(pub_id):
                     start_time = time.time()
                     
                     try:
-                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.4)
+                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.2)
                         
                         if result['success']:
                             print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")

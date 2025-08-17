@@ -3559,10 +3559,12 @@ with app.app_context():
     try:
         from sqlalchemy import text, inspect
         
+        # Temporarily allow schema updates in production for critical column addition
         # Skip schema updates in production to prevent worker timeout
-        if os.environ.get('RAILWAY_ENVIRONMENT'):
-            print("Skipping schema updates in production environment")
-        else:
+        # if os.environ.get('RAILWAY_ENVIRONMENT'):
+        #     print("Skipping schema updates in production environment")
+        # else:
+        if True:
             inspector = inspect(db.engine)
             columns = [col['name'] for col in inspector.get_columns('publication')]
             

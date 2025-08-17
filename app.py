@@ -2258,16 +2258,20 @@ def update_box(box_id):
 @app.route('/api/delete_box/<int:box_id>', methods=['DELETE'])
 def delete_box(box_id):
     """Delete an ad box"""
-    ad_box = AdBox.query.get_or_404(box_id)
-    page_id = ad_box.page_id
-    
-    db.session.delete(ad_box)
-    db.session.commit()
-    
-    # Recalculate totals
-    update_totals(page_id)
-    
-    return jsonify({'success': True})
+    try:
+        ad_box = AdBox.query.get_or_404(box_id)
+        page_id = ad_box.page_id
+        
+        db.session.delete(ad_box)
+        db.session.commit()
+        
+        # Recalculate totals
+        update_totals(page_id)
+        
+        return jsonify({'success': True})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
 
 @app.route('/api/add_box/<int:page_id>', methods=['POST'])
 def add_box(page_id):

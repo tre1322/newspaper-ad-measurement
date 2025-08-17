@@ -33,6 +33,8 @@ from sklearn.metrics import accuracy_score, classification_report
 from sklearn.preprocessing import StandardScaler
 from scipy import ndimage
 from datetime import timedelta
+import hashlib
+import secrets
 
 # Load environment variables
 load_dotenv()
@@ -63,9 +65,19 @@ app.config['SQLALCHEMY_TRACK_MODIFICATIONS'] = False
 # Continue with your existing configuration
 app.config['SECRET_KEY'] = os.environ.get('SECRET_KEY', 'dev-secret-key-change-this')
 
+# Session security configuration
+app.config['PERMANENT_SESSION_LIFETIME'] = timedelta(hours=8)  # 8 hour session timeout
+app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RAILWAY_ENVIRONMENT') is not None  # HTTPS only in production
+app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent XSS attacks
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
+
 # Upload configuration
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
+
+# Security configuration for file uploads
+ALLOWED_EXTENSIONS = {'.pdf'}
+MAX_FILENAME_LENGTH = 255
 
 # Initialize extensions
 db = SQLAlchemy(app)
@@ -104,13 +116,83 @@ def check_processing_columns():
 # Authentication configuration
 LOGIN_PASSWORD = os.environ.get('LOGIN_PASSWORD', 'CCCitizen56101!')
 
+def hash_password(password):
+    """Hash password with salt for secure storage"""
+    salt = secrets.token_hex(16)
+    pwdhash = hashlib.pbkdf2_hmac('sha256', password.encode('utf-8'), salt.encode('utf-8'), 100000)
+    return salt + pwdhash.hex()
+
+def verify_password(stored_password, provided_password):
+    """Verify a password against its hash"""
+    if len(stored_password) < 32:
+        # Handle legacy plain text password during transition
+        return stored_password == provided_password
+    
+    salt = stored_password[:32]
+    stored_hash = stored_password[32:]
+    pwdhash = hashlib.pbkdf2_hmac('sha256', provided_password.encode('utf-8'), salt.encode('utf-8'), 100000)
+    return pwdhash.hex() == stored_hash
+
+def is_session_valid():
+    """Check if current session is valid"""
+    if not session.get('logged_in'):
+        return False
+    
+    # Check session timestamp
+    login_time = session.get('login_time')
+    if not login_time:
+        return False
+    
+    # Check if session has expired
+    from datetime import datetime
+    if datetime.utcnow().timestamp() - login_time > app.config['PERMANENT_SESSION_LIFETIME'].total_seconds():
+        return False
+    
+    return True
+
 def login_required(f):
     @wraps(f)
     def decorated_function(*args, **kwargs):
-        if not session.get('logged_in'):
+        if not is_session_valid():
+            session.clear()  # Clear invalid session
+            flash('Your session has expired. Please log in again.', 'warning')
             return redirect(url_for('login'))
         return f(*args, **kwargs)
     return decorated_function
+
+def allowed_file(filename):
+    """Check if file extension is allowed and filename is safe"""
+    if not filename or len(filename) > MAX_FILENAME_LENGTH:
+        return False
+    
+    # Check extension
+    file_ext = os.path.splitext(filename.lower())[1]
+    if file_ext not in ALLOWED_EXTENSIONS:
+        return False
+    
+    # Check for dangerous characters in filename
+    dangerous_chars = ['..', '/', '\\', ':', '*', '?', '"', '<', '>', '|']
+    if any(char in filename for char in dangerous_chars):
+        return False
+    
+    return True
+
+def validate_pdf_file(file_path):
+    """Validate that uploaded file is actually a PDF"""
+    try:
+        # Try to open with PyMuPDF to verify it's a valid PDF
+        doc = fitz.open(file_path)
+        page_count = doc.page_count
+        doc.close()
+        
+        # Basic sanity checks
+        if page_count < 1 or page_count > 1000:  # Reasonable limits
+            return False
+        
+        return True
+    except Exception as e:
+        print(f"PDF validation error: {e}")
+        return False
 
 def start_background_processing(pub_id):
     """Start background processing for a publication"""
@@ -348,7 +430,7 @@ class Publication(db.Model):
         if check_processing_columns():
             try:
                 return getattr(self, 'processing_status', 'completed' if self.processed else 'uploaded')
-            except:
+            except (AttributeError, Exception):
                 pass
         # Fallback based on processed status
         return 'completed' if self.processed else 'uploaded'
@@ -359,7 +441,7 @@ class Publication(db.Model):
         if check_processing_columns():
             try:
                 return getattr(self, 'processing_error', None)
-            except:
+            except (AttributeError, Exception):
                 pass
         return None
     
@@ -369,7 +451,7 @@ class Publication(db.Model):
             try:
                 self.processing_status = status
                 return True
-            except:
+            except (AttributeError, Exception):
                 pass
         return False
     
@@ -379,7 +461,7 @@ class Publication(db.Model):
             try:
                 self.processing_error = error
                 return True
-            except:
+            except (AttributeError, Exception):
                 pass
         return False
 
@@ -762,7 +844,8 @@ class IntelligentAdDetector:
                         'x': int(x_min), 'y': int(y_min), 
                         'width': int(width), 'height': int(height)
                     }
-        except:
+        except Exception as e:
+            print(f"Error in intelligent rectangle detection: {e}")
             pass
         
         # Fallback to regular border detection
@@ -890,7 +973,8 @@ class AdLearningEngine:
                     features['border_contrast'] = (abs(top_border - center) + abs(bottom_border - center) + 
                                                  abs(left_border - center) + abs(right_border - center)) / 4
                     features['border_uniformity'] = np.std([top_border, bottom_border, left_border, right_border])
-                except:
+                except (IndexError, ValueError, Exception) as e:
+                    print(f"Warning: Error calculating border features: {e}")
                     features['border_contrast'] = 0
                     features['border_uniformity'] = 0
             else:
@@ -1410,7 +1494,7 @@ class AdBoxDetector:
                     # Skip if borders are too weak (likely just text blocks)
                     if border_contrast < 25:  # Increased threshold
                         continue
-                except:
+                except (ValueError, IndexError, Exception):
                     continue
                 
                 # 8. Content analysis - check if it's likely an ad vs text
@@ -1513,8 +1597,17 @@ class AdBoxDetector:
 def login():
     if request.method == 'POST':
         password = request.form.get('password')
-        if password == LOGIN_PASSWORD:
+        if not password:
+            flash('Password is required.', 'error')
+            return render_template('login.html')
+            
+        # Rate limiting could be added here
+        if verify_password(LOGIN_PASSWORD, password):
+            from datetime import datetime
+            session.permanent = True
             session['logged_in'] = True
+            session['login_time'] = datetime.utcnow().timestamp()
+            session['session_id'] = secrets.token_hex(16)
             flash('Successfully logged in!', 'success')
             return redirect(url_for('index'))
         else:
@@ -1524,7 +1617,7 @@ def login():
 
 @app.route('/logout')
 def logout():
-    session.pop('logged_in', None)
+    session.clear()  # Clear all session data
     flash('You have been logged out.', 'info')
     return redirect(url_for('login'))
 
@@ -1556,15 +1649,34 @@ def upload():
             flash('No file selected')
             return redirect(request.url)
         
-        if file and pub_type in PUBLICATION_CONFIGS:
+        # Security validations
+        if not allowed_file(file.filename):
+            flash('Invalid file type or filename. Only PDF files are allowed.', 'error')
+            return redirect(request.url)
+        
+        if not pub_type or pub_type not in PUBLICATION_CONFIGS:
+            flash('Invalid publication type selected.', 'error')
+            return redirect(request.url)
+        
+        if file:
             try:
-                # Generate unique filename
-                file_ext = os.path.splitext(file.filename)[1]
+                # Generate secure unique filename
+                file_ext = os.path.splitext(file.filename.lower())[1]
                 unique_filename = f"{uuid.uuid4()}{file_ext}"
                 
+                # Ensure upload directory exists
+                pdf_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs')
+                os.makedirs(pdf_dir, exist_ok=True)
+                
                 # Save file
-                file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', unique_filename)
+                file_path = os.path.join(pdf_dir, unique_filename)
                 file.save(file_path)
+                
+                # Validate the uploaded file is actually a PDF
+                if not validate_pdf_file(file_path):
+                    os.remove(file_path)  # Clean up invalid file
+                    flash('Invalid PDF file. Please upload a valid PDF document.', 'error')
+                    return redirect(request.url)
                 
                 # Process PDF
                 pdf_doc = fitz.open(file_path)
@@ -3097,7 +3209,7 @@ def check_database_connection():
                 if test_pub:
                     _ = test_pub.safe_processing_status
                     print("Processing status columns available")
-            except:
+            except (AttributeError, Exception):
                 print("Processing status columns not available (using fallback)")
             
             return True

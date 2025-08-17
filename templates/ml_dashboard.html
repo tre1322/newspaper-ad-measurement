@@ -96,7 +96,7 @@
                                 </div>
                                 <div class="col-md-4">
                                     <span class="badge bg-primary accuracy-badge">
-                                        Accuracy: {{ "%.1f%"|format(model.validation_accuracy * 100) if model.validation_accuracy else "N/A" }}
+                                        Accuracy: {% if model.validation_accuracy %}{{ "%.1f%"|format(model.validation_accuracy * 100) }}{% else %}N/A{% endif %}
                                     </span>
                                     <span class="badge bg-secondary accuracy-badge ms-1">
                                         {{ model.training_samples }} samples

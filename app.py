@@ -1451,8 +1451,10 @@ class AdLearningEngine:
             pages_processed = 0
             
             # Process each page
-            for page in publication.pages:
-                image_path = os.path.join('static', 'uploads', page.image_filename)
+            pages = Page.query.filter_by(publication_id=publication.id).all()
+            for page in pages:
+                image_filename = f"{publication.filename}_page_{page.page_number}.png"
+                image_path = os.path.join('static', 'uploads', 'pages', image_filename)
                 if not os.path.exists(image_path):
                     continue
                 
@@ -1500,7 +1502,7 @@ class AdLearningEngine:
             
             # Update publication totals
             from app import update_totals
-            for page in publication.pages:
+            for page in pages:
                 update_totals(page.id)
             
             return {

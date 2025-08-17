@@ -3471,34 +3471,39 @@ def ml_dashboard():
 with app.app_context():
     db.create_all()
     
-    # Add missing columns if they don't exist
+    # Add missing columns if they don't exist (skip if causing timeout)
     try:
         from sqlalchemy import text, inspect
-        inspector = inspect(db.engine)
-        columns = [col['name'] for col in inspector.get_columns('publication')]
         
-        if 'processing_status' not in columns:
-            db.session.execute(text('ALTER TABLE publication ADD COLUMN processing_status VARCHAR(50) DEFAULT "uploaded"'))
-            db.session.commit()
-            print("Added processing_status column")
-        
-        # Check and add auto-detection columns to ad_box
-        ad_box_columns = [col['name'] for col in inspector.get_columns('ad_box')]
-        
-        if 'detected_automatically' not in ad_box_columns:
-            db.session.execute(text('ALTER TABLE ad_box ADD COLUMN detected_automatically BOOLEAN DEFAULT FALSE'))
-            db.session.commit()
-            print("Added detected_automatically column to ad_box")
-        
-        if 'confidence_score' not in ad_box_columns:
-            db.session.execute(text('ALTER TABLE ad_box ADD COLUMN confidence_score FLOAT'))
-            db.session.commit()
-            print("Added confidence_score column to ad_box")
+        # Skip schema updates in production to prevent worker timeout
+        if os.environ.get('RAILWAY_ENVIRONMENT'):
+            print("Skipping schema updates in production environment")
+        else:
+            inspector = inspect(db.engine)
+            columns = [col['name'] for col in inspector.get_columns('publication')]
             
-        if 'processing_error' not in columns:
-            db.session.execute(text('ALTER TABLE publication ADD COLUMN processing_error VARCHAR(500)'))
-            db.session.commit() 
-            print("Added processing_error column")
+            if 'processing_status' not in columns:
+                db.session.execute(text("ALTER TABLE publication ADD COLUMN processing_status VARCHAR(50) DEFAULT 'uploaded'"))
+                db.session.commit()
+                print("Added processing_status column")
+            
+            # Check and add auto-detection columns to ad_box
+            ad_box_columns = [col['name'] for col in inspector.get_columns('ad_box')]
+            
+            if 'detected_automatically' not in ad_box_columns:
+                db.session.execute(text('ALTER TABLE ad_box ADD COLUMN detected_automatically BOOLEAN DEFAULT FALSE'))
+                db.session.commit()
+                print("Added detected_automatically column to ad_box")
+            
+            if 'confidence_score' not in ad_box_columns:
+                db.session.execute(text('ALTER TABLE ad_box ADD COLUMN confidence_score FLOAT'))
+                db.session.commit()
+                print("Added confidence_score column to ad_box")
+            
+            if 'processing_error' not in columns:
+                db.session.execute(text('ALTER TABLE publication ADD COLUMN processing_error VARCHAR(500)'))
+                db.session.commit() 
+                print("Added processing_error column")
             
     except Exception as e:
         print(f"Schema update error (may be normal): {e}")

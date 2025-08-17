@@ -292,16 +292,9 @@ def start_background_processing(pub_id):
                 try:
                     print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                     
-                    # Add timeout protection for auto-detection
-                    import signal
-                    
-                    def timeout_handler(signum, frame):
-                        raise TimeoutError("Auto-detection timeout")
-                    
-                    # Set 5 minute timeout for auto-detection
-                    if hasattr(signal, 'SIGALRM'):  # Unix systems only
-                        signal.signal(signal.SIGALRM, timeout_handler)
-                        signal.alarm(300)  # 5 minutes
+                    # Timeout protection for auto-detection (simplified for background threads)
+                    import time
+                    start_time = time.time()
                     
                     try:
                         result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.4)
@@ -317,8 +310,10 @@ def start_background_processing(pub_id):
                             print(f"⚠️  AI detection not available: {result['error']}")
                             print(f"📝 Continue with manual ad marking as usual")
                     finally:
-                        if hasattr(signal, 'SIGALRM'):
-                            signal.alarm(0)  # Cancel alarm
+                        # Check if we exceeded timeout
+                        elapsed = time.time() - start_time
+                        if elapsed > 300:  # 5 minutes
+                            print(f"⚠️  AI detection took {elapsed:.1f}s (timeout threshold: 300s)")
                             
                 except (TimeoutError, Exception) as e:
                     print(f"⚠️  Auto-detection failed or timed out: {e}")

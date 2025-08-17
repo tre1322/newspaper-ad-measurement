@@ -199,20 +199,36 @@ def validate_pdf_file(file_path):
         print(f"PDF validation error: {e}")
         return False
 
+# Global set to track publications being processed
+_processing_publications = set()
+_processing_lock = None
+
 def start_background_processing(pub_id):
     """Start background processing for a publication"""
+    global _processing_publications, _processing_lock
+    
     try:
         import threading
+        if _processing_lock is None:
+            _processing_lock = threading.Lock()
     except ImportError:
         # Fallback if threading is not available
         print("Threading not available, processing synchronously")
         process_publication_sync(pub_id)
         return
     
+    # Check if already processing
+    with _processing_lock:
+        if pub_id in _processing_publications:
+            print(f"Publication {pub_id} is already being processed, skipping")
+            return
+        _processing_publications.add(pub_id)
+    
     def process_in_background():
         with app.app_context():
             try:
-                publication = Publication.query.get(pub_id)
+                # Use db.session.get() instead of deprecated query.get()
+                publication = db.session.get(Publication, pub_id)
                 if not publication:
                     return
                 
@@ -324,13 +340,35 @@ def start_background_processing(pub_id):
                 publication.set_processing_status('completed')
                 db.session.commit()
                 
+                # Remove from processing set
+                try:
+                    with _processing_lock:
+                        _processing_publications.discard(pub_id)
+                except:
+                    pass
+                
             except Exception as e:
                 # Mark as failed
-                publication = Publication.query.get(pub_id)
-                if publication:
-                    publication.set_processing_status('failed')
-                    publication.set_processing_error(str(e))
-                    db.session.commit()
+                try:
+                    publication = db.session.get(Publication, pub_id)
+                    if publication:
+                        publication.set_processing_status('failed')
+                        publication.set_processing_error(str(e))
+                        db.session.commit()
+                except Exception as commit_error:
+                    print(f"Error updating failure status: {commit_error}")
+                finally:
+                    # Ensure database session is cleaned up
+                    try:
+                        db.session.remove()
+                    except:
+                        pass
+                    # Remove from processing set
+                    try:
+                        with _processing_lock:
+                            _processing_publications.discard(pub_id)
+                    except:
+                        pass
     
     # Start processing in background thread
     try:

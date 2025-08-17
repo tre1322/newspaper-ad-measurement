@@ -3145,15 +3145,25 @@ def activate_ml_model(model_id):
 def ml_dashboard():
     """Machine Learning Dashboard"""
     try:
+        print("DEBUG: Starting ML dashboard route")
+        
         # Get training statistics
         stats = {}
         for pub_type in PUBLICATION_CONFIGS.keys():
+            print(f"DEBUG: Getting stats for {pub_type}")
             stats[pub_type] = AdLearningEngine.get_training_stats(pub_type)
+            print(f"DEBUG: Stats for {pub_type}: {stats[pub_type]}")
         
+        print("DEBUG: Getting active models")
         # Get active models
         active_models = MLModel.query.filter_by(is_active=True).all()
+        print(f"DEBUG: Found {len(active_models)} active models")
+        
+        for model in active_models:
+            print(f"DEBUG: Model {model.model_name} - validation_accuracy: {model.validation_accuracy}")
         
         # Get recent training data
+        print("DEBUG: Getting recent training data")
         recent_training = TrainingData.query.order_by(TrainingData.extracted_date.desc()).limit(10).all()
         
         # Check if we have enough data to train
@@ -3161,6 +3171,7 @@ def ml_dashboard():
         for pub_type in PUBLICATION_CONFIGS.keys():
             ready_to_train[pub_type] = stats[pub_type]['total_samples'] >= 20
         
+        print("DEBUG: About to render template")
         return render_template('ml_dashboard.html',
                              stats=stats,
                              active_models=active_models,
@@ -3169,6 +3180,9 @@ def ml_dashboard():
                              publication_types=list(PUBLICATION_CONFIGS.keys()))
                              
     except Exception as e:
+        print(f"DEBUG: Exception in ML dashboard: {e}")
+        import traceback
+        traceback.print_exc()
         flash(f'Error loading ML dashboard: {str(e)}', 'error')
         return redirect(url_for('index'))
 

@@ -1980,30 +1980,42 @@ def upload():
         
         if file:
             try:
+                print(f"📁 Starting upload process for file: {file.filename}")
+                
                 # Generate secure unique filename
                 file_ext = os.path.splitext(file.filename.lower())[1]
                 unique_filename = f"{uuid.uuid4()}{file_ext}"
+                print(f"📝 Generated unique filename: {unique_filename}")
                 
                 # Ensure upload directory exists
                 pdf_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs')
                 os.makedirs(pdf_dir, exist_ok=True)
+                print(f"📂 Upload directory ready: {pdf_dir}")
                 
                 # Save file
                 file_path = os.path.join(pdf_dir, unique_filename)
+                print(f"💾 Saving file to: {file_path}")
                 file.save(file_path)
+                print(f"✅ File saved successfully")
                 
                 # Validate the uploaded file is actually a PDF
+                print(f"🔍 Validating PDF file...")
                 if not validate_pdf_file(file_path):
+                    print(f"❌ PDF validation failed")
                     os.remove(file_path)  # Clean up invalid file
                     flash('Invalid PDF file. Please upload a valid PDF document.', 'error')
                     return redirect(request.url)
+                print(f"✅ PDF validation passed")
                 
                 # Process PDF
+                print(f"📖 Opening PDF to count pages...")
                 pdf_doc = fitz.open(file_path)
                 page_count = pdf_doc.page_count
                 pdf_doc.close()
+                print(f"📄 PDF has {page_count} pages")
                 
                 # Create publication record
+                print(f"📊 Creating publication record...")
                 config = PUBLICATION_CONFIGS[pub_type]
                 total_inches = config['total_inches_per_page'] * page_count
                 
@@ -2014,23 +2026,44 @@ def upload():
                     total_pages=page_count,
                     total_inches=total_inches
                 )
+                print(f"✅ Publication object created")
                 
                 # Set processing status if available (with timeout protection)
+                print(f"🔄 Setting processing status...")
                 try:
                     publication.set_processing_status('uploaded')
+                    print(f"✅ Processing status set")
                 except Exception as e:
-                    print(f"Warning: Could not set processing status: {e}")
+                    print(f"⚠️ Warning: Could not set processing status: {e}")
                 
+                print(f"💾 Adding publication to database...")
                 db.session.add(publication)
+                print(f"💾 Committing to database...")
                 db.session.commit()
+                print(f"✅ Database commit successful")
                 
                 flash(f'File uploaded successfully! Processing {page_count} pages...', 'success')
-                print(f"Upload completed for publication {publication.id}: {publication.original_filename}")
-                # Redirect to processing status page instead of doing processing immediately
+                print(f"🎉 Upload completed for publication {publication.id}: {publication.original_filename}")
+                
+                # Start background processing immediately
+                print(f"🚀 Starting background processing...")
+                try:
+                    start_background_processing(publication.id)
+                    print(f"✅ Background processing started")
+                except Exception as e:
+                    print(f"⚠️ Warning: Could not start background processing: {e}")
+                
+                print(f"🔄 Redirecting to processing status page...")
+                # Redirect to processing status page
                 return redirect(url_for('processing_status', pub_id=publication.id))
                 
             except Exception as e:
-                flash(f'Error uploading file: {str(e)}')
+                print(f"💥 UPLOAD ERROR: {str(e)}")
+                import traceback
+                print(f"📋 Error traceback:")
+                traceback.print_exc()
+                flash(f'Error uploading file: {str(e)}', 'error')
+                return redirect(request.url)
     
     return render_template('upload.html', pub_types=PUBLICATION_CONFIGS)
 
@@ -2233,19 +2266,41 @@ def view_publication(pub_id):
 @app.route('/measure/<int:pub_id>')
 @login_required
 def measure_publication(pub_id):
-    publication = Publication.query.get_or_404(pub_id)
-    pages = Page.query.filter_by(publication_id=pub_id).order_by(Page.page_number).all()
-    
-    # Calculate total detected boxes
-    total_boxes = 0
-    for page in pages:
-        boxes = AdBox.query.filter_by(page_id=page.id).count()
-        total_boxes += boxes
-    
-    return render_template('measure.html', 
-                         publication=publication, 
-                         pages=pages,
-                         total_boxes=total_boxes)
+    try:
+        print(f"📏 Loading measurement page for publication {pub_id}")
+        
+        publication = Publication.query.get_or_404(pub_id)
+        print(f"✅ Found publication: {publication.original_filename}")
+        
+        pages = Page.query.filter_by(publication_id=pub_id).order_by(Page.page_number).all()
+        print(f"📄 Found {len(pages)} pages")
+        
+        # Check if publication is still processing
+        if len(pages) == 0 and not publication.processed:
+            print(f"🔄 Publication still processing, redirecting to status page")
+            flash('Publication is still being processed. Please wait...', 'info')
+            return redirect(url_for('processing_status', pub_id=pub_id))
+        
+        # Calculate total detected boxes
+        total_boxes = 0
+        for page in pages:
+            boxes = AdBox.query.filter_by(page_id=page.id).count()
+            total_boxes += boxes
+        print(f"📦 Total ad boxes: {total_boxes}")
+        
+        print(f"🎨 Rendering measure.html template")
+        return render_template('measure.html', 
+                             publication=publication, 
+                             pages=pages,
+                             total_boxes=total_boxes)
+                             
+    except Exception as e:
+        print(f"💥 MEASURE PAGE ERROR: {str(e)}")
+        import traceback
+        print(f"📋 Error traceback:")
+        traceback.print_exc()
+        flash(f'Error loading measurement page: {str(e)}', 'error')
+        return redirect(url_for('index'))
 
 @app.route('/measure/<int:pub_id>/page/<int:page_num>')
 @login_required

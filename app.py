@@ -978,11 +978,9 @@ class AdLearningEngine:
             import time
             start_time = time.time()
             
-            print(f"extract_features: Loading image {image_path}")
-            # Load image
+            # Load image (removed excessive debug logging for performance)
             img = cv2.imread(image_path)
             if img is None:
-                print(f"extract_features: Failed to load image {image_path}")
                 return None
             
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -995,11 +993,9 @@ class AdLearningEngine:
             w = min(w, img_w - x)
             h = min(h, img_h - y)
             
-            # Extract region of interest
-            print(f"extract_features: Extracting ROI with bounds x={x}, y={y}, w={w}, h={h} from image shape {gray.shape}")
+            # Extract region of interest (removed debug logging for performance)
             roi = gray[y:y+h, x:x+w]
             if roi.size == 0 or w <= 0 or h <= 0:
-                print(f"extract_features: Invalid ROI - size={roi.size}, w={w}, h={h}")
                 return None
             
             # Feature extraction
@@ -1683,34 +1679,29 @@ class AdLearningEngine:
             windows_scanned = 0
             predictions_made = 0
             
-            # Sliding window scan
-            for y in range(0, height - window_h, stride):
-                for x in range(0, width - window_w, stride):
-                    windows_scanned += 1
-                    
-                    # Extract window
-                    window = gray[y:y+window_h, x:x+window_w]
-                    
-                    # Extract features using the same method as training data
-                    # Convert window coordinates to box_coords format
-                    box_coords = {
-                        'x': x, 'y': y, 
-                        'width': window_w, 'height': window_h
-                    }
-                    
-                    # Use the same feature extraction as training - save window as temp image
-                    import tempfile
-                    import os
-                    temp_img_path = None
-                    try:
-                        # Create temporary image file
-                        temp_fd, temp_img_path = tempfile.mkstemp(suffix='.png')
-                        os.close(temp_fd)
+            # Create ONE temporary image file for the entire page (MAJOR OPTIMIZATION)
+            import tempfile
+            import os
+            temp_fd, temp_img_path = tempfile.mkstemp(suffix='.png')
+            os.close(temp_fd)
+            
+            try:
+                # Save the full image once
+                cv2.imwrite(temp_img_path, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+                print(f"Created single temp image for page scanning: {temp_img_path}")
+                
+                # Sliding window scan
+                for y in range(0, height - window_h, stride):
+                    for x in range(0, width - window_w, stride):
+                        windows_scanned += 1
                         
-                        # Save the full image temporarily 
-                        cv2.imwrite(temp_img_path, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+                        # Convert window coordinates to box_coords format
+                        box_coords = {
+                            'x': x, 'y': y, 
+                            'width': window_w, 'height': window_h
+                        }
                         
-                        # Extract features using the same method as training
+                        # Extract features using the same method as training (REUSE same temp image)
                         features_dict = AdLearningEngine.extract_features(temp_img_path, box_coords)
                         
                         if features_dict is None:
@@ -1718,75 +1709,70 @@ class AdLearningEngine:
                             
                         # Convert to feature vector matching training format
                         features = [features_dict.get(name, 0) for name in feature_names]
-                        
-                    except Exception as e:
-                        print(f"Error extracting features for window: {e}")
-                        continue
-                    finally:
-                        # Clean up temp file
-                        if temp_img_path and os.path.exists(temp_img_path):
-                            os.unlink(temp_img_path)
                     
-                    # Debug first few feature extractions
-                    if predictions_made < 3:
-                        print(f"Sample window {predictions_made + 1}: extracted {len(features)} features, expected {len(feature_names)}")
-                        if len(features) != len(feature_names):
-                            print(f"WARNING: Feature count mismatch! Expected {len(feature_names)}, got {len(features)}")
+                        # Debug first few feature extractions
+                        if predictions_made < 3:
+                            print(f"Sample window {predictions_made + 1}: extracted {len(features)} features, expected {len(feature_names)}")
+                            if len(features) != len(feature_names):
+                                print(f"WARNING: Feature count mismatch! Expected {len(feature_names)}, got {len(features)}")
                     
-                    # Make prediction
-                    try:
-                        predictions_made += 1
-                        
-                        # Reshape for sklearn
-                        features_array = np.array(features).reshape(1, -1)
-                        
-                        # Apply scaling if available
-                        if scaler is not None:
-                            features_array = scaler.transform(features_array)
-                        
-                        # Get prediction and probability
-                        if hasattr(model, 'predict_proba'):
-                            proba = model.predict_proba(features_array)[0]
-                            # Assuming binary classification: [not_ad_prob, ad_prob]
-                            confidence = proba[1] if len(proba) > 1 else proba[0]
-                        else:
-                            # Fallback for models without predict_proba
-                            prediction = model.predict(features_array)[0]
-                            confidence = 0.8 if prediction == 1 else 0.2
-                        
-                        # Track confidence distribution
-                        if predictions_made <= 10:  # Log first 10 predictions to see confidence range
-                            print(f"Sample prediction {predictions_made}: confidence {confidence:.3f}")
-                        
-                        # Log high confidence predictions
-                        if confidence >= confidence_threshold * 0.5:  # Log predictions at half threshold
-                            print(f"Window at ({x},{y}) confidence: {confidence:.3f} (threshold: {confidence_threshold})")
-                        
-                        # If confidence is above threshold, consider it an ad
-                        if confidence >= confidence_threshold:
-                            # Expand window to capture full ad (simple approach)
-                            expanded_box = AdLearningEngine._expand_detection(
-                                gray, x, y, window_w, window_h, width, height
-                            )
+                        # Make prediction
+                        try:
+                            predictions_made += 1
                             
-                            # Check for overlapping detections
-                            if not AdLearningEngine._overlaps_existing(expanded_box, detections, overlap_threshold=0.3):
-                                detections.append({
-                                    'x': expanded_box['x'],
-                                    'y': expanded_box['y'],
-                                    'width': expanded_box['width'],
-                                    'height': expanded_box['height'],
-                                    'confidence': confidence
-                                })
-                    
-                    except Exception as e:
-                        # Skip this window if prediction fails
-                        continue
+                            # Reshape for sklearn
+                            features_array = np.array(features).reshape(1, -1)
+                            
+                            # Apply scaling if available
+                            if scaler is not None:
+                                features_array = scaler.transform(features_array)
+                            
+                            # Get prediction and probability
+                            if hasattr(model, 'predict_proba'):
+                                proba = model.predict_proba(features_array)[0]
+                                # Assuming binary classification: [not_ad_prob, ad_prob]
+                                confidence = proba[1] if len(proba) > 1 else proba[0]
+                            else:
+                                # Fallback for models without predict_proba
+                                prediction = model.predict(features_array)[0]
+                                confidence = 0.8 if prediction == 1 else 0.2
+                            
+                            # Track confidence distribution (reduced logging)
+                            if predictions_made <= 5:  # Log first 5 predictions only
+                                print(f"Sample prediction {predictions_made}: confidence {confidence:.3f}")
+                            
+                            # If confidence is above threshold, consider it an ad
+                            if confidence >= confidence_threshold:
+                                print(f"DETECTION: Window at ({x},{y}) confidence: {confidence:.3f}")
+                                # Expand window to capture full ad (simple approach)
+                                expanded_box = AdLearningEngine._expand_detection(
+                                    gray, x, y, window_w, window_h, width, height
+                                )
+                                
+                                # Check for overlapping detections
+                                if not AdLearningEngine._overlaps_existing(expanded_box, detections, overlap_threshold=0.3):
+                                    detections.append({
+                                        'x': expanded_box['x'],
+                                        'y': expanded_box['y'],
+                                        'width': expanded_box['width'],
+                                        'height': expanded_box['height'],
+                                        'confidence': confidence
+                                    })
+                        
+                        except Exception as e:
+                            # Skip this window if prediction fails
+                            continue
             
-            # Sort by confidence and return top detections
-            detections.sort(key=lambda x: x['confidence'], reverse=True)
-            print(f"Scan complete: {windows_scanned} windows scanned, {predictions_made} predictions made, {len(detections)} detections above threshold")
-            return detections[:20]  # Limit to top 20 detections per page
+                # Sort by confidence and return top detections
+                detections.sort(key=lambda x: x['confidence'], reverse=True)
+                print(f"Scan complete: {windows_scanned} windows scanned, {predictions_made} predictions made, {len(detections)} detections above threshold")
+                return detections[:20]  # Limit to top 20 detections per page
+                
+            finally:
+                # Clean up the single temp file
+                if temp_img_path and os.path.exists(temp_img_path):
+                    os.unlink(temp_img_path)
+                    print(f"Cleaned up temp image: {temp_img_path}")
             
         except Exception as e:
             print(f"Error in _scan_page_for_ads: {e}")

@@ -1559,24 +1559,45 @@ class AdLearningEngine:
             
             # Load the trained model
             import pickle
-            model = pickle.loads(model_record.model_data)
-            feature_names = json.loads(model_record.feature_names) if model_record.feature_names else []
+            model_package = pickle.loads(model_record.model_data)
+            
+            # Extract components from model package
+            if isinstance(model_package, dict):
+                model = model_package.get('model')
+                scaler = model_package.get('scaler')
+                feature_names = model_package.get('feature_names', [])
+                print(f"Loaded model package with {len(feature_names)} features")
+            else:
+                # Legacy format - just the model
+                model = model_package
+                scaler = None
+                feature_names = json.loads(model_record.feature_names) if model_record.feature_names else []
+                print(f"Loaded legacy model with {len(feature_names)} features")
             
             detections = []
             pages_processed = 0
             
             # Process each page
             pages = Page.query.filter_by(publication_id=publication.id).all()
+            print(f"Processing {len(pages)} pages for AI detection")
+            
             for page in pages:
                 image_filename = f"{publication.filename}_page_{page.page_number}.png"
                 image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+                print(f"Looking for page image: {image_path}")
+                
                 if not os.path.exists(image_path):
+                    print(f"Image not found, skipping page {page.page_number}")
                     continue
+                
+                print(f"Scanning page {page.page_number} for ads with confidence threshold {confidence_threshold}")
                 
                 # Use sliding window approach to scan for ads
                 detected_boxes = AdLearningEngine._scan_page_for_ads(
-                    image_path, model, feature_names, confidence_threshold
+                    image_path, model, feature_names, confidence_threshold, scaler
                 )
+                
+                print(f"Page {page.page_number} scan complete: {len(detected_boxes)} detections")
                 
                 for box in detected_boxes:
                     # Create AdBox record
@@ -1636,7 +1657,7 @@ class AdLearningEngine:
             return {'success': False, 'error': str(e)}
     
     @staticmethod
-    def _scan_page_for_ads(image_path, model, feature_names, confidence_threshold=0.7, window_size=(200, 200), stride=50):
+    def _scan_page_for_ads(image_path, model, feature_names, confidence_threshold=0.7, scaler=None, window_size=(200, 200), stride=50):
         """Scan page using sliding window to detect ads"""
         try:
             import cv2
@@ -1645,17 +1666,23 @@ class AdLearningEngine:
             # Load image
             img = cv2.imread(image_path)
             if img is None:
+                print(f"Failed to load image: {image_path}")
                 return []
             
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
+            print(f"Image loaded: {width}x{height} pixels")
             
             detections = []
             window_w, window_h = window_size
+            windows_scanned = 0
+            predictions_made = 0
             
             # Sliding window scan
             for y in range(0, height - window_h, stride):
                 for x in range(0, width - window_w, stride):
+                    windows_scanned += 1
+                    
                     # Extract window
                     window = gray[y:y+window_h, x:x+window_w]
                     
@@ -1666,8 +1693,14 @@ class AdLearningEngine:
                     
                     # Make prediction
                     try:
+                        predictions_made += 1
+                        
                         # Reshape for sklearn
                         features_array = np.array(features).reshape(1, -1)
+                        
+                        # Apply scaling if available
+                        if scaler is not None:
+                            features_array = scaler.transform(features_array)
                         
                         # Get prediction and probability
                         if hasattr(model, 'predict_proba'):
@@ -1678,6 +1711,10 @@ class AdLearningEngine:
                             # Fallback for models without predict_proba
                             prediction = model.predict(features_array)[0]
                             confidence = 0.8 if prediction == 1 else 0.2
+                        
+                        # Log high confidence predictions
+                        if confidence >= confidence_threshold * 0.5:  # Log predictions at half threshold
+                            print(f"Window at ({x},{y}) confidence: {confidence:.3f} (threshold: {confidence_threshold})")
                         
                         # If confidence is above threshold, consider it an ad
                         if confidence >= confidence_threshold:
@@ -1702,6 +1739,7 @@ class AdLearningEngine:
             
             # Sort by confidence and return top detections
             detections.sort(key=lambda x: x['confidence'], reverse=True)
+            print(f"Scan complete: {windows_scanned} windows scanned, {predictions_made} predictions made, {len(detections)} detections above threshold")
             return detections[:20]  # Limit to top 20 detections per page
             
         except Exception as e:

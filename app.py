@@ -1588,9 +1588,13 @@ class AdLearningEngine:
                 
                 print(f"Scanning page {page.page_number} for ads with confidence threshold {confidence_threshold}")
                 
-                # Use sliding window approach to scan for ads
-                detected_boxes = AdLearningEngine._scan_page_for_ads(
-                    image_path, model, feature_names, confidence_threshold, scaler
+                # Get typical ad sizes from training data for better detection windows
+                typical_ad_sizes = AdLearningEngine._get_typical_ad_sizes(publication.publication_type)
+                print(f"Using typical ad sizes for detection: {typical_ad_sizes}")
+                
+                # Use sliding window approach with actual ad sizes from training data
+                detected_boxes = AdLearningEngine._scan_page_with_training_sizes(
+                    image_path, model, feature_names, confidence_threshold, scaler, typical_ad_sizes
                 )
                 
                 print(f"Page {page.page_number} scan complete: {len(detected_boxes)} detections")
@@ -1677,7 +1681,148 @@ class AdLearningEngine:
             return {'success': False, 'error': str(e)}
     
     @staticmethod
-    def _scan_page_for_ads(image_path, model, feature_names, confidence_threshold=0.7, scaler=None, window_size=(400, 400), stride=200):
+    def _get_typical_ad_sizes(publication_type):
+        """Get typical ad sizes from training data to improve detection accuracy"""
+        try:
+            # Query training data to get typical ad dimensions
+            from sqlalchemy import text
+            query = text("""
+                SELECT ab.width, ab.height, COUNT(*) as frequency
+                FROM ad_box ab
+                JOIN page p ON ab.page_id = p.id  
+                JOIN publication pub ON p.publication_id = pub.id
+                WHERE pub.publication_type = :pub_type
+                AND ab.user_verified = true
+                AND ab.width > 50 AND ab.height > 50  -- Filter out tiny boxes
+                GROUP BY ab.width, ab.height
+                ORDER BY frequency DESC
+                LIMIT 10
+            """)
+            
+            result = db.session.execute(query, {'pub_type': publication_type})
+            sizes = []
+            
+            for row in result:
+                width, height, freq = row
+                sizes.append((int(width), int(height), freq))
+                print(f"Common ad size: {width}x{height} (used {freq} times)")
+            
+            # If we have training data, use those sizes; otherwise use defaults
+            if sizes:
+                return sizes[:5]  # Top 5 most common sizes
+            else:
+                # Fallback to reasonable defaults
+                return [(300, 200, 1), (400, 300, 1), (200, 300, 1)]
+                
+        except Exception as e:
+            print(f"Error getting typical ad sizes: {e}")
+            return [(300, 200, 1), (400, 300, 1), (200, 300, 1)]
+    
+    @staticmethod
+    def _scan_page_with_training_sizes(image_path, model, feature_names, confidence_threshold=0.7, scaler=None, typical_sizes=None):
+        """Scan page using actual ad sizes from training data for better accuracy"""
+        try:
+            import cv2
+            import numpy as np
+            import tempfile
+            import os
+            
+            # Load image
+            img = cv2.imread(image_path)
+            if img is None:
+                print(f"Failed to load image: {image_path}")
+                return []
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            height, width = gray.shape
+            print(f"Image loaded: {width}x{height} pixels")
+            
+            detections = []
+            windows_scanned = 0
+            predictions_made = 0
+            
+            # Use typical ad sizes from training data
+            if typical_sizes is None:
+                typical_sizes = [(300, 200, 1)]
+            
+            # Create ONE temporary image file for the entire page
+            temp_fd, temp_img_path = tempfile.mkstemp(suffix='.png')
+            os.close(temp_fd)
+            
+            try:
+                # Save the full image once
+                cv2.imwrite(temp_img_path, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+                print(f"Created temp image for scanning")
+                
+                # Scan with each typical ad size
+                for window_w, window_h, frequency in typical_sizes:
+                    # Use reasonable stride - not too dense, not too sparse
+                    stride = min(window_w, window_h) // 3  # 33% overlap
+                    print(f"Scanning with {window_w}x{window_h} windows, stride={stride}")
+                    
+                    for y in range(0, height - window_h, stride):
+                        for x in range(0, width - window_w, stride):
+                            windows_scanned += 1
+                            
+                            # Extract features for this window
+                            box_coords = {'x': x, 'y': y, 'width': window_w, 'height': window_h}
+                            features_dict = AdLearningEngine.extract_features(temp_img_path, box_coords)
+                            
+                            if features_dict is None:
+                                continue
+                                
+                            # Convert to feature vector
+                            features = [features_dict.get(name, 0) for name in feature_names]
+                            predictions_made += 1
+                            
+                            # Make prediction
+                            features_array = np.array(features).reshape(1, -1)
+                            if scaler is not None:
+                                features_array = scaler.transform(features_array)
+                            
+                            # Get confidence
+                            if hasattr(model, 'predict_proba'):
+                                proba = model.predict_proba(features_array)[0]
+                                confidence = proba[1] if len(proba) > 1 else proba[0]
+                            else:
+                                prediction = model.predict(features_array)[0]
+                                confidence = 0.8 if prediction == 1 else 0.2
+                            
+                            # Log a few sample predictions
+                            if predictions_made <= 3:
+                                print(f"Sample prediction {predictions_made}: confidence {confidence:.3f}")
+                            
+                            # If confidence is above threshold, it's likely an ad
+                            if confidence >= confidence_threshold:
+                                print(f"DETECTION: {window_w}x{window_h} at ({x},{y}) confidence: {confidence:.3f}")
+                                
+                                # Check for overlaps before adding
+                                new_box = {'x': x, 'y': y, 'width': window_w, 'height': window_h}
+                                if not AdLearningEngine._overlaps_existing(new_box, detections, overlap_threshold=0.3):
+                                    detections.append({
+                                        'x': x, 'y': y,
+                                        'width': window_w, 'height': window_h,
+                                        'confidence': confidence
+                                    })
+                
+                # Sort by confidence and return top detections
+                detections.sort(key=lambda x: x['confidence'], reverse=True)
+                print(f"Scan complete: {windows_scanned} windows scanned, {predictions_made} predictions made, {len(detections)} detections above threshold")
+                return detections[:20]  # Limit to top 20 detections per page
+                
+            finally:
+                # Clean up temp file
+                if temp_img_path and os.path.exists(temp_img_path):
+                    os.unlink(temp_img_path)
+            
+        except Exception as e:
+            print(f"Error in _scan_page_with_training_sizes: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    @staticmethod
+    def _scan_page_for_ads(image_path, model, feature_names, confidence_threshold=0.7, scaler=None, typical_sizes=None):
         """Scan page using sliding window to detect ads"""
         try:
             import cv2
@@ -1694,9 +1839,14 @@ class AdLearningEngine:
             print(f"Image loaded: {width}x{height} pixels")
             
             detections = []
-            window_w, window_h = window_size
             windows_scanned = 0
             predictions_made = 0
+            
+            # Use typical ad sizes from training data instead of fixed window size
+            if typical_sizes is None:
+                typical_sizes = [(300, 200, 1), (400, 300, 1), (200, 300, 1)]
+            
+            print(f"Scanning with {len(typical_sizes)} different ad sizes")
             
             # Create ONE temporary image file for the entire page (MAJOR OPTIMIZATION)
             import tempfile
@@ -1709,16 +1859,22 @@ class AdLearningEngine:
                 cv2.imwrite(temp_img_path, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
                 print(f"Created single temp image for page scanning: {temp_img_path}")
                 
-                # Sliding window scan
-                for y in range(0, height - window_h, stride):
-                    for x in range(0, width - window_w, stride):
-                        windows_scanned += 1
-                        
-                        # Convert window coordinates to box_coords format
-                        box_coords = {
-                            'x': x, 'y': y, 
-                            'width': window_w, 'height': window_h
-                        }
+                # Multi-size sliding window scan using actual ad sizes from training data
+                for window_w, window_h, frequency in typical_sizes:
+                    # Use adaptive stride based on window size
+                    stride = min(window_w, window_h) // 4  # 25% overlap
+                    
+                    print(f"Scanning with {window_w}x{window_h} windows (stride {stride})")
+                    
+                    for y in range(0, height - window_h, stride):
+                        for x in range(0, width - window_w, stride):
+                            windows_scanned += 1
+                            
+                            # Convert window coordinates to box_coords format
+                            box_coords = {
+                                'x': x, 'y': y, 
+                                'width': window_w, 'height': window_h
+                            }
                         
                         # Extract features using the same method as training (REUSE same temp image)
                         features_dict = AdLearningEngine.extract_features(temp_img_path, box_coords)

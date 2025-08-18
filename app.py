@@ -1604,11 +1604,16 @@ class AdLearningEngine:
                     config = PUBLICATION_CONFIGS[publication.publication_type]
                     calculator = MeasurementCalculator()
                     
+                    # Use page dimensions from database instead of config
+                    page_total_pixels = page.width_pixels * page.height_pixels if page.width_pixels and page.height_pixels else 1
+                    
                     column_inches = calculator.pixels_to_inches(
                         box['height'] * box['width'],
-                        config['page_height_pixels'] * config['page_width_pixels'],
-                        config['page_total_inches']
+                        page_total_pixels,
+                        config.get('total_inches_per_page', 258)  # Use total_inches_per_page from config
                     )
+                    
+                    print(f"Creating AdBox: position=({box['x']},{box['y']}) size=({box['width']}x{box['height']}) confidence={box['confidence']:.3f} column_inches={column_inches:.2f}")
                     
                     ad_box = AdBox(
                         page_id=page.id,

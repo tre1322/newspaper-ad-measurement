@@ -2664,6 +2664,32 @@ class AdLearningEngine:
         except Exception as e:
             print(f"❌ Error in content classification: {e}")
             return False  # Conservative: if we can't analyze, assume it's not an ad
+    
+    @staticmethod
+    def _boxes_overlap(box1, box2, threshold=0.5):
+        """Check if two boxes overlap beyond the given threshold"""
+        # Calculate intersection area
+        x1_min, y1_min = box1['x'], box1['y']
+        x1_max, y1_max = box1['x'] + box1['width'], box1['y'] + box1['height']
+        
+        x2_min, y2_min = box2['x'], box2['y']
+        x2_max, y2_max = box2['x'] + box2['width'], box2['y'] + box2['height']
+        
+        # Calculate intersection
+        inter_x_min = max(x1_min, x2_min)
+        inter_y_min = max(y1_min, y2_min)
+        inter_x_max = min(x1_max, x2_max)
+        inter_y_max = min(y1_max, y2_max)
+        
+        if inter_x_min < inter_x_max and inter_y_min < inter_y_max:
+            intersection = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+            area1 = box1['width'] * box1['height']
+            area2 = box2['width'] * box2['height']
+            union = area1 + area2 - intersection
+            overlap_ratio = intersection / union if union > 0 else 0
+            return overlap_ratio > threshold
+        
+        return False
 
 # Measurement Calculator
 class MeasurementCalculator:

@@ -221,6 +221,9 @@ def start_background_processing(pub_id):
     with _processing_lock:
         if pub_id in _processing_publications:
             print(f"Publication {pub_id} is already being processed, skipping")
+            import traceback
+            print("Call stack for duplicate processing attempt:")
+            traceback.print_stack(limit=5)
             return
         _processing_publications.add(pub_id)
     
@@ -1534,9 +1537,25 @@ class AdLearningEngine:
     def auto_detect_ads(publication_id, confidence_threshold=0.7):
         """Automatically detect ads in a publication using trained models"""
         try:
-            publication = Publication.query.get(publication_id)
-            if not publication:
-                return {'success': False, 'error': 'Publication not found'}
+            # Add a global lock to prevent multiple AI detection processes
+            import threading
+            if not hasattr(AdLearningEngine, '_ai_detection_lock'):
+                AdLearningEngine._ai_detection_lock = threading.Lock()
+            
+            with AdLearningEngine._ai_detection_lock:
+                if hasattr(AdLearningEngine, '_ai_processing') and publication_id in AdLearningEngine._ai_processing:
+                    print(f"AI detection already running for publication {publication_id}, skipping duplicate call")
+                    return {'success': False, 'error': 'AI detection already in progress'}
+                
+                # Mark as processing
+                if not hasattr(AdLearningEngine, '_ai_processing'):
+                    AdLearningEngine._ai_processing = set()
+                AdLearningEngine._ai_processing.add(publication_id)
+            
+            try:
+                publication = Publication.query.get(publication_id)
+                if not publication:
+                    return {'success': False, 'error': 'Publication not found'}
             
             # Get the active model for this publication type
             model_record = MLModel.query.filter_by(
@@ -1665,20 +1684,33 @@ class AdLearningEngine:
             for page in pages:
                 update_totals(page.id)
             
-            return {
-                'success': True,
-                'detections': len(detections),
-                'pages_processed': pages_processed,
-                'model_used': model_record.model_name,
-                'confidence_threshold': confidence_threshold
-            }
+                return {
+                    'success': True,
+                    'detections': len(detections),
+                    'pages_processed': pages_processed,
+                    'model_used': model_record.model_name,
+                    'confidence_threshold': confidence_threshold
+                }
             
-        except Exception as e:
-            db.session.rollback()
-            print(f"Error in auto_detect_ads: {e}")
-            import traceback
-            traceback.print_exc()
-            return {'success': False, 'error': str(e)}
+            except Exception as e:
+                db.session.rollback()
+                print(f"Error in auto_detect_ads: {e}")
+                import traceback
+                traceback.print_exc()
+                return {'success': False, 'error': str(e)}
+            
+            finally:
+                # Always remove from processing set
+                try:
+                    with AdLearningEngine._ai_detection_lock:
+                        AdLearningEngine._ai_processing.discard(publication_id)
+                        print(f"Removed publication {publication_id} from AI processing set")
+                except:
+                    pass
+                    
+        except Exception as outer_e:
+            print(f"Outer error in auto_detect_ads: {outer_e}")
+            return {'success': False, 'error': str(outer_e)}
     
     @staticmethod
     def _get_typical_ad_sizes(publication_type):
@@ -1754,8 +1786,18 @@ class AdLearningEngine:
                 cv2.imwrite(temp_img_path, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
                 print(f"Created temp image for scanning")
                 
+                # Add timeout protection
+                import time
+                scan_start_time = time.time()
+                max_scan_time = 300  # 5 minutes max per page
+                
                 # Scan with each typical ad size
                 for window_w, window_h, frequency in typical_sizes:
+                    # Check timeout
+                    if time.time() - scan_start_time > max_scan_time:
+                        print(f"Scan timeout after {max_scan_time}s, stopping early")
+                        break
+                        
                     # Use reasonable stride - not too dense, not too sparse
                     stride = min(window_w, window_h) // 3  # 33% overlap
                     print(f"Scanning with {window_w}x{window_h} windows, stride={stride}")

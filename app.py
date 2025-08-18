@@ -1611,8 +1611,8 @@ class AdLearningEngine:
                 typical_ad_sizes = AdLearningEngine._get_typical_ad_sizes(publication.publication_type)
                 print(f"Using typical ad sizes for detection: {typical_ad_sizes}")
                 
-                # Use sliding window approach with actual ad sizes from training data
-                detected_boxes = AdLearningEngine._scan_page_with_training_sizes(
+                # Use optimized detection approach focused on complete ads
+                detected_boxes = AdLearningEngine._detect_complete_ads(
                     image_path, model, feature_names, confidence_threshold, scaler, typical_ad_sizes
                 )
                 
@@ -1855,6 +1855,124 @@ class AdLearningEngine:
             
         except Exception as e:
             print(f"Error in _scan_page_with_training_sizes: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    @staticmethod
+    def _detect_complete_ads(image_path, model, feature_names, confidence_threshold=0.7, scaler=None, typical_sizes=None):
+        """Fast, efficient ad detection using sparse sampling of complete ad sizes"""
+        try:
+            import cv2
+            import numpy as np
+            import tempfile
+            import os
+            import time
+            
+            start_time = time.time()
+            
+            # Load image
+            img = cv2.imread(image_path)
+            if img is None:
+                print(f"Failed to load image: {image_path}")
+                return []
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            height, width = gray.shape
+            print(f"Image loaded: {width}x{height} pixels")
+            
+            # Use only the top 3 most common ad sizes for speed
+            if typical_sizes is None or len(typical_sizes) == 0:
+                typical_sizes = [(300, 200, 1)]
+            
+            # Limit to top 3 sizes to prevent excessive scanning
+            top_sizes = typical_sizes[:3]
+            print(f"Using top {len(top_sizes)} ad sizes for efficient detection")
+            
+            detections = []
+            total_windows = 0
+            
+            # Create ONE temporary image file
+            temp_fd, temp_img_path = tempfile.mkstemp(suffix='.png')
+            os.close(temp_fd)
+            
+            try:
+                # Save the full image once
+                cv2.imwrite(temp_img_path, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+                
+                # Process each size with SPARSE sampling (not dense)
+                for window_w, window_h, frequency in top_sizes:
+                    # Use LARGE stride for speed - we want complete ads, not overlapping pieces
+                    stride_x = max(window_w // 2, 100)  # At least 100px steps
+                    stride_y = max(window_h // 2, 100)
+                    
+                    print(f"Scanning {window_w}x{window_h} ads with {stride_x}x{stride_y} stride")
+                    
+                    # Sparse grid scan - much fewer windows
+                    for y in range(0, height - window_h, stride_y):
+                        for x in range(0, width - window_w, stride_x):
+                            total_windows += 1
+                            
+                            # Timeout protection
+                            if time.time() - start_time > 60:  # 1 minute max per page
+                                print(f"Page scan timeout after 60s, stopping early")
+                                break
+                            
+                            # Extract features for this complete ad candidate
+                            box_coords = {'x': x, 'y': y, 'width': window_w, 'height': window_h}
+                            features_dict = AdLearningEngine.extract_features(temp_img_path, box_coords)
+                            
+                            if features_dict is None:
+                                continue
+                                
+                            # Convert to feature vector
+                            features = [features_dict.get(name, 0) for name in feature_names]
+                            
+                            # Make prediction
+                            features_array = np.array(features).reshape(1, -1)
+                            if scaler is not None:
+                                features_array = scaler.transform(features_array)
+                            
+                            # Get confidence
+                            if hasattr(model, 'predict_proba'):
+                                proba = model.predict_proba(features_array)[0]
+                                confidence = proba[1] if len(proba) > 1 else proba[0]
+                            else:
+                                prediction = model.predict(features_array)[0]
+                                confidence = 0.8 if prediction == 1 else 0.2
+                            
+                            # Only accept high-confidence detections to reduce false positives
+                            if confidence >= confidence_threshold:
+                                print(f"FOUND AD: {window_w}x{window_h} at ({x},{y}) confidence: {confidence:.3f}")
+                                
+                                # Check for overlaps with generous threshold to merge nearby detections
+                                new_box = {'x': x, 'y': y, 'width': window_w, 'height': window_h}
+                                if not AdLearningEngine._overlaps_existing(new_box, detections, overlap_threshold=0.5):
+                                    detections.append({
+                                        'x': x, 'y': y,
+                                        'width': window_w, 'height': window_h,
+                                        'confidence': confidence
+                                    })
+                        
+                        # Break outer loop on timeout
+                        if time.time() - start_time > 60:
+                            break
+                
+                # Sort by confidence and limit results
+                detections.sort(key=lambda x: x['confidence'], reverse=True)
+                final_detections = detections[:10]  # Max 10 ads per page
+                
+                elapsed = time.time() - start_time
+                print(f"EFFICIENT SCAN COMPLETE: {total_windows} windows in {elapsed:.1f}s, found {len(final_detections)} ads")
+                return final_detections
+                
+            finally:
+                # Clean up temp file
+                if temp_img_path and os.path.exists(temp_img_path):
+                    os.unlink(temp_img_path)
+            
+        except Exception as e:
+            print(f"Error in _detect_complete_ads: {e}")
             import traceback
             traceback.print_exc()
             return []

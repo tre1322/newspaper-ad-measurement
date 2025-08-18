@@ -217,14 +217,20 @@ def start_background_processing(pub_id):
         process_publication_sync(pub_id)
         return
     
-    # Check if already processing
+    # Check if already processing (with timeout to prevent infinite loops)
+    import time
+    processing_start_time = time.time()
+    
     with _processing_lock:
         if pub_id in _processing_publications:
-            print(f"Publication {pub_id} is already being processed, skipping")
-            import traceback
-            print("Call stack for duplicate processing attempt:")
-            traceback.print_stack(limit=5)
-            return
+            # If it's been processing for more than 30 minutes, assume it's stuck and continue
+            if time.time() - processing_start_time < 1800:  # 30 minutes
+                print(f"Publication {pub_id} is already being processed, skipping")
+                return
+            else:
+                print(f"Publication {pub_id} has been processing for too long, forcing restart")
+                _processing_publications.discard(pub_id)
+        
         _processing_publications.add(pub_id)
     
     def process_in_background():
@@ -1537,32 +1543,26 @@ class AdLearningEngine:
     def auto_detect_ads(publication_id, confidence_threshold=0.7):
         """Automatically detect ads in a publication using trained models"""
         try:
-            # Add a global lock to prevent multiple AI detection processes
-            import threading
-            if not hasattr(AdLearningEngine, '_ai_detection_lock'):
-                AdLearningEngine._ai_detection_lock = threading.Lock()
+            # Simple duplicate check without complex locking
+            if hasattr(AdLearningEngine, '_ai_processing') and publication_id in getattr(AdLearningEngine, '_ai_processing', set()):
+                print(f"AI detection already running for publication {publication_id}, skipping")
+                return {'success': False, 'error': 'AI detection already in progress'}
             
-            with AdLearningEngine._ai_detection_lock:
-                if hasattr(AdLearningEngine, '_ai_processing') and publication_id in AdLearningEngine._ai_processing:
-                    print(f"AI detection already running for publication {publication_id}, skipping duplicate call")
-                    return {'success': False, 'error': 'AI detection already in progress'}
-                
-                # Mark as processing
-                if not hasattr(AdLearningEngine, '_ai_processing'):
-                    AdLearningEngine._ai_processing = set()
-                AdLearningEngine._ai_processing.add(publication_id)
+            # Mark as processing
+            if not hasattr(AdLearningEngine, '_ai_processing'):
+                AdLearningEngine._ai_processing = set()
+            AdLearningEngine._ai_processing.add(publication_id)
             
-            try:
-                publication = Publication.query.get(publication_id)
-                if not publication:
-                    return {'success': False, 'error': 'Publication not found'}
+            publication = Publication.query.get(publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
             
             # Get the active model for this publication type
             model_record = MLModel.query.filter_by(
                 publication_type=publication.publication_type,
-                model_type='ad_detector',
-                is_active=True
-            ).first()
+                    model_type='ad_detector',
+                    is_active=True
+                ).first()
             
             if not model_record:
                 print(f"No active model found for publication type: {publication.publication_type}")
@@ -1591,7 +1591,7 @@ class AdLearningEngine:
             
             detections = []
             pages_processed = 0
-            
+        
             # Process each page
             pages = Page.query.filter_by(publication_id=publication.id).all()
             print(f"Processing {len(pages)} pages for AI detection")
@@ -1699,18 +1699,14 @@ class AdLearningEngine:
                 traceback.print_exc()
                 return {'success': False, 'error': str(e)}
             
-            finally:
-                # Always remove from processing set
-                try:
-                    with AdLearningEngine._ai_detection_lock:
-                        AdLearningEngine._ai_processing.discard(publication_id)
-                        print(f"Removed publication {publication_id} from AI processing set")
-                except:
-                    pass
-                    
-        except Exception as outer_e:
-            print(f"Outer error in auto_detect_ads: {outer_e}")
-            return {'success': False, 'error': str(outer_e)}
+        finally:
+            # Always remove from processing set
+            try:
+                if hasattr(AdLearningEngine, '_ai_processing'):
+                    AdLearningEngine._ai_processing.discard(publication_id)
+                    print(f"Removed publication {publication_id} from AI processing set")
+            except:
+                pass
     
     @staticmethod
     def _get_typical_ad_sizes(publication_type):

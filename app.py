@@ -236,6 +236,9 @@ def start_background_processing(pub_id):
                 current_status = publication.safe_processing_status
                 if publication.processed or current_status in ['processing', 'extracting_pages', 'creating_images', 'ai_detection', 'completed']:
                     print(f"Publication {pub_id} already processed or processing (status: {current_status}), skipping")
+                    # Remove from processing set since we're skipping
+                    with _processing_lock:
+                        _processing_publications.discard(pub_id)
                     return
                 
                 print(f"Starting background processing for publication {pub_id}")
@@ -975,9 +978,11 @@ class AdLearningEngine:
             import time
             start_time = time.time()
             
+            print(f"extract_features: Loading image {image_path}")
             # Load image
             img = cv2.imread(image_path)
             if img is None:
+                print(f"extract_features: Failed to load image {image_path}")
                 return None
             
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -991,8 +996,10 @@ class AdLearningEngine:
             h = min(h, img_h - y)
             
             # Extract region of interest
+            print(f"extract_features: Extracting ROI with bounds x={x}, y={y}, w={w}, h={h} from image shape {gray.shape}")
             roi = gray[y:y+h, x:x+w]
             if roi.size == 0 or w <= 0 or h <= 0:
+                print(f"extract_features: Invalid ROI - size={roi.size}, w={w}, h={h}")
                 return None
             
             # Feature extraction
@@ -1090,7 +1097,9 @@ class AdLearningEngine:
             return features
             
         except Exception as e:
-            print(f"Error extracting features: {e}")
+            print(f"Error extracting features from {image_path}: {e}")
+            import traceback
+            traceback.print_exc()
             return None
     
     @staticmethod
@@ -1127,20 +1136,26 @@ class AdLearningEngine:
                 if i % 10 == 0:
                     print(f"Progress: {i}/{total_boxes} ({i/total_boxes*100:.1f}%)")
                 
+                print(f"Processing ad box {ad_box.id} - coordinates: x={ad_box.x}, y={ad_box.y}, w={ad_box.width}, h={ad_box.height}")
+                
                 # Get page and publication info
                 page = db.session.get(Page, ad_box.page_id)
                 if not page:
+                    print(f"No page found for ad box {ad_box.id}, page_id={ad_box.page_id}")
                     continue
                     
                 publication = db.session.get(Publication, page.publication_id)
                 if not publication:
+                    print(f"No publication found for page {page.id}, publication_id={page.publication_id}")
                     continue
                 
                 # Get image path
                 image_filename = f"{publication.filename}_page_{page.page_number}.png"
                 image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
                 
+                print(f"Looking for image: {image_path}")
                 if not os.path.exists(image_path):
+                    print(f"Image file not found: {image_path}")
                     continue
                 
                 # Extract features
@@ -1148,9 +1163,11 @@ class AdLearningEngine:
                     'x': ad_box.x, 'y': ad_box.y, 
                     'width': ad_box.width, 'height': ad_box.height
                 }
+                print(f"Extracting features from {image_path} with coords {box_coords}")
                 features = AdLearningEngine.extract_features(image_path, box_coords)
                 
                 if features:
+                    print(f"Successfully extracted {len(features)} features for ad box {ad_box.id}")
                     # Create new training data record
                     training_data = TrainingData(
                         ad_box_id=ad_box.id,
@@ -1166,9 +1183,13 @@ class AdLearningEngine:
                     if len(training_samples) % batch_size == 0:
                         db.session.commit()
                         print(f"Committed batch of {batch_size} samples")
+                else:
+                    print(f"Feature extraction returned None for ad box {ad_box.id}")
             
             except Exception as e:
                 print(f"Error processing ad box {ad_box.id}: {e}")
+                import traceback
+                traceback.print_exc()
                 continue
         
         # Final commit
@@ -1473,6 +1494,10 @@ class AdLearningEngine:
             
             if not model_record:
                 print(f"No active model found for publication type: {publication.publication_type}")
+                print(f"Available models in database:")
+                all_models = MLModel.query.all()
+                for m in all_models:
+                    print(f"  - {m.publication_type} / {m.model_type} / active={m.is_active}")
                 return {'success': False, 'error': f'No trained model available for {publication.publication_type}'}
             
             # Load the trained model

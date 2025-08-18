@@ -1149,6 +1149,8 @@ class AdLearningEngine:
                     print(f"No publication found for page {page.id}, publication_id={page.publication_id}")
                     continue
                 
+                print(f"Ad box {ad_box.id} belongs to publication {publication.id} with filename: {publication.filename}")
+                
                 # Get image path - handle both filename with and without .pdf extension
                 base_filename = publication.filename
                 if base_filename.endswith('.pdf'):
@@ -1184,11 +1186,34 @@ class AdLearningEngine:
                                 print(f"  - {f}")
                             if len(existing_files) > 10:
                                 print(f"  ... and {len(existing_files) - 10} more files")
+                            
+                            # Try to find a matching publication for this page
+                            print(f"Attempting to find correct publication for page {page.page_number}...")
+                            for existing_file in existing_files:
+                                if existing_file.endswith(f"_page_{page.page_number}.png"):
+                                    # Extract the publication filename from the existing file
+                                    pub_filename = existing_file.replace(f"_page_{page.page_number}.png", "")
+                                    print(f"Found potential match: {pub_filename}")
+                                    
+                                    # Try to find this publication in database
+                                    correct_pub = Publication.query.filter_by(filename=pub_filename).first()
+                                    if correct_pub:
+                                        print(f"Found correct publication {correct_pub.id} with filename {correct_pub.filename}")
+                                        
+                                        # Use this publication instead
+                                        publication = correct_pub
+                                        image_path = os.path.join(pages_dir, existing_file)
+                                        print(f"Using corrected image path: {image_path}")
+                                        break
+                            else:
+                                print(f"No matching publication found for page {page.page_number}")
+                                continue
                         else:
                             print(f"Pages directory does not exist: {pages_dir}")
+                            continue
                     except Exception as e:
                         print(f"Error listing pages directory: {e}")
-                    continue
+                        continue
                 
                 # Extract features
                 box_coords = {

@@ -1686,10 +1686,47 @@ class AdLearningEngine:
                     # Extract window
                     window = gray[y:y+window_h, x:x+window_w]
                     
-                    # Extract features for this window
-                    features = AdLearningEngine._extract_window_features(window, x, y, width, height)
-                    if features is None:
+                    # Extract features using the same method as training data
+                    # Convert window coordinates to box_coords format
+                    box_coords = {
+                        'x': x, 'y': y, 
+                        'width': window_w, 'height': window_h
+                    }
+                    
+                    # Use the same feature extraction as training - save window as temp image
+                    import tempfile
+                    import os
+                    temp_img_path = None
+                    try:
+                        # Create temporary image file
+                        temp_fd, temp_img_path = tempfile.mkstemp(suffix='.png')
+                        os.close(temp_fd)
+                        
+                        # Save the full image temporarily 
+                        cv2.imwrite(temp_img_path, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+                        
+                        # Extract features using the same method as training
+                        features_dict = AdLearningEngine.extract_features(temp_img_path, box_coords)
+                        
+                        if features_dict is None:
+                            continue
+                            
+                        # Convert to feature vector matching training format
+                        features = [features_dict.get(name, 0) for name in feature_names]
+                        
+                    except Exception as e:
+                        print(f"Error extracting features for window: {e}")
                         continue
+                    finally:
+                        # Clean up temp file
+                        if temp_img_path and os.path.exists(temp_img_path):
+                            os.unlink(temp_img_path)
+                    
+                    # Debug first few feature extractions
+                    if predictions_made < 3:
+                        print(f"Sample window {predictions_made + 1}: extracted {len(features)} features, expected {len(feature_names)}")
+                        if len(features) != len(feature_names):
+                            print(f"WARNING: Feature count mismatch! Expected {len(feature_names)}, got {len(features)}")
                     
                     # Make prediction
                     try:
@@ -1711,6 +1748,10 @@ class AdLearningEngine:
                             # Fallback for models without predict_proba
                             prediction = model.predict(features_array)[0]
                             confidence = 0.8 if prediction == 1 else 0.2
+                        
+                        # Track confidence distribution
+                        if predictions_made <= 10:  # Log first 10 predictions to see confidence range
+                            print(f"Sample prediction {predictions_made}: confidence {confidence:.3f}")
                         
                         # Log high confidence predictions
                         if confidence >= confidence_threshold * 0.5:  # Log predictions at half threshold

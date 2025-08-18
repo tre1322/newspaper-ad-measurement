@@ -1684,20 +1684,20 @@ class AdLearningEngine:
             for page in pages:
                 update_totals(page.id)
             
-                return {
-                    'success': True,
-                    'detections': len(detections),
-                    'pages_processed': pages_processed,
-                    'model_used': model_record.model_name,
-                    'confidence_threshold': confidence_threshold
-                }
+            return {
+                'success': True,
+                'detections': len(detections),
+                'pages_processed': pages_processed,
+                'model_used': model_record.model_name,
+                'confidence_threshold': confidence_threshold
+            }
             
-            except Exception as e:
-                db.session.rollback()
-                print(f"Error in auto_detect_ads: {e}")
-                import traceback
-                traceback.print_exc()
-                return {'success': False, 'error': str(e)}
+        except Exception as e:
+            db.session.rollback()
+            print(f"Error in auto_detect_ads: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
             
         finally:
             # Always remove from processing set

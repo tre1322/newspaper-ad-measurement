@@ -1149,13 +1149,45 @@ class AdLearningEngine:
                     print(f"No publication found for page {page.id}, publication_id={page.publication_id}")
                     continue
                 
-                # Get image path
-                image_filename = f"{publication.filename}_page_{page.page_number}.png"
-                image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+                # Get image path - handle both filename with and without .pdf extension
+                base_filename = publication.filename
+                if base_filename.endswith('.pdf'):
+                    base_filename = base_filename[:-4]  # Remove .pdf extension
                 
-                print(f"Looking for image: {image_path}")
-                if not os.path.exists(image_path):
-                    print(f"Image file not found: {image_path}")
+                # Try both possible filename formats
+                possible_filenames = [
+                    f"{publication.filename}_page_{page.page_number}.png",  # Original format
+                    f"{base_filename}_page_{page.page_number}.png"          # Without .pdf extension
+                ]
+                
+                image_path = None
+                for filename in possible_filenames:
+                    test_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', filename)
+                    print(f"Checking for image: {test_path}")
+                    if os.path.exists(test_path):
+                        image_path = test_path
+                        print(f"Found image: {image_path}")
+                        break
+                
+                if not image_path:
+                    print(f"Image file not found in any of these locations:")
+                    for filename in possible_filenames:
+                        print(f"  - {os.path.join(app.config['UPLOAD_FOLDER'], 'pages', filename)}")
+                    
+                    # Show what files actually exist in the pages directory
+                    pages_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'pages')
+                    try:
+                        if os.path.exists(pages_dir):
+                            existing_files = os.listdir(pages_dir)
+                            print(f"Files that actually exist in {pages_dir}:")
+                            for f in existing_files[:10]:  # Show first 10 files
+                                print(f"  - {f}")
+                            if len(existing_files) > 10:
+                                print(f"  ... and {len(existing_files) - 10} more files")
+                        else:
+                            print(f"Pages directory does not exist: {pages_dir}")
+                    except Exception as e:
+                        print(f"Error listing pages directory: {e}")
                     continue
                 
                 # Extract features

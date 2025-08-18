@@ -1386,65 +1386,26 @@ class AdLearningEngine:
             scaler = model_package['scaler']
             feature_names = model_package['feature_names']
             
-            # First use existing CV detection to find candidate regions
-            img = cv2.imread(image_path)
-            if img is None:
-                return {'success': False, 'error': 'Could not load image'}
+            # Use the new intelligent ad detection system
+            typical_ad_sizes = AdLearningEngine._get_typical_ad_sizes(publication_type)
             
-            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            detected_boxes = AdLearningEngine.intelligent_ad_detection(
+                image_path, publication_type, model, feature_names, 
+                confidence_threshold, scaler, typical_ad_sizes
+            )
             
-            # Use existing edge detection to find candidates
-            edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-            edges = cv2.morphologyEx(edges, cv2.MORPH_CLOSE, kernel)
-            
-            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-            
+            # Convert to expected format for backward compatibility
             predicted_ads = []
-            img_height, img_width = img.shape[:2]
-            
-            for contour in contours:
-                x, y, w, h = cv2.boundingRect(contour)
-                
-                # Basic size filtering
-                if (w < 30 or h < 20 or w > img_width * 0.9 or h > img_height * 0.9 or
-                    w * h < 600):  # Too small
-                    continue
-                
-                # Extract features for this candidate region
-                box_coords = {'x': x, 'y': y, 'width': w, 'height': h}
-                features_dict = AdLearningEngine.extract_features(image_path, box_coords)
-                
-                if not features_dict:
-                    continue
-                
-                # Convert to feature vector
-                feature_vector = [features_dict.get(name, 0) for name in feature_names]
-                feature_vector = np.array(feature_vector).reshape(1, -1)
-                
-                # Scale features
-                feature_vector_scaled = scaler.transform(feature_vector)
-                
-                # Get prediction and confidence
-                prediction = model.predict(feature_vector_scaled)[0]
-                confidence = np.max(model.predict_proba(feature_vector_scaled)[0])
-                
-                # Only include high-confidence predictions that are actual ad types
-                if (confidence >= confidence_threshold and 
-                    prediction in ['manual', 'open_display', 'entertainment', 'classified', 'public_notice']):
-                    
-                    predicted_ads.append({
-                        'x': int(x),
-                        'y': int(y),
-                        'width': int(w),
-                        'height': int(h),
-                        'predicted_type': prediction,
-                        'confidence': float(confidence),
-                        'features': features_dict
-                    })
-            
-            # Remove overlapping predictions (keep highest confidence)
-            predicted_ads = AdLearningEngine._remove_overlapping_predictions(predicted_ads)
+            for box in detected_boxes:
+                predicted_ads.append({
+                    'x': int(box['x']),
+                    'y': int(box['y']),
+                    'width': int(box['width']),
+                    'height': int(box['height']),
+                    'predicted_type': 'open_display',  # Default type for intelligent detection
+                    'confidence': float(box['confidence']),
+                    'features': {}  # Features already calculated in intelligent detection
+                })
             
             return {
                 'success': True,
@@ -1611,9 +1572,10 @@ class AdLearningEngine:
                 typical_ad_sizes = AdLearningEngine._get_typical_ad_sizes(publication.publication_type)
                 print(f"Using typical ad sizes for detection: {typical_ad_sizes}")
                 
-                # Use optimized detection approach focused on complete ads
-                detected_boxes = AdLearningEngine._detect_complete_ads(
-                    image_path, model, feature_names, confidence_threshold, scaler, typical_ad_sizes
+                # Use intelligent content-aware detection system
+                detected_boxes = AdLearningEngine.intelligent_ad_detection(
+                    image_path, publication.publication_type, model, feature_names, 
+                    confidence_threshold, scaler, typical_ad_sizes
                 )
                 
                 print(f"Page {page.page_number} scan complete: {len(detected_boxes)} detections")
@@ -1978,6 +1940,387 @@ class AdLearningEngine:
             return []
     
     @staticmethod
+    def intelligent_ad_detection(image_path, publication_type, model, feature_names, confidence_threshold=0.6, scaler=None, typical_sizes=None):
+        """Intelligent ad detection using visual pattern recognition and layout awareness"""
+        try:
+            import cv2
+            import numpy as np
+            import tempfile
+            import os
+            import time
+            
+            start_time = time.time()
+            print(f"🔍 INTELLIGENT AD DETECTION STARTING")
+            
+            # Load image
+            img = cv2.imread(image_path)
+            if img is None:
+                print(f"❌ Failed to load image: {image_path}")
+                return []
+            
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            height, width = gray.shape
+            print(f"📄 Analyzing {width}x{height} {publication_type} publication")
+            
+            # Step 1: Get publication-specific ad zones
+            ad_zones = AdLearningEngine.get_typical_ad_zones((width, height), publication_type)
+            print(f"🎯 Identified {len(ad_zones)} potential ad zones for {publication_type}")
+            
+            # Step 2: Detect regions with ad-like visual patterns
+            ad_candidates = AdLearningEngine.detect_ads_by_visual_patterns(gray)
+            print(f"👁️  Found {len(ad_candidates)} regions with ad-like visual patterns")
+            
+            # Step 3: Filter candidates by ad zones and classify content
+            filtered_candidates = []
+            for candidate in ad_candidates:
+                # Check if candidate overlaps with typical ad zones
+                if AdLearningEngine._candidate_in_ad_zones(candidate, ad_zones):
+                    # Classify content to ensure it's advertising, not editorial
+                    if AdLearningEngine.is_likely_ad_region(gray, candidate['x'], candidate['y'], 
+                                                           candidate['width'], candidate['height']):
+                        filtered_candidates.append(candidate)
+            
+            print(f"🎯 {len(filtered_candidates)} candidates passed layout and content filters")
+            
+            # Step 4: Use ML model to validate remaining candidates
+            final_detections = []
+            temp_fd, temp_img_path = tempfile.mkstemp(suffix='.png')
+            os.close(temp_fd)
+            
+            try:
+                cv2.imwrite(temp_img_path, cv2.cvtColor(gray, cv2.COLOR_GRAY2BGR))
+                
+                for i, candidate in enumerate(filtered_candidates):
+                    if time.time() - start_time > 30:  # 30 second timeout
+                        print(f"⏰ Timeout reached, processed {i}/{len(filtered_candidates)} candidates")
+                        break
+                    
+                    # Extract ML features for this candidate
+                    box_coords = {
+                        'x': candidate['x'], 'y': candidate['y'],
+                        'width': candidate['width'], 'height': candidate['height']
+                    }
+                    
+                    features_dict = AdLearningEngine.extract_features(temp_img_path, box_coords)
+                    if features_dict is None:
+                        continue
+                    
+                    # Make ML prediction
+                    features = [features_dict.get(name, 0) for name in feature_names]
+                    features_array = np.array(features).reshape(1, -1)
+                    
+                    if scaler is not None:
+                        features_array = scaler.transform(features_array)
+                    
+                    # Get confidence from ML model
+                    if hasattr(model, 'predict_proba'):
+                        proba = model.predict_proba(features_array)[0]
+                        ml_confidence = proba[1] if len(proba) > 1 else proba[0]
+                    else:
+                        prediction = model.predict(features_array)[0]
+                        ml_confidence = 0.8 if prediction == 1 else 0.2
+                    
+                    # Combine visual pattern confidence with ML confidence
+                    combined_confidence = (candidate['confidence'] * 0.4 + ml_confidence * 0.6)
+                    
+                    if combined_confidence >= confidence_threshold:
+                        print(f"✅ CONFIRMED AD: {candidate['width']}x{candidate['height']} at ({candidate['x']},{candidate['y']}) confidence={combined_confidence:.3f}")
+                        
+                        # Check for overlaps before adding
+                        new_box = {
+                            'x': candidate['x'], 'y': candidate['y'],
+                            'width': candidate['width'], 'height': candidate['height'],
+                            'confidence': combined_confidence
+                        }
+                        
+                        if not AdLearningEngine._overlaps_existing(new_box, final_detections, overlap_threshold=0.4):
+                            final_detections.append(new_box)
+                
+                # Sort by confidence and limit results
+                final_detections.sort(key=lambda x: x['confidence'], reverse=True)
+                final_detections = final_detections[:8]  # Max 8 ads per page
+                
+                elapsed = time.time() - start_time
+                print(f"🎉 INTELLIGENT DETECTION COMPLETE: Found {len(final_detections)} quality ads in {elapsed:.1f}s")
+                return final_detections
+                
+            finally:
+                if temp_img_path and os.path.exists(temp_img_path):
+                    os.unlink(temp_img_path)
+            
+        except Exception as e:
+            print(f"❌ Error in intelligent_ad_detection: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    @staticmethod
+    def get_typical_ad_zones(image_shape, publication_type):
+        """Define typical ad zones for different publication types"""
+        width, height = image_shape
+        ad_zones = []
+        
+        if publication_type == 'broadsheet':
+            # Top banner area (skip masthead)
+            ad_zones.append({'x': 0, 'y': int(height * 0.15), 'width': width, 'height': int(height * 0.12), 'type': 'banner'})
+            
+            # Left sidebar
+            sidebar_width = int(width * 0.25)
+            ad_zones.append({'x': 0, 'y': int(height * 0.3), 'width': sidebar_width, 'height': int(height * 0.5), 'type': 'sidebar'})
+            
+            # Right sidebar  
+            ad_zones.append({'x': width - sidebar_width, 'y': int(height * 0.3), 'width': sidebar_width, 'height': int(height * 0.5), 'type': 'sidebar'})
+            
+            # Bottom classified section
+            ad_zones.append({'x': 0, 'y': int(height * 0.75), 'width': width, 'height': int(height * 0.25), 'type': 'classified'})
+            
+            # Center content areas (between columns)
+            center_start = int(width * 0.25)
+            center_width = int(width * 0.5) 
+            ad_zones.append({'x': center_start, 'y': int(height * 0.3), 'width': center_width, 'height': int(height * 0.4), 'type': 'content'})
+        
+        elif publication_type == 'special_edition':
+            # Scattered preset locations for special editions
+            # Top area
+            ad_zones.append({'x': 0, 'y': int(height * 0.1), 'width': width, 'height': int(height * 0.15), 'type': 'banner'})
+            
+            # Middle sections
+            ad_zones.append({'x': 0, 'y': int(height * 0.3), 'width': int(width * 0.4), 'height': int(height * 0.3), 'type': 'display'})
+            ad_zones.append({'x': int(width * 0.6), 'y': int(height * 0.3), 'width': int(width * 0.4), 'height': int(height * 0.3), 'type': 'display'})
+            
+            # Bottom area
+            ad_zones.append({'x': 0, 'y': int(height * 0.7), 'width': width, 'height': int(height * 0.3), 'type': 'mixed'})
+        
+        elif publication_type == 'peach':
+            # Peach-specific layout zones
+            # Header area (below masthead)
+            ad_zones.append({'x': 0, 'y': int(height * 0.12), 'width': width, 'height': int(height * 0.1), 'type': 'header'})
+            
+            # Side columns
+            col_width = int(width * 0.3)
+            ad_zones.append({'x': 0, 'y': int(height * 0.25), 'width': col_width, 'height': int(height * 0.6), 'type': 'column'})
+            ad_zones.append({'x': width - col_width, 'y': int(height * 0.25), 'width': col_width, 'height': int(height * 0.6), 'type': 'column'})
+            
+            # Footer area
+            ad_zones.append({'x': 0, 'y': int(height * 0.85), 'width': width, 'height': int(height * 0.15), 'type': 'footer'})
+        
+        else:
+            # Default generic zones
+            ad_zones.append({'x': 0, 'y': int(height * 0.1), 'width': width, 'height': int(height * 0.8), 'type': 'general'})
+        
+        return ad_zones
+    
+    @staticmethod
+    def detect_ads_by_visual_patterns(gray_image):
+        """Detect rectangular regions with ad-like visual characteristics"""
+        try:
+            import cv2
+            import numpy as np
+            
+            height, width = gray_image.shape
+            candidates = []
+            
+            print(f"🔍 Analyzing visual patterns in {width}x{height} image")
+            
+            # Step 1: Edge detection to find rectangular boundaries
+            edges = cv2.Canny(gray_image, 50, 150, apertureSize=3)
+            
+            # Step 2: Find contours (potential ad boundaries)
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            print(f"📦 Found {len(contours)} potential boundaries")
+            
+            # Step 3: Filter contours by ad-like characteristics
+            for contour in contours:
+                # Get bounding rectangle
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # Filter by reasonable ad dimensions
+                if w < 80 or h < 60 or w > width * 0.8 or h > height * 0.6:
+                    continue
+                
+                # Filter by aspect ratio (ads are typically not too extreme)
+                aspect_ratio = w / h if h > 0 else 0
+                if aspect_ratio < 0.3 or aspect_ratio > 4.0:
+                    continue
+                
+                # Check if contour approximates a rectangle
+                epsilon = 0.02 * cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+                
+                # Look for roughly rectangular shapes (4-8 points after approximation)
+                if len(approx) >= 4 and len(approx) <= 8:
+                    # Calculate rectangularity score
+                    contour_area = cv2.contourArea(contour)
+                    bounding_area = w * h
+                    rectangularity = contour_area / bounding_area if bounding_area > 0 else 0
+                    
+                    if rectangularity > 0.6:  # At least 60% rectangular
+                        # Calculate confidence based on visual characteristics
+                        roi = gray_image[y:y+h, x:x+w]
+                        confidence = AdLearningEngine._calculate_visual_ad_confidence(roi, x, y, w, h, width, height)
+                        
+                        if confidence > 0.3:  # Minimum visual confidence
+                            candidates.append({
+                                'x': x, 'y': y, 'width': w, 'height': h,
+                                'confidence': confidence,
+                                'rectangularity': rectangularity,
+                                'aspect_ratio': aspect_ratio
+                            })
+            
+            # Step 4: Additional pattern detection for missed ads (grid sampling backup)
+            # Sample key positions where ads might not have strong borders
+            grid_candidates = AdLearningEngine._detect_borderless_ads(gray_image)
+            candidates.extend(grid_candidates)
+            
+            # Sort by confidence and remove overlaps
+            candidates = sorted(candidates, key=lambda x: x['confidence'], reverse=True)
+            filtered_candidates = []
+            
+            for candidate in candidates:
+                # Check for overlaps with already selected candidates
+                overlap = False
+                for selected in filtered_candidates:
+                    if AdLearningEngine._boxes_overlap(candidate, selected, threshold=0.5):
+                        overlap = True
+                        break
+                
+                if not overlap:
+                    filtered_candidates.append(candidate)
+                    if len(filtered_candidates) >= 20:  # Limit candidates
+                        break
+            
+            print(f"✨ Selected {len(filtered_candidates)} visual pattern candidates")
+            return filtered_candidates
+            
+        except Exception as e:
+            print(f"❌ Error in detect_ads_by_visual_patterns: {e}")
+            return []
+    
+    @staticmethod
+    def _calculate_visual_ad_confidence(roi, x, y, w, h, page_width, page_height):
+        """Calculate confidence score based on visual ad characteristics"""
+        try:
+            import cv2
+            import numpy as np
+            
+            if roi.size == 0:
+                return 0.0
+            
+            confidence_factors = []
+            
+            # Factor 1: Border strength (ads often have defined borders)
+            border_thickness = min(3, min(w, h) // 8)
+            if border_thickness > 0:
+                try:
+                    top_border = roi[:border_thickness, :].mean()
+                    bottom_border = roi[-border_thickness:, :].mean()
+                    left_border = roi[:, :border_thickness].mean()
+                    right_border = roi[:, -border_thickness:].mean()
+                    center = roi[border_thickness:-border_thickness, border_thickness:-border_thickness].mean()
+                    
+                    border_contrast = (abs(top_border - center) + abs(bottom_border - center) + 
+                                     abs(left_border - center) + abs(right_border - center)) / 4
+                    
+                    # Normalize and add to factors
+                    border_factor = min(border_contrast / 50.0, 1.0)  # Normalize to 0-1
+                    confidence_factors.append(border_factor)
+                except:
+                    confidence_factors.append(0.2)  # Default if border calculation fails
+            
+            # Factor 2: White space ratio (ads typically have more white space than dense text)
+            binary = cv2.threshold(roi, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            white_ratio = np.sum(binary == 255) / binary.size
+            
+            # Ads typically have 40-80% white space
+            if 0.4 <= white_ratio <= 0.8:
+                white_factor = 1.0
+            elif 0.3 <= white_ratio <= 0.9:
+                white_factor = 0.7
+            else:
+                white_factor = 0.3
+            
+            confidence_factors.append(white_factor)
+            
+            # Factor 3: Position factor (some positions more likely for ads)
+            center_x = x + w/2
+            center_y = y + h/2
+            
+            # Prefer side columns and avoid extreme top (masthead) and bottom
+            position_factor = 1.0
+            if center_y < page_height * 0.15:  # Too close to masthead
+                position_factor *= 0.5
+            if center_y > page_height * 0.9:   # Too close to bottom
+                position_factor *= 0.7
+            if center_x < page_width * 0.2 or center_x > page_width * 0.8:  # Side positions
+                position_factor *= 1.2
+            
+            confidence_factors.append(min(position_factor, 1.0))
+            
+            # Factor 4: Size appropriateness
+            area = w * h
+            page_area = page_width * page_height
+            size_ratio = area / page_area
+            
+            # Prefer medium-sized regions (not too small, not too large)
+            if 0.01 <= size_ratio <= 0.15:  # 1-15% of page
+                size_factor = 1.0
+            elif 0.005 <= size_ratio <= 0.25:  # 0.5-25% of page
+                size_factor = 0.8
+            else:
+                size_factor = 0.4
+                
+            confidence_factors.append(size_factor)
+            
+            # Calculate weighted average
+            final_confidence = np.mean(confidence_factors)
+            return float(final_confidence)
+            
+        except Exception as e:
+            print(f"Warning: Error calculating visual confidence: {e}")
+            return 0.3  # Default confidence
+    
+    @staticmethod
+    def _detect_borderless_ads(gray_image):
+        """Backup detection for ads without strong borders using strategic sampling"""
+        try:
+            import cv2
+            import numpy as np
+            
+            height, width = gray_image.shape
+            candidates = []
+            
+            # Strategic grid sampling focused on common ad sizes and positions
+            common_sizes = [(300, 200), (250, 350), (400, 300), (200, 400)]
+            
+            for w, h in common_sizes:
+                if w > width * 0.8 or h > height * 0.8:
+                    continue
+                
+                # Strategic positions (not dense grid)
+                step_x = max(w // 2, 100)
+                step_y = max(h // 2, 100)
+                
+                for y in range(int(height * 0.15), height - h, step_y):  # Skip masthead area
+                    for x in range(0, width - w, step_x):
+                        roi = gray_image[y:y+h, x:x+w]
+                        confidence = AdLearningEngine._calculate_visual_ad_confidence(roi, x, y, w, h, width, height)
+                        
+                        if confidence > 0.4:  # Higher threshold for borderless detection
+                            candidates.append({
+                                'x': x, 'y': y, 'width': w, 'height': h,
+                                'confidence': confidence,
+                                'rectangularity': 0.8,  # Assumed for grid samples
+                                'aspect_ratio': w/h
+                            })
+            
+            return candidates
+            
+        except Exception as e:
+            print(f"Warning: Error in borderless ad detection: {e}")
+            return []
+    
+    @staticmethod
     def _scan_page_for_ads(image_path, model, feature_names, confidence_threshold=0.7, scaler=None, typical_sizes=None):
         """Scan page using sliding window to detect ads"""
         try:
@@ -2210,6 +2553,117 @@ class AdLearningEngine:
                     return True
         
         return False
+    
+    @staticmethod
+    def _candidate_in_ad_zones(candidate, ad_zones):
+        """Check if a candidate box overlaps with typical ad zones"""
+        candidate_center_x = candidate['x'] + candidate['width'] // 2
+        candidate_center_y = candidate['y'] + candidate['height'] // 2
+        
+        for zone in ad_zones:
+            # Check if candidate center falls within this ad zone
+            if (zone['x'] <= candidate_center_x <= zone['x'] + zone['width'] and
+                zone['y'] <= candidate_center_y <= zone['y'] + zone['height']):
+                return True
+            
+            # Also check for significant overlap (at least 30%)
+            overlap_x = max(0, min(candidate['x'] + candidate['width'], zone['x'] + zone['width']) - 
+                          max(candidate['x'], zone['x']))
+            overlap_y = max(0, min(candidate['y'] + candidate['height'], zone['y'] + zone['height']) - 
+                          max(candidate['y'], zone['y']))
+            
+            if overlap_x > 0 and overlap_y > 0:
+                overlap_area = overlap_x * overlap_y
+                candidate_area = candidate['width'] * candidate['height']
+                overlap_ratio = overlap_area / candidate_area if candidate_area > 0 else 0
+                
+                if overlap_ratio >= 0.3:  # 30% overlap threshold
+                    return True
+        
+        return False
+    
+    @staticmethod
+    def is_likely_ad_region(gray_image, x, y, width, height):
+        """Classify content region to distinguish ads from editorial content"""
+        try:
+            import cv2
+            import numpy as np
+            
+            # Extract the region of interest
+            roi = gray_image[y:y+height, x:x+width]
+            if roi.size == 0:
+                return False
+            
+            # Calculate various content analysis metrics
+            
+            # 1. Text density analysis
+            # Use edge detection to estimate text density
+            edges = cv2.Canny(roi, 50, 150)
+            edge_density = np.sum(edges > 0) / (width * height)
+            
+            # 2. White space analysis
+            # Ads typically have more white space than dense editorial content
+            white_pixels = np.sum(roi > 200)  # Assuming white/light pixels
+            white_space_ratio = white_pixels / (width * height)
+            
+            # 3. Contrast and uniformity
+            # Ads often have higher contrast and more uniform regions
+            roi_std = np.std(roi)
+            roi_mean = np.mean(roi)
+            
+            # 4. Horizontal line detection (typical in ads for borders/separators)
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (25, 1))
+            horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
+            horizontal_line_density = np.sum(horizontal_lines > 0) / (width * height)
+            
+            # 5. Vertical line detection
+            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, 25))
+            vertical_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, vertical_kernel)
+            vertical_line_density = np.sum(vertical_lines > 0) / (width * height)
+            
+            # 6. Size factor - larger regions more likely to be ads
+            area = width * height
+            size_factor = min(area / 10000, 1.0)  # Normalize to [0,1]
+            
+            # Scoring logic (higher score = more likely to be an ad)
+            ad_score = 0
+            
+            # Moderate edge density suggests structured content (ads) vs very high (dense text)
+            if 0.05 <= edge_density <= 0.25:
+                ad_score += 2
+            elif edge_density < 0.05:  # Too little structure
+                ad_score -= 1
+            elif edge_density > 0.4:   # Too much structure (likely dense text)
+                ad_score -= 2
+            
+            # White space - ads typically have more white space
+            if white_space_ratio > 0.3:
+                ad_score += 2
+            elif white_space_ratio > 0.15:
+                ad_score += 1
+            
+            # Standard deviation - ads often have more varied contrast
+            if roi_std > 40:
+                ad_score += 1
+            
+            # Border lines - ads often have clear borders
+            if horizontal_line_density > 0.01 or vertical_line_density > 0.01:
+                ad_score += 2
+            
+            # Size factor - larger regions more likely to be display ads
+            ad_score += size_factor * 2
+            
+            # Aspect ratio consideration - very tall/thin likely to be sidebars (ads)
+            aspect_ratio = width / height if height > 0 else 1
+            if 0.3 <= aspect_ratio <= 3.0:  # Reasonable ad proportions
+                ad_score += 1
+            
+            # Final decision threshold
+            return ad_score >= 4  # Require at least 4 points to classify as likely ad
+            
+        except Exception as e:
+            print(f"❌ Error in content classification: {e}")
+            return False  # Conservative: if we can't analyze, assume it's not an ad
 
 # Measurement Calculator
 class MeasurementCalculator:

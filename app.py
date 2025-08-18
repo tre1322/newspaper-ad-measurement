@@ -1609,6 +1609,20 @@ class AdLearningEngine:
                         config.get('total_inches_per_page', 258)  # Use total_inches_per_page from config
                     )
                     
+                    # Calculate required measurement fields
+                    if page.width_pixels and page.height_pixels:
+                        # Use page calibration if available
+                        width_inches = (box['width'] / page.width_pixels) * config.get('total_inches_per_page', 258) * (config.get('width_units', 12) / 12)
+                        height_inches = (box['height'] / page.height_pixels) * config.get('total_inches_per_page', 258)
+                    else:
+                        # Fallback calculation
+                        width_inches = column_inches / 10  # Rough estimate
+                        height_inches = column_inches / 10
+                    
+                    # Round measurements
+                    width_rounded = round(width_inches * 16) / 16  # Round to nearest 1/16th
+                    height_rounded = round(height_inches * 16) / 16
+                    
                     print(f"Creating AdBox: position=({box['x']},{box['y']}) size=({box['width']}x{box['height']}) confidence={box['confidence']:.3f} column_inches={column_inches:.2f}")
                     
                     ad_box = AdBox(
@@ -1617,10 +1631,15 @@ class AdLearningEngine:
                         y=box['y'],
                         width=box['width'],
                         height=box['height'],
+                        width_inches_raw=width_inches,
+                        height_inches_raw=height_inches,
+                        width_inches_rounded=width_rounded,
+                        height_inches_rounded=height_rounded,
                         column_inches=column_inches,
                         is_ad=True,
                         confidence_score=box['confidence'],
-                        detected_automatically=True
+                        detected_automatically=True,
+                        user_verified=False  # AI detected, not user verified
                     )
                     
                     db.session.add(ad_box)
@@ -1658,7 +1677,7 @@ class AdLearningEngine:
             return {'success': False, 'error': str(e)}
     
     @staticmethod
-    def _scan_page_for_ads(image_path, model, feature_names, confidence_threshold=0.7, scaler=None, window_size=(200, 200), stride=50):
+    def _scan_page_for_ads(image_path, model, feature_names, confidence_threshold=0.7, scaler=None, window_size=(400, 400), stride=200):
         """Scan page using sliding window to detect ads"""
         try:
             import cv2

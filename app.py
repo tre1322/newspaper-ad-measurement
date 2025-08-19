@@ -4973,8 +4973,11 @@ def delete_box(box_id):
         if training_records:
             # Log negative training information before deleting
             try:
-                page = Page.query.join(AdBox).filter(AdBox.id == box_id).first()
-                if page and page.publication:
+                # Get publication through ad_box -> page relationship
+                page = Page.query.get(ad_box.page_id)
+                publication = Publication.query.get(page.publication_id) if page else None
+                
+                if page and publication:
                     # Create a standalone negative training record without ad_box_id dependency
                     negative_features = {
                         'deleted_by_user': True, 
@@ -4985,7 +4988,9 @@ def delete_box(box_id):
                         'width': ad_box.width,
                         'height': ad_box.height,
                         'ad_type': ad_box.ad_type,
-                        'training_records_count': len(training_records)
+                        'training_records_count': len(training_records),
+                        'publication_type': publication.publication_type,
+                        'page_number': page.page_number
                     }
                     
                     print(f"Negative training data logged for deleted ad box {box_id}: {negative_features}")
@@ -4997,6 +5002,20 @@ def delete_box(box_id):
             for training_record in training_records:
                 db.session.delete(training_record)
             print(f"Deleted {len(training_records)} training data records for ad box {box_id}")
+        
+        # Additional safety check - force delete any remaining training data records
+        # This catches any records that might have been missed by the initial query
+        try:
+            remaining_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
+            if remaining_records:
+                print(f"Found {len(remaining_records)} additional training records to delete")
+                for record in remaining_records:
+                    db.session.delete(record)
+        except Exception as cleanup_error:
+            print(f"Warning during additional cleanup: {cleanup_error}")
+        
+        # Execute deletion of training data first
+        db.session.flush()  # Force execution of training data deletions
         
         # Now safely delete the ad_box
         db.session.delete(ad_box)

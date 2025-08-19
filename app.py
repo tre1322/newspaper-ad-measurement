@@ -329,35 +329,64 @@ def start_background_processing(pub_id):
                 publication.set_processing_status('ai_detection')
                 db.session.commit()
                 
-                # Run AI ad detection at the end of processing (with timeout protection)
+                # Run AI ad detection at the end of processing (with robust error handling)
                 try:
                     print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                     
-                    # Timeout protection for auto-detection (simplified for background threads)
-                    import time
-                    start_time = time.time()
-                    
-                    try:
-                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.25)
+                    # Skip AI detection if Google Vision credentials are not available
+                    if not os.path.exists('google-vision-credentials.json'):
+                        print(f"⚠️  Google Vision credentials not found - skipping AI detection")
+                        print(f"📝 Publication processed successfully - continue with manual ad marking")
+                    else:
+                        # Timeout protection for auto-detection (robust error handling)
+                        import time
+                        start_time = time.time()
                         
-                        if result['success']:
-                            print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
-                            if result['detections'] > 0:
-                                print(f"📊 Model used: {result.get('model_used', 'Unknown')}")
-                                print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
+                        try:
+                            # Test if Vision API is available before attempting detection
+                            if not is_vision_api_available():
+                                print(f"⚠️  Google Vision API not available - skipping AI detection")
+                                print(f"📝 Publication processed successfully - continue with manual ad marking")
                             else:
-                                print(f"ℹ️  No ads detected above confidence threshold - you can manually mark ads as usual")
-                        else:
-                            print(f"⚠️  AI detection not available: {result['error']}")
-                            print(f"📝 Continue with manual ad marking as usual")
-                    finally:
-                        # Check if we exceeded timeout
-                        elapsed = time.time() - start_time
-                        if elapsed > 300:  # 5 minutes
-                            print(f"⚠️  AI detection took {elapsed:.1f}s (timeout threshold: 300s)")
+                                # Proceed with AI detection with memory management
+                                result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.25)
+                                
+                                if result and result.get('success'):
+                                    print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
+                                    if result['detections'] > 0:
+                                        print(f"📊 Model used: {result.get('model_used', 'Unknown')}")
+                                        print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
+                                    else:
+                                        print(f"ℹ️  No ads detected above confidence threshold - you can manually mark ads as usual")
+                                else:
+                                    error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
+                                    print(f"⚠️  AI detection failed: {error_msg}")
+                                    print(f"📝 Publication processed successfully - continue with manual ad marking")
+                                    
+                        except MemoryError as me:
+                            print(f"⚠️  AI detection failed due to memory constraints: {me}")
+                            print(f"📝 Publication processed successfully - continue with manual ad marking")
+                        except ImportError as ie:
+                            print(f"⚠️  AI detection failed due to missing dependencies: {ie}")
+                            print(f"📝 Publication processed successfully - continue with manual ad marking")
+                        except Exception as detection_error:
+                            print(f"⚠️  AI detection failed with error: {detection_error}")
+                            print(f"📝 Publication processed successfully - continue with manual ad marking")
+                        finally:
+                            # Check if we exceeded timeout and cleanup
+                            elapsed = time.time() - start_time
+                            if elapsed > 300:  # 5 minutes
+                                print(f"⚠️  AI detection took {elapsed:.1f}s (timeout threshold: 300s)")
                             
-                except (TimeoutError, Exception) as e:
-                    print(f"⚠️  Auto-detection failed or timed out: {e}")
+                            # Force garbage collection to free memory
+                            try:
+                                import gc
+                                gc.collect()
+                            except:
+                                pass
+                            
+                except Exception as outer_error:
+                    print(f"⚠️  AI detection phase failed completely: {outer_error}")
                     print(f"📝 Publication processed successfully - continue with manual ad marking")
                 
                 # Mark as completed
@@ -4265,6 +4294,42 @@ def get_processing_status(pub_id):
             'error': str(e),
             'redirect_url': None
         })
+
+@app.route('/api/restart_processing/<int:pub_id>', methods=['POST'])
+@login_required  
+def restart_processing(pub_id):
+    """Force restart stuck processing"""
+    try:
+        publication = Publication.query.get_or_404(pub_id)
+        
+        global _processing_publications, _processing_lock
+        
+        # Remove from processing set to allow restart
+        try:
+            if _processing_lock:
+                with _processing_lock:
+                    _processing_publications.discard(pub_id)
+        except:
+            pass
+        
+        # Reset processing status
+        publication.set_processing_status('uploaded')
+        publication.processed = False
+        db.session.commit()
+        
+        print(f"Restarted processing for publication {pub_id}")
+        
+        return jsonify({
+            'success': True,
+            'message': 'Processing restarted successfully'
+        })
+        
+    except Exception as e:
+        print(f"Error restarting processing: {e}")
+        return jsonify({
+            'success': False,
+            'error': str(e)
+        }), 500
 
 @app.route('/process/<int:pub_id>')
 @login_required

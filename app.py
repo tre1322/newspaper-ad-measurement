@@ -4903,11 +4903,10 @@ def delete_box(box_id):
         ad_box = AdBox.query.get_or_404(box_id)
         page_id = ad_box.page_id
         
-        # CRITICAL FIX: Handle training data before deleting ad_box to avoid foreign key constraint
-        existing_training = TrainingData.query.filter_by(ad_box_id=box_id).first()
-        if existing_training:
-            # Store training data as negative example in a separate table or log for future training
-            # For now, we'll store the negative training info in a way that doesn't reference the ad_box
+        # CRITICAL FIX: Delete ALL training data records for this ad_box to avoid foreign key constraint
+        training_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
+        if training_records:
+            # Log negative training information before deleting
             try:
                 page = Page.query.join(AdBox).filter(AdBox.id == box_id).first()
                 if page and page.publication:
@@ -4920,19 +4919,19 @@ def delete_box(box_id):
                         'y': ad_box.y, 
                         'width': ad_box.width,
                         'height': ad_box.height,
-                        'ad_type': ad_box.ad_type
+                        'ad_type': ad_box.ad_type,
+                        'training_records_count': len(training_records)
                     }
                     
-                    # Create temporary negative training record without foreign key constraint
-                    # We'll create a dummy ad_box entry for negative training or modify schema later
                     print(f"Negative training data logged for deleted ad box {box_id}: {negative_features}")
                     
             except Exception as e:
                 print(f"Could not log negative training data: {e}")
             
-            # Delete the training data record first to avoid foreign key constraint
-            db.session.delete(existing_training)
-            print(f"Deleted training data for ad box {box_id}")
+            # Delete ALL training data records first to avoid foreign key constraint
+            for training_record in training_records:
+                db.session.delete(training_record)
+            print(f"Deleted {len(training_records)} training data records for ad box {box_id}")
         
         # Now safely delete the ad_box
         db.session.delete(ad_box)

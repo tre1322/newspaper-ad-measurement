@@ -133,6 +133,18 @@
                         </div>
                     </div>
                     
+                    <!-- Auto-update Error Message -->
+                    <div id="update-error-message" class="alert alert-warning mt-4" style="display: none;">
+                        <i class="fas fa-wifi"></i>
+                        <strong>Auto-update failed</strong> - Connection issue. 
+                        <button id="retry-update" class="btn btn-sm btn-outline-warning ms-2">
+                            <i class="fas fa-redo"></i> Retry
+                        </button>
+                        <button id="restart-processing" class="btn btn-sm btn-outline-info ms-2">
+                            <i class="fas fa-sync"></i> Restart Processing
+                        </button>
+                    </div>
+                    
                     <!-- Information -->
                     <div class="mt-4 text-muted">
                         <small>
@@ -240,12 +252,21 @@ document.addEventListener('DOMContentLoaded', function() {
     
     function checkStatus() {
         fetch(`/api/processing_status/${pubId}`)
-            .then(response => response.json())
+            .then(response => {
+                if (!response.ok) {
+                    throw new Error(`HTTP error! status: ${response.status}`);
+                }
+                return response.json();
+            })
             .then(data => {
+                // Hide auto-update error message if successful
+                document.getElementById('update-error-message').style.display = 'none';
                 updateStatus(data.status, data.error, data.redirect_url);
             })
             .catch(error => {
                 console.error('Error checking status:', error);
+                // Show auto-update failed message
+                document.getElementById('update-error-message').style.display = 'block';
             });
     }
     
@@ -254,6 +275,45 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Check immediately
     checkStatus();
+    
+    // Retry update button handler
+    document.getElementById('retry-update').addEventListener('click', function() {
+        document.getElementById('update-error-message').style.display = 'none';
+        checkStatus();
+    });
+    
+    // Restart processing button handler
+    document.getElementById('restart-processing').addEventListener('click', function() {
+        const button = this;
+        button.disabled = true;
+        button.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Restarting...';
+        
+        fetch(`/api/restart_processing/${pubId}`, {
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+            }
+        })
+        .then(response => response.json())
+        .then(data => {
+            if (data.success) {
+                // Hide error message and restart checking
+                document.getElementById('update-error-message').style.display = 'none';
+                document.getElementById('status-message').textContent = 'Restarting processing...';
+                checkStatus();
+            } else {
+                alert('Failed to restart processing: ' + data.error);
+            }
+        })
+        .catch(error => {
+            console.error('Error restarting processing:', error);
+            alert('Failed to restart processing. Please try refreshing the page.');
+        })
+        .finally(() => {
+            button.disabled = false;
+            button.innerHTML = '<i class="fas fa-sync"></i> Restart Processing';
+        });
+    });
 });
 </script>
 {% endblock %}

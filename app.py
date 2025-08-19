@@ -325,7 +325,7 @@ def start_background_processing(pub_id):
                     start_time = time.time()
                     
                     try:
-                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.2)
+                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.4)
                         
                         if result['success']:
                             print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
@@ -1683,7 +1683,8 @@ class AdLearningEngine:
                 JOIN publication pub ON p.publication_id = pub.id
                 WHERE pub.publication_type = :pub_type
                 AND ab.user_verified = true
-                AND ab.width > 50 AND ab.height > 50  -- Filter out tiny boxes
+                AND ab.width > 80 AND ab.height > 60  -- Filter out tiny boxes
+                AND ab.width < 500 AND ab.height < 400  -- Filter out oversized false positives
                 GROUP BY ab.width, ab.height
                 ORDER BY frequency DESC
                 LIMIT 10
@@ -1701,8 +1702,11 @@ class AdLearningEngine:
             if sizes:
                 return sizes[:5]  # Top 5 most common sizes
             else:
-                # Fallback to reasonable defaults
-                return [(300, 200, 1), (400, 300, 1), (200, 300, 1)]
+                # Fallback to realistic newspaper ad defaults - much smaller sizes
+                if publication_type == 'broadsheet':
+                    return [(250, 180, 1), (320, 240, 1), (180, 250, 1), (150, 200, 1)]
+                else:  # tabloid or other
+                    return [(200, 150, 1), (280, 200, 1), (150, 200, 1), (120, 180, 1)]
                 
         except Exception as e:
             print(f"Error getting typical ad sizes: {e}")
@@ -1950,25 +1954,25 @@ class AdLearningEngine:
             import time
             
             start_time = time.time()
-            print(f"🔍 INTELLIGENT AD DETECTION STARTING")
+            print(f"INTELLIGENT AD DETECTION STARTING")
             
             # Load image
             img = cv2.imread(image_path)
             if img is None:
-                print(f"❌ Failed to load image: {image_path}")
+                print(f"Failed to load image: {image_path}")
                 return []
             
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             height, width = gray.shape
-            print(f"📄 Analyzing {width}x{height} {publication_type} publication")
+            print(f"Analyzing {width}x{height} {publication_type} publication")
             
             # Step 1: Get publication-specific ad zones
             ad_zones = AdLearningEngine.get_typical_ad_zones((width, height), publication_type)
-            print(f"🎯 Identified {len(ad_zones)} potential ad zones for {publication_type}")
+            print(f"Identified {len(ad_zones)} potential ad zones for {publication_type}")
             
             # Step 2: Detect regions with ad-like visual patterns
             ad_candidates = AdLearningEngine.detect_ads_by_visual_patterns(gray)
-            print(f"👁️  Found {len(ad_candidates)} regions with ad-like visual patterns")
+            print(f"Found {len(ad_candidates)} regions with ad-like visual patterns")
             
             # Step 3: Filter candidates by ad zones and classify content
             filtered_candidates = []
@@ -1980,7 +1984,7 @@ class AdLearningEngine:
                                                            candidate['width'], candidate['height']):
                         filtered_candidates.append(candidate)
             
-            print(f"🎯 {len(filtered_candidates)} candidates passed layout and content filters")
+            print(f"{len(filtered_candidates)} candidates passed layout and content filters")
             
             # Step 4: Use ML model to validate remaining candidates
             final_detections = []
@@ -1992,7 +1996,7 @@ class AdLearningEngine:
                 
                 for i, candidate in enumerate(filtered_candidates):
                     if time.time() - start_time > 30:  # 30 second timeout
-                        print(f"⏰ Timeout reached, processed {i}/{len(filtered_candidates)} candidates")
+                        print(f"Timeout reached, processed {i}/{len(filtered_candidates)} candidates")
                         break
                     
                     # Extract ML features for this candidate
@@ -2023,8 +2027,9 @@ class AdLearningEngine:
                     # Combine visual pattern confidence with ML confidence
                     combined_confidence = (candidate['confidence'] * 0.4 + ml_confidence * 0.6)
                     
-                    if combined_confidence >= confidence_threshold:
-                        print(f"✅ CONFIRMED AD: {candidate['width']}x{candidate['height']} at ({candidate['x']},{candidate['y']}) confidence={combined_confidence:.3f}")
+                    # Multi-stage confidence check - must pass ALL criteria
+                    if combined_confidence >= confidence_threshold and candidate['confidence'] > 0.4 and ml_confidence > 0.5:
+                        print(f"CONFIRMED AD: {candidate['width']}x{candidate['height']} at ({candidate['x']},{candidate['y']}) confidence={combined_confidence:.3f}")
                         
                         # Check for overlaps before adding
                         new_box = {
@@ -2041,7 +2046,7 @@ class AdLearningEngine:
                 final_detections = final_detections[:8]  # Max 8 ads per page
                 
                 elapsed = time.time() - start_time
-                print(f"🎉 INTELLIGENT DETECTION COMPLETE: Found {len(final_detections)} quality ads in {elapsed:.1f}s")
+                print(f"INTELLIGENT DETECTION COMPLETE: Found {len(final_detections)} quality ads in {elapsed:.1f}s")
                 return final_detections
                 
             finally:
@@ -2049,7 +2054,7 @@ class AdLearningEngine:
                     os.unlink(temp_img_path)
             
         except Exception as e:
-            print(f"❌ Error in intelligent_ad_detection: {e}")
+            print(f"Error in intelligent_ad_detection: {e}")
             import traceback
             traceback.print_exc()
             return []
@@ -2120,7 +2125,7 @@ class AdLearningEngine:
             height, width = gray_image.shape
             candidates = []
             
-            print(f"🔍 Analyzing visual patterns in {width}x{height} image")
+            print(f"Analyzing visual patterns in {width}x{height} image")
             
             # Step 1: Edge detection to find rectangular boundaries
             edges = cv2.Canny(gray_image, 50, 150, apertureSize=3)
@@ -2128,15 +2133,21 @@ class AdLearningEngine:
             # Step 2: Find contours (potential ad boundaries)
             contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
             
-            print(f"📦 Found {len(contours)} potential boundaries")
+            print(f"Found {len(contours)} potential boundaries")
             
             # Step 3: Filter contours by ad-like characteristics
             for contour in contours:
                 # Get bounding rectangle
                 x, y, w, h = cv2.boundingRect(contour)
                 
-                # Filter by reasonable ad dimensions
-                if w < 80 or h < 60 or w > width * 0.8 or h > height * 0.6:
+                # Filter by reasonable ad dimensions - MUCH more restrictive
+                # Max ad size should be about 1/4 of page width and 1/5 of page height
+                max_ad_width = min(width * 0.25, 400)  # Max 25% of width or 400px
+                max_ad_height = min(height * 0.20, 300)  # Max 20% of height or 300px
+                min_ad_width = 60   # Minimum viable ad width
+                min_ad_height = 40  # Minimum viable ad height
+                
+                if w < min_ad_width or h < min_ad_height or w > max_ad_width or h > max_ad_height:
                     continue
                 
                 # Filter by aspect ratio (ads are typically not too extreme)
@@ -2160,7 +2171,7 @@ class AdLearningEngine:
                         roi = gray_image[y:y+h, x:x+w]
                         confidence = AdLearningEngine._calculate_visual_ad_confidence(roi, x, y, w, h, width, height)
                         
-                        if confidence > 0.3:  # Minimum visual confidence
+                        if confidence > 0.5:  # RAISED minimum visual confidence from 0.3 to 0.5
                             candidates.append({
                                 'x': x, 'y': y, 'width': w, 'height': h,
                                 'confidence': confidence,
@@ -2190,11 +2201,11 @@ class AdLearningEngine:
                     if len(filtered_candidates) >= 20:  # Limit candidates
                         break
             
-            print(f"✨ Selected {len(filtered_candidates)} visual pattern candidates")
+            print(f"Selected {len(filtered_candidates)} visual pattern candidates")
             return filtered_candidates
             
         except Exception as e:
-            print(f"❌ Error in detect_ads_by_visual_patterns: {e}")
+            print(f"Error in detect_ads_by_visual_patterns: {e}")
             return []
     
     @staticmethod
@@ -2290,11 +2301,13 @@ class AdLearningEngine:
             height, width = gray_image.shape
             candidates = []
             
-            # Strategic grid sampling focused on common ad sizes and positions
-            common_sizes = [(300, 200), (250, 350), (400, 300), (200, 400)]
+            # IMPROVED grid sampling with realistic newspaper ad sizes
+            common_sizes = [(180, 120), (220, 160), (160, 200), (140, 180), (280, 200)]
+            # Much smaller, more realistic newspaper ad dimensions
             
             for w, h in common_sizes:
-                if w > width * 0.8 or h > height * 0.8:
+                # STRICT size limits - no huge detection windows
+                if w > width * 0.3 or h > height * 0.25:  # Much more restrictive
                     continue
                 
                 # Strategic positions (not dense grid)
@@ -2625,22 +2638,28 @@ class AdLearningEngine:
             area = width * height
             size_factor = min(area / 10000, 1.0)  # Normalize to [0,1]
             
-            # Scoring logic (higher score = more likely to be an ad)
+            # IMPROVED SCORING: More restrictive to prevent false positives
             ad_score = 0
             
-            # Moderate edge density suggests structured content (ads) vs very high (dense text)
-            if 0.05 <= edge_density <= 0.25:
-                ad_score += 2
-            elif edge_density < 0.05:  # Too little structure
-                ad_score -= 1
-            elif edge_density > 0.4:   # Too much structure (likely dense text)
-                ad_score -= 2
+            # Much stricter edge density - ads have moderate, controlled structure
+            if 0.08 <= edge_density <= 0.20:
+                ad_score += 3  # Good ad-like structure
+            elif 0.05 <= edge_density < 0.08:
+                ad_score += 1  # Minimal structure, possible ad
+            elif edge_density < 0.05:  # Too little structure (likely empty space)
+                ad_score -= 3
+            elif edge_density > 0.35:   # Too much structure (likely dense text/articles)
+                ad_score -= 4  # Heavily penalize dense text regions
             
-            # White space - ads typically have more white space
-            if white_space_ratio > 0.3:
-                ad_score += 2
+            # STRICTER white space requirements - ads need significant white space
+            if white_space_ratio > 0.4:
+                ad_score += 3  # Excellent white space for ads
+            elif white_space_ratio > 0.25:
+                ad_score += 2  # Good white space
             elif white_space_ratio > 0.15:
-                ad_score += 1
+                ad_score += 1  # Minimal white space
+            else:
+                ad_score -= 2  # Too dense, likely text
             
             # Standard deviation - ads often have more varied contrast
             if roi_std > 40:
@@ -2658,12 +2677,63 @@ class AdLearningEngine:
             if 0.3 <= aspect_ratio <= 3.0:  # Reasonable ad proportions
                 ad_score += 1
             
-            # Final decision threshold
-            return ad_score >= 4  # Require at least 4 points to classify as likely ad
+            # Additional text pattern detection - penalize regions with lots of small text
+            # Use template matching to detect common text patterns
+            text_pattern_score = AdLearningEngine._detect_text_patterns(roi)
+            ad_score -= text_pattern_score * 2  # Penalize text-heavy regions
+            
+            # Final decision threshold - MUCH more restrictive
+            threshold = 6  # Raised from 4 to 6 - be much more selective
+            return ad_score >= threshold
             
         except Exception as e:
-            print(f"❌ Error in content classification: {e}")
+            print(f"Error in content classification: {e}")
             return False  # Conservative: if we can't analyze, assume it's not an ad
+    
+    @staticmethod
+    def _detect_text_patterns(roi):
+        """Detect text-like patterns that indicate editorial content rather than ads"""
+        try:
+            import cv2
+            import numpy as np
+            
+            if roi.size == 0:
+                return 0
+            
+            text_score = 0
+            
+            # Detect horizontal text lines using morphological operations
+            # Small horizontal kernels catch text lines
+            kernel_small = cv2.getStructuringElement(cv2.MORPH_RECT, (10, 1))
+            horizontal_text = cv2.morphologyEx(roi, cv2.MORPH_CLOSE, kernel_small)
+            
+            # Count connected components (likely text lines)
+            thresh = cv2.threshold(horizontal_text, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            num_labels, labels = cv2.connectedComponents(thresh)
+            
+            # More than 5 horizontal structures suggests text paragraphs
+            if num_labels > 5:
+                text_score += (num_labels - 5) * 0.5
+            
+            # Look for repeating patterns typical of justified text
+            # Calculate row-wise pixel density - text has regular patterns
+            if roi.shape[0] > 20:  # Only for regions tall enough
+                row_densities = []
+                for row in range(0, roi.shape[0], 3):  # Sample every 3rd row
+                    if row < roi.shape[0]:
+                        density = np.sum(roi[row] < 180) / roi.shape[1]  # Dark pixels per row
+                        row_densities.append(density)
+                
+                if len(row_densities) > 5:
+                    # Text has more regular patterns than ads
+                    density_variance = np.var(row_densities)
+                    if density_variance < 0.01:  # Very regular = likely text
+                        text_score += 2
+            
+            return min(text_score, 3)  # Cap the text penalty
+            
+        except:
+            return 0
     
     @staticmethod
     def _boxes_overlap(box1, box2, threshold=0.5):

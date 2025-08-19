@@ -15,6 +15,9 @@
       "Bash(git push:*)"
     ],
     "deny": [],
-    "defaultMode": "acceptEdits"
+    "defaultMode": "acceptEdits",
+    "additionalDirectories": [
+      "C:\\c\\Users\\trevo"
+    ]
   }
 }

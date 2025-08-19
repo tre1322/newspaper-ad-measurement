@@ -12,7 +12,8 @@
       "Bash(flask db:*)",
       "Bash(alembic:*)",
       "Bash(git commit:*)",
-      "Bash(git push:*)"
+      "Bash(git push:*)",
+      "Bash(git restore:*)"
     ],
     "deny": [],
     "defaultMode": "acceptEdits",

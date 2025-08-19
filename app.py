@@ -4,6 +4,19 @@ import fitz  # PyMuPDF
 import cv2
 import numpy as np
 import math
+
+# Google Vision AI setup - SECURE VERSION
+# Load environment variables first
+from dotenv import load_dotenv
+load_dotenv()
+
+# Set Google credentials from environment variable (more secure)
+google_creds_path = os.getenv('GOOGLE_APPLICATION_CREDENTIALS')
+if google_creds_path and os.path.exists(google_creds_path):
+    os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = google_creds_path
+    
+from google.cloud import vision
+import io as vision_io
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, send_file, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
@@ -784,6 +797,41 @@ class CalibratedMeasurementCalculator:
         
         return None
 
+# Google Vision AI Helper Functions
+def handle_vision_api_error(error, context="Vision API operation"):
+    """Centralized error handling for Google Vision API calls"""
+    error_msg = str(error).lower()
+    
+    if "quota" in error_msg or "limit" in error_msg:
+        print(f"Vision API quota exceeded in {context}: {error}")
+        return "quota_exceeded"
+    elif "permission" in error_msg or "unauthorized" in error_msg:
+        print(f"Vision API permission denied in {context}: {error}")
+        return "permission_denied"
+    elif "not found" in error_msg or "invalid" in error_msg:
+        print(f"Vision API invalid request in {context}: {error}")
+        return "invalid_request"
+    elif "network" in error_msg or "connection" in error_msg:
+        print(f"Vision API network error in {context}: {error}")
+        return "network_error"
+    else:
+        print(f"Vision API unknown error in {context}: {error}")
+        return "unknown_error"
+
+def is_vision_api_available():
+    """Quick check if Google Vision API is available and configured"""
+    try:
+        # Check if credentials file exists
+        if not os.path.exists('google-vision-credentials.json'):
+            return False
+            
+        # Try to initialize client (lightweight operation)
+        client = vision.ImageAnnotatorClient()
+        return True
+    except Exception as e:
+        print(f"Vision API not available: {e}")
+        return False
+
 # Intelligent Ad Detector for Broadsheet
 class IntelligentAdDetector:
     @staticmethod
@@ -972,6 +1020,946 @@ class IntelligentAdDetector:
         
         # Round up to next 0.5" increment
         return math.ceil(height_inches * 2) / 2
+
+# Google Vision AI Ad Detector
+class GoogleVisionAdDetector:
+    """
+    Google Vision AI powered ad detection system
+    Uses logo detection, text analysis, and object recognition to identify ads
+    """
+    
+    @staticmethod
+    def detect_ads(image_path, publication_type='broadsheet'):
+        """
+        Main function to detect ads using Google Vision AI
+        Returns list of detected ads with coordinates and confidence scores
+        """
+        try:
+            print(f"Starting Google Vision AI detection on {image_path}")
+            
+            # Initialize the client
+            client = vision.ImageAnnotatorClient()
+            
+            # Load the image
+            with vision_io.open(image_path, 'rb') as image_file:
+                content = image_file.read()
+            
+            image = vision.Image(content=content)
+            
+            # Get image dimensions for coordinate calculations
+            with Image.open(image_path) as pil_image:
+                img_width, img_height = pil_image.size
+            
+            print(f"Image dimensions: {img_width}x{img_height}")
+            
+            # HYBRID APPROACH: Visual boundaries + specialized text detection
+            boundary_ads = GoogleVisionAdDetector._detect_visual_boundary_ads(client, image, img_width, img_height, image_path)
+            logo_ads = GoogleVisionAdDetector._detect_logo_ads(client, image, img_width, img_height)
+            # SPECIALIZED text detection for newspaper ad types
+            specialized_text_ads = GoogleVisionAdDetector._detect_newspaper_text_ads(client, image, img_width, img_height)
+            object_ads = GoogleVisionAdDetector._detect_commercial_object_ads(client, image, img_width, img_height)
+            
+            # Combine all detections
+            all_detections = boundary_ads + logo_ads + specialized_text_ads + object_ads
+            print(f"Raw detections: {len(all_detections)} (boundary: {len(boundary_ads)}, logos: {len(logo_ads)}, text: {len(specialized_text_ads)}, objects: {len(object_ads)})")
+            
+            # Filter and merge overlapping detections
+            filtered_ads = GoogleVisionAdDetector._filter_and_merge_detections(all_detections, publication_type, img_width, img_height)
+            
+            print(f"Google Vision AI found {len(filtered_ads)} potential ads")
+            return filtered_ads
+            
+        except Exception as e:
+            error_type = handle_vision_api_error(e, "ad detection")
+            if error_type == "quota_exceeded":
+                print("⚠️ Google Vision API quota exceeded - falling back to traditional detection")
+            elif error_type == "permission_denied":
+                print("⚠️ Google Vision API permission denied - check credentials")
+            else:
+                print(f"⚠️ Google Vision AI detection failed: {e}")
+            return []
+    
+    @staticmethod
+    def _detect_logo_ads(client, image, img_width, img_height):
+        """Detect ads containing brand logos"""
+        try:
+            response = client.logo_detection(image=image)
+            logos = response.logo_annotations
+            
+            ads = []
+            for logo in logos:
+                if logo.score > 0.5:  # High confidence logos only
+                    # Get bounding box
+                    vertices = logo.bounding_poly.vertices
+                    x_coords = [v.x for v in vertices]
+                    y_coords = [v.y for v in vertices]
+                    
+                    x = min(x_coords)
+                    y = min(y_coords) 
+                    width = max(x_coords) - x
+                    height = max(y_coords) - y
+                    
+                    # Expand around logo to capture full ad
+                    expanded_ad = GoogleVisionAdDetector._expand_logo_to_full_ad(
+                        client, image, x, y, width, height, img_width, img_height
+                    )
+                    
+                    if expanded_ad:
+                        ads.append({
+                            'x': expanded_ad['x'],
+                            'y': expanded_ad['y'],
+                            'width': expanded_ad['width'],
+                            'height': expanded_ad['height'],
+                            'confidence': logo.score,
+                            'ad_type': 'logo_ad',
+                            'content': f"Logo: {logo.description}",
+                            'detection_method': 'vision_logo'
+                        })
+            
+            return ads
+        except Exception as e:
+            print(f"Logo detection failed: {e}")
+            return []
+    
+    @staticmethod
+    def _detect_commercial_text_ads(client, image, img_width, img_height):
+        """DISABLED - Old commercial text detection (replaced with specialized newspaper detection)"""
+        try:
+            response = client.text_detection(image=image)
+            texts = response.text_annotations
+            
+            if not texts:
+                return []
+            
+            ads = []
+            
+            # Look for commercial keywords
+            commercial_keywords = [
+                'SALE', 'FREE', 'CALL NOW', 'CALL', '$', '%', 'PERCENT', 'OFF',
+                'SPECIAL', 'LIMITED TIME', 'ACT NOW', 'HURRY', 'SAVE',
+                'DISCOUNT', 'DEAL', 'OFFER', 'FINANCING', 'CREDIT',
+                'VISIT', 'HOURS', 'OPEN', 'CLOSED', 'SUNDAY',
+                'PHONE:', 'TEL:', 'CALL:', 'CONTACT:', 'EMAIL:',
+                'WWW.', '.COM', '.NET', 'HTTP'
+            ]
+            
+            # Phone number pattern
+            import re
+            phone_pattern = r'(\(?\d{3}\)?[-.\s]?\d{3}[-.\s]?\d{4})|(\d{3}[-.\s]\d{4})'
+            price_pattern = r'\$[\d,]+\.?\d*'
+            
+            for text in texts[1:]:  # Skip first full page text
+                text_content = text.description.upper()
+                
+                # Check for commercial indicators
+                commercial_score = 0
+                found_keywords = []
+                
+                for keyword in commercial_keywords:
+                    if keyword in text_content:
+                        commercial_score += 1
+                        found_keywords.append(keyword)
+                
+                # Check for phone numbers
+                if re.search(phone_pattern, text.description):
+                    commercial_score += 2
+                    found_keywords.append('PHONE_NUMBER')
+                
+                # Check for prices
+                if re.search(price_pattern, text.description):
+                    commercial_score += 1
+                    found_keywords.append('PRICE')
+                
+                if commercial_score >= 2:  # Need at least 2 commercial indicators
+                    # Get bounding box
+                    vertices = text.bounding_poly.vertices
+                    x_coords = [v.x for v in vertices]
+                    y_coords = [v.y for v in vertices]
+                    
+                    x = min(x_coords)
+                    y = min(y_coords)
+                    width = max(x_coords) - x
+                    height = max(y_coords) - y
+                    
+                    # Expand text region to capture full ad
+                    expanded_ad = GoogleVisionAdDetector._expand_text_to_full_ad(
+                        x, y, width, height, img_width, img_height
+                    )
+                    
+                    confidence = min(commercial_score / 5.0, 0.95)
+                    
+                    ads.append({
+                        'x': expanded_ad['x'],
+                        'y': expanded_ad['y'],
+                        'width': expanded_ad['width'],
+                        'height': expanded_ad['height'],
+                        'confidence': confidence,
+                        'ad_type': 'text_commercial',
+                        'content': f"Commercial text: {', '.join(found_keywords)}",
+                        'detection_method': 'vision_text'
+                    })
+            
+            return ads
+        except Exception as e:
+            print(f"Text detection failed: {e}")
+            return []
+    
+    @staticmethod
+    def _detect_newspaper_text_ads(client, image, img_width, img_height):
+        """Detect specific newspaper ad types: Public Notices, Legal Notices, Classifieds, Subscription boxes"""
+        try:
+            response = client.text_detection(image=image)
+            texts = response.text_annotations
+            
+            if not texts:
+                return []
+            
+            ads = []
+            
+            # Get full page text for context
+            full_text = texts[0].description if texts else ""
+            
+            # Define newspaper-specific ad patterns
+            newspaper_ad_patterns = {
+                'public_notice': {
+                    'keywords': ['PUBLIC NOTICE', 'NOTICE', 'LEGAL NOTICE', 'NOTICE TO CREDITORS', 'NOTICE OF HEARING'],
+                    'ad_type': 'public_notice',
+                    'confidence_boost': 0.3
+                },
+                'legal_proceedings': {
+                    'keywords': ['OFFICIAL PROCEEDINGS OF', 'PROCEEDINGS OF THE', 'BOARD MEETING', 'CITY COUNCIL', 'TOWNSHIP BOARD'],
+                    'ad_type': 'legal_notice', 
+                    'confidence_boost': 0.3
+                },
+                'subscription_info': {
+                    'keywords': ['subscription rates', 'published every', 'entered at the post office', 'periodical postage', 'address changes'],
+                    'ad_type': 'subscription_notice',
+                    'confidence_boost': 0.4
+                },
+                'classified_headers': {
+                    'keywords': ['CLASSIFIEDS', 'AUCTIONS', 'FOR SALE', 'PICKUPS', 'MOTORCYCLES', 'FARM EQUIPMENT', 'GARAGE SALE'],
+                    'ad_type': 'classified_header',
+                    'confidence_boost': 0.2
+                },
+                'church_ads': {
+                    'keywords': ['CHURCH', 'PASTOR', 'GOSPEL', 'WORSHIP', 'SUNDAY', 'SERVICE', 'BIBLE', 'CHRISTIAN', 'MENNONITE', 'LUTHERAN', 'METHODIST'],
+                    'ad_type': 'church_ad',
+                    'confidence_boost': 0.3
+                },
+                'business_directory': {
+                    'keywords': ['BUSINESS DIRECTORY', 'SERVICE DIRECTORY', 'CLINIC', 'PHARMACY', 'DENTIST', 'EYE CARE', 'CONSTRUCTION', 'REPAIR'],
+                    'ad_type': 'business_directory',
+                    'confidence_boost': 0.3
+                }
+            }
+            
+            # Look for these specific text patterns
+            for text in texts[1:]:  # Skip full page text
+                text_content = text.description.upper()
+                text_lines = text_content.split('\\n')
+                
+                for pattern_type, pattern_info in newspaper_ad_patterns.items():
+                    ad_score = 0
+                    found_keywords = []
+                    
+                    # Check for pattern-specific keywords
+                    for keyword in pattern_info['keywords']:
+                        if keyword in text_content:
+                            ad_score += 2
+                            found_keywords.append(keyword)
+                    
+                    # Special handling for different ad types
+                    if pattern_type == 'subscription_info':
+                        # Look for specific subscription info phrases
+                        subscription_phrases = ['$60 per year', '$82 per year', 'P.O. Box', 'transferable but non-refundable']
+                        for phrase in subscription_phrases:
+                            if phrase.lower() in text.description.lower():
+                                ad_score += 1
+                                found_keywords.append('SUBSCRIPTION_INFO')
+                    
+                    elif pattern_type == 'classified_headers':
+                        # For classified headers, look for category patterns
+                        if len(text.description.split()) <= 3 and any(keyword in text_content for keyword in pattern_info['keywords']):
+                            ad_score += 3  # Boost for short header text
+                    
+                    elif pattern_type == 'public_notice':
+                        # Look for legal formatting patterns
+                        if any(phrase in text_content for phrase in ['STATE OF', 'COUNTY OF', 'WHEREAS', 'THEREFORE']):
+                            ad_score += 1
+                    
+                    # ULTRA-RESTRICTIVE: Require overwhelming evidence
+                    if ad_score >= 6:  # Raised from 3 to 6 - need very strong evidence
+                        # Get bounding box
+                        vertices = text.bounding_poly.vertices
+                        x_coords = [v.x for v in vertices]
+                        y_coords = [v.y for v in vertices]
+                        
+                        x = min(x_coords)
+                        y = min(y_coords)
+                        width = max(x_coords) - x
+                        height = max(y_coords) - y
+                        
+                        # Apply size constraints for text ads
+                        if width < 60 or height < 30:  # Too small
+                            continue
+                        if width > img_width * 0.8 or height > img_height * 0.6:  # Too large
+                            continue
+                        
+                        # Expand text region appropriately based on type
+                        if pattern_type == 'classified_headers':
+                            # For classified headers, expand down to include ads below
+                            expanded_ad = GoogleVisionAdDetector._expand_classified_header(
+                                x, y, width, height, img_width, img_height
+                            )
+                        else:
+                            # For other text ads, modest expansion
+                            expanded_ad = GoogleVisionAdDetector._expand_text_ad(
+                                x, y, width, height, img_width, img_height
+                            )
+                        
+                        confidence = min(0.4 + pattern_info['confidence_boost'] + (ad_score / 10.0), 0.95)
+                        
+                        ads.append({
+                            'x': expanded_ad['x'],
+                            'y': expanded_ad['y'],
+                            'width': expanded_ad['width'],
+                            'height': expanded_ad['height'],
+                            'confidence': confidence,
+                            'ad_type': pattern_info['ad_type'],
+                            'content': f'Newspaper ad: {", ".join(found_keywords[:3])}',
+                            'detection_method': 'vision_newspaper_text'
+                        })
+                        
+                        # Limit to prevent over-detection
+                        if len(ads) >= 10:
+                            break
+            
+            print(f'Found {len(ads)} specialized newspaper text ads')
+            return ads
+            
+        except Exception as e:
+            print(f'Specialized newspaper text detection failed: {e}')
+            return []
+    
+    @staticmethod
+    def _detect_visual_boundary_ads(client, image, img_width, img_height, image_path):
+        """Detect ads by finding rectangular regions with borders/visual boundaries"""
+        try:
+            import cv2
+            import numpy as np
+            
+            # Load image for edge detection
+            cv_image = cv2.imread(image_path)
+            if cv_image is None:
+                return []
+            
+            gray = cv2.cvtColor(cv_image, cv2.COLOR_BGR2GRAY)
+            
+            # Use Vision API to get text regions for context
+            response = client.text_detection(image=image)
+            texts = response.text_annotations
+            
+            ads = []
+            
+            # ENHANCED: Multiple edge detection approaches for better boundary finding
+            
+            # Method 1: Standard edge detection
+            edges1 = cv2.Canny(gray, 30, 100, apertureSize=3)  # More sensitive
+            
+            # Method 2: Stronger edge detection for clear boundaries  
+            edges2 = cv2.Canny(gray, 80, 200, apertureSize=5)  # Less sensitive but clearer
+            
+            # Method 3: Morphological operations to enhance rectangular structures
+            kernel_rect = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+            morph_edges = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel_rect)
+            _, morph_thresh = cv2.threshold(morph_edges, 50, 255, cv2.THRESH_BINARY)
+            
+            # Combine all edge detection methods
+            combined_edges = cv2.bitwise_or(edges1, edges2)
+            combined_edges = cv2.bitwise_or(combined_edges, morph_thresh)
+            
+            # Find contours from combined edge detection
+            contours, _ = cv2.findContours(combined_edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+            
+            print(f"Found {len(contours)} potential boundary contours")
+            
+            for contour in contours:
+                # Get bounding rectangle
+                x, y, w, h = cv2.boundingRect(contour)
+                
+                # IMPROVED: More flexible size filtering for various ad types
+                
+                # Minimum sizes - accept smaller ads too
+                min_width = 80   # Reduced from 100
+                min_height = 60  # Reduced minimum
+                
+                # Maximum sizes - more permissive
+                max_width = img_width * 0.7   # Increased from 0.6
+                max_height = img_height * 0.5  # Increased from 0.4
+                
+                if (w < min_width or h < min_height or 
+                    w > max_width or h > max_height):
+                    continue
+                
+                # More flexible aspect ratio - newspapers have various ad shapes
+                aspect_ratio = w / h if h > 0 else 0
+                if aspect_ratio < 0.2 or aspect_ratio > 10:  # More permissive
+                    continue
+                
+                # Skip very small areas that are likely noise
+                area = w * h
+                if area < 5000:  # Must have reasonable area
+                    continue
+                
+                # Check if this region contains text (good indicator of an ad)
+                has_text = False
+                text_density = 0
+                
+                if texts:
+                    for text in texts[1:]:  # Skip full page text
+                        if hasattr(text, 'bounding_poly') and text.bounding_poly.vertices:
+                            text_vertices = text.bounding_poly.vertices
+                            text_x = min(v.x for v in text_vertices)
+                            text_y = min(v.y for v in text_vertices)
+                            text_w = max(v.x for v in text_vertices) - text_x
+                            text_h = max(v.y for v in text_vertices) - text_y
+                            
+                            # Check if text overlaps with this boundary
+                            if (text_x < x + w and text_x + text_w > x and 
+                                text_y < y + h and text_y + text_h > y):
+                                has_text = True
+                                text_density += len(text.description)
+                                break
+                
+                # Only consider regions with some text content
+                if not has_text:
+                    continue
+                
+                # CRITICAL: Filter out news stories and editorial content
+                if GoogleVisionAdDetector._is_likely_news_story(gray[y:y+h, x:x+w], texts, x, y, w, h):
+                    continue
+                
+                # ENHANCED: Better confidence calculation with photo detection
+                
+                # Check perimeter vs area ratio (ads often have clear boundaries)
+                perimeter = cv2.arcLength(contour, True)
+                contour_area = cv2.contourArea(contour)
+                
+                if contour_area == 0:
+                    continue
+                
+                boundary_strength = (perimeter * perimeter) / contour_area
+                
+                # Additional scoring for photo/image regions
+                roi_region = gray[y:y+h, x:x+w]
+                
+                # Check if this looks like a photo region (varied intensity)
+                photo_score = 0
+                if roi_region.size > 0:
+                    # Calculate intensity variance (photos have more variation)
+                    intensity_var = np.var(roi_region)
+                    if intensity_var > 500:  # High variance suggests photos/graphics
+                        photo_score += 0.2
+                    
+                    # Check for rectangular borders (common in ads)
+                    border_pixels = np.concatenate([
+                        roi_region[0, :],      # top row
+                        roi_region[-1, :],     # bottom row  
+                        roi_region[:, 0],      # left column
+                        roi_region[:, -1]      # right column
+                    ])
+                    border_consistency = 1.0 - (np.std(border_pixels) / 255.0)
+                    if border_consistency > 0.7:  # Consistent borders
+                        photo_score += 0.2
+                
+                # MUCH MORE CONSERVATIVE CONFIDENCE: Lower base confidence, higher requirements
+                base_confidence = min(0.1 + (boundary_strength / 200), 0.5)  # Much lower base
+                
+                # Require both photo characteristics AND good boundaries for high confidence
+                confidence = base_confidence + photo_score
+                
+                # BALANCED: Accept moderate-confidence detections for legitimate ads
+                if confidence < 0.3:  # Lowered from 0.4 to 0.3 for balance
+                    continue
+                
+                ads.append({
+                    'x': x,
+                    'y': y,
+                    'width': w,
+                    'height': h,
+                    'confidence': confidence,
+                    'ad_type': 'boundary_detected',
+                    'content': f'Visual boundary detection (strength: {boundary_strength:.1f})',
+                    'detection_method': 'vision_boundary'
+                })
+                
+                # Allow more ads to be detected
+                if len(ads) >= 15:  # Increased from 8 to 15
+                    break
+            
+            print(f'Found {len(ads)} potential boundary-based ads')
+            return ads
+            
+        except Exception as e:
+            print(f'Visual boundary detection failed: {e}')
+            return []
+    
+    @staticmethod
+    def _detect_commercial_object_ads(client, image, img_width, img_height):
+        """Detect ads based on commercial objects (vehicles, food, etc.)"""
+        try:
+            response = client.object_localization(image=image)
+            objects = response.localized_object_annotations
+            
+            # Commercial object categories
+            commercial_objects = {
+                'Vehicle': 'commercial_vehicle',
+                'Car': 'commercial_vehicle', 
+                'Truck': 'commercial_vehicle',
+                'Motorcycle': 'commercial_vehicle',
+                'Food': 'commercial_food',
+                'Furniture': 'commercial_furniture',
+                'Building': 'commercial_building',
+                'House': 'commercial_building'
+            }
+            
+            ads = []
+            for obj in objects:
+                if obj.name in commercial_objects and obj.score > 0.6:
+                    # Convert normalized coordinates to pixels
+                    vertices = obj.bounding_poly.normalized_vertices
+                    x = int(vertices[0].x * img_width)
+                    y = int(vertices[0].y * img_height)
+                    x2 = int(vertices[2].x * img_width)
+                    y2 = int(vertices[2].y * img_height)
+                    
+                    width = x2 - x
+                    height = y2 - y
+                    
+                    # Expand around object to capture full ad
+                    expanded_ad = GoogleVisionAdDetector._expand_object_to_full_ad(
+                        x, y, width, height, img_width, img_height
+                    )
+                    
+                    ads.append({
+                        'x': expanded_ad['x'],
+                        'y': expanded_ad['y'],
+                        'width': expanded_ad['width'],
+                        'height': expanded_ad['height'],
+                        'confidence': obj.score,
+                        'ad_type': commercial_objects[obj.name],
+                        'content': f"Commercial object: {obj.name}",
+                        'detection_method': 'vision_object'
+                    })
+            
+            return ads
+        except Exception as e:
+            print(f"Object detection failed: {e}")
+            return []
+    
+    @staticmethod
+    def _expand_logo_to_full_ad(client, image, logo_x, logo_y, logo_width, logo_height, img_width, img_height):
+        """Expand logo detection to capture the full advertisement around it"""
+        # Expand by 150% around the logo in each direction
+        expansion_factor = 1.5
+        
+        expanded_width = int(logo_width * expansion_factor)
+        expanded_height = int(logo_height * expansion_factor)
+        
+        # Center the expansion around the logo
+        expanded_x = max(0, logo_x - (expanded_width - logo_width) // 2)
+        expanded_y = max(0, logo_y - (expanded_height - logo_height) // 2)
+        
+        # Ensure we don't exceed image boundaries
+        expanded_width = min(expanded_width, img_width - expanded_x)
+        expanded_height = min(expanded_height, img_height - expanded_y)
+        
+        # Apply size constraints for newspaper ads
+        max_width = int(img_width * 0.4)  # Max 40% of page width
+        max_height = int(img_height * 0.3)  # Max 30% of page height
+        min_width = 120
+        min_height = 80
+        
+        if (min_width <= expanded_width <= max_width and 
+            min_height <= expanded_height <= max_height):
+            return {
+                'x': expanded_x,
+                'y': expanded_y,
+                'width': expanded_width,
+                'height': expanded_height
+            }
+        
+        return None
+    
+    @staticmethod
+    def _expand_text_to_display_ad(text_x, text_y, text_width, text_height, img_width, img_height):
+        """Expand text region to capture display ad with conservative expansion"""
+        # Very conservative expansion for display ads
+        expansion_factor = 1.3  # Only 30% expansion
+        
+        expanded_width = int(text_width * expansion_factor)
+        expanded_height = int(text_height * expansion_factor)
+        
+        # Center the expansion around the text
+        expanded_x = max(0, text_x - (expanded_width - text_width) // 2)
+        expanded_y = max(0, text_y - (expanded_height - text_height) // 2)
+        
+        # Ensure we don't exceed image boundaries
+        expanded_width = min(expanded_width, img_width - expanded_x)
+        expanded_height = min(expanded_height, img_height - expanded_y)
+        
+        # Apply conservative size constraints
+        max_width = int(img_width * 0.3)  # Max 30% of page width
+        max_height = int(img_height * 0.2) # Max 20% of page height
+        min_width = 100
+        min_height = 60
+        
+        # Constrain to reasonable ad sizes
+        expanded_width = max(min_width, min(expanded_width, max_width))
+        expanded_height = max(min_height, min(expanded_height, max_height))
+        
+        return {
+            'x': expanded_x,
+            'y': expanded_y,
+            'width': expanded_width,
+            'height': expanded_height
+        }
+    
+    @staticmethod
+    def _expand_classified_header(header_x, header_y, header_width, header_height, img_width, img_height):
+        """Expand classified header to include ads below it"""
+        # For classified headers, expand significantly downward to capture ads
+        expanded_width = max(header_width * 1.5, 200)  # Make wider to capture full ads
+        expanded_height = max(header_height * 4, 150)   # Expand down to capture classified ads
+        
+        # Keep header at top of expanded region
+        expanded_x = max(0, header_x - (expanded_width - header_width) // 4)  # Small left expansion
+        expanded_y = header_y  # Keep original y position
+        
+        # Ensure boundaries
+        expanded_width = min(expanded_width, img_width - expanded_x)
+        expanded_height = min(expanded_height, img_height - expanded_y)
+        
+        # Apply maximum limits
+        expanded_width = min(expanded_width, int(img_width * 0.4))
+        expanded_height = min(expanded_height, int(img_height * 0.3))
+        
+        return {
+            'x': expanded_x,
+            'y': expanded_y,
+            'width': expanded_width,
+            'height': expanded_height
+        }
+    
+    @staticmethod
+    def _expand_text_ad(text_x, text_y, text_width, text_height, img_width, img_height):
+        """Expand text ad (public notices, legal notices, etc.) with modest growth"""
+        # Conservative expansion for text-based ads
+        expansion_factor = 1.2  # Only 20% expansion
+        
+        expanded_width = int(text_width * expansion_factor)
+        expanded_height = int(text_height * expansion_factor)
+        
+        # Center expansion
+        expanded_x = max(0, text_x - (expanded_width - text_width) // 2)
+        expanded_y = max(0, text_y - (expanded_height - text_height) // 2)
+        
+        # Ensure boundaries
+        expanded_width = min(expanded_width, img_width - expanded_x)
+        expanded_height = min(expanded_height, img_height - expanded_y)
+        
+        # Apply limits for text ads
+        expanded_width = min(expanded_width, int(img_width * 0.6))
+        expanded_height = min(expanded_height, int(img_height * 0.4))
+        
+        return {
+            'x': expanded_x,
+            'y': expanded_y,
+            'width': expanded_width,
+            'height': expanded_height
+        }
+    
+    @staticmethod
+    def _expand_text_to_full_ad(text_x, text_y, text_width, text_height, img_width, img_height):
+        """Expand commercial text region to capture the full advertisement"""
+        # Expand text region by 200% to capture surrounding ad content
+        expansion_factor = 2.0
+        
+        expanded_width = int(text_width * expansion_factor)
+        expanded_height = int(text_height * expansion_factor)
+        
+        # Center the expansion around the text
+        expanded_x = max(0, text_x - (expanded_width - text_width) // 2)
+        expanded_y = max(0, text_y - (expanded_height - text_height) // 2)
+        
+        # Ensure we don't exceed image boundaries
+        expanded_width = min(expanded_width, img_width - expanded_x)
+        expanded_height = min(expanded_height, img_height - expanded_y)
+        
+        # Apply realistic newspaper ad size constraints
+        max_width = int(img_width * 0.4)
+        max_height = int(img_height * 0.25)
+        min_width = 100
+        min_height = 60
+        
+        # Constrain to reasonable ad sizes
+        expanded_width = max(min_width, min(expanded_width, max_width))
+        expanded_height = max(min_height, min(expanded_height, max_height))
+        
+        return {
+            'x': expanded_x,
+            'y': expanded_y,
+            'width': expanded_width,
+            'height': expanded_height
+        }
+    
+    @staticmethod
+    def _expand_object_to_full_ad(obj_x, obj_y, obj_width, obj_height, img_width, img_height):
+        """Expand commercial object detection to capture the full advertisement"""
+        # Expand by 120% around the object
+        expansion_factor = 1.2
+        
+        expanded_width = int(obj_width * expansion_factor)
+        expanded_height = int(obj_height * expansion_factor)
+        
+        # Center the expansion around the object
+        expanded_x = max(0, obj_x - (expanded_width - obj_width) // 2)
+        expanded_y = max(0, obj_y - (expanded_height - obj_height) // 2)
+        
+        # Ensure we don't exceed image boundaries
+        expanded_width = min(expanded_width, img_width - expanded_x)
+        expanded_height = min(expanded_height, img_height - expanded_y)
+        
+        # Apply size constraints
+        max_width = int(img_width * 0.4)
+        max_height = int(img_height * 0.3)
+        min_width = 120
+        min_height = 80
+        
+        expanded_width = max(min_width, min(expanded_width, max_width))
+        expanded_height = max(min_height, min(expanded_height, max_height))
+        
+        return {
+            'x': expanded_x,
+            'y': expanded_y,
+            'width': expanded_width,
+            'height': expanded_height
+        }
+    
+    @staticmethod
+    def _filter_and_merge_detections(detections, publication_type, img_width, img_height):
+        """Filter and merge overlapping detections, apply layout awareness"""
+        if not detections:
+            return []
+        
+        # Sort by confidence (highest first)
+        detections.sort(key=lambda x: x['confidence'], reverse=True)
+        
+        # Filter by newspaper layout zones (avoid masthead, focus on ad zones)
+        filtered = []
+        for detection in detections:
+            if GoogleVisionAdDetector._is_in_valid_ad_zone(detection, publication_type, img_width, img_height):
+                filtered.append(detection)
+        
+        # Remove overlapping detections (keep higher confidence ones)
+        merged = []
+        for detection in filtered:
+            overlaps = False
+            for existing in merged:
+                if GoogleVisionAdDetector._boxes_overlap(detection, existing, threshold=0.3):
+                    overlaps = True
+                    break
+            
+            if not overlaps:
+                merged.append(detection)
+        
+        # BALANCED: Allow more legitimate ads while still avoiding false positives
+        max_ads = 6 if publication_type == 'broadsheet' else 4  # Increased from 2 to 6
+        
+        # Smart confidence filtering - prioritize highest confidence but allow legitimate ads
+        if merged:
+            merged.sort(key=lambda x: x['confidence'], reverse=True)
+            # Keep ads with moderate confidence, not ultra-high only
+            decent_confidence_ads = [ad for ad in merged if ad['confidence'] > 0.4]  # Lowered from 0.6 to 0.4
+            if decent_confidence_ads:
+                merged = decent_confidence_ads
+        
+        print(f'Final ultra-conservative filtering: {len(merged[:max_ads])} ads (from {len(merged)} candidates)')
+        return merged[:max_ads]
+    
+    @staticmethod
+    def _is_in_valid_ad_zone(detection, publication_type, img_width, img_height):
+        """Check if detection is in a valid newspaper ad zone"""
+        x, y, width, height = detection['x'], detection['y'], detection['width'], detection['height']
+        
+        # Avoid masthead area (top 5% of page only for testing)
+        if y < img_height * 0.05:  # Much more permissive
+            return False
+        
+        # Avoid very bottom (footer area - bottom 5%)
+        if y + height > img_height * 0.95:
+            return False
+        
+        # TEMPORARILY very permissive - accept most areas for testing
+        if publication_type == 'broadsheet':
+            # Accept most of the page except very top masthead and very bottom
+            return True  # For now, accept all areas that pass basic size/position filters
+        
+        # For other publication types, allow most areas except masthead/footer
+        return True
+    
+    @staticmethod
+    def _boxes_overlap(box1, box2, threshold=0.3):
+        """Check if two bounding boxes overlap beyond threshold"""
+        x1, y1, w1, h1 = box1['x'], box1['y'], box1['width'], box1['height']
+        x2, y2, w2, h2 = box2['x'], box2['y'], box2['width'], box2['height']
+        
+        # Calculate intersection
+        x_overlap = max(0, min(x1 + w1, x2 + w2) - max(x1, x2))
+        y_overlap = max(0, min(y1 + h1, y2 + h2) - max(y1, y2))
+        
+        if x_overlap == 0 or y_overlap == 0:
+            return False
+        
+        intersection = x_overlap * y_overlap
+        box1_area = w1 * h1
+        box2_area = w2 * h2
+        
+        # Check if overlap exceeds threshold for either box
+        overlap_ratio1 = intersection / box1_area if box1_area > 0 else 0
+        overlap_ratio2 = intersection / box2_area if box2_area > 0 else 0
+        
+        return max(overlap_ratio1, overlap_ratio2) > threshold
+    
+    @staticmethod
+    def _is_likely_news_story(roi_region, texts, x, y, w, h):
+        """Detect if a region is likely a news story rather than an ad"""
+        try:
+            # Check text content in this region for news story characteristics
+            region_text = ""
+            for text in texts[1:]:  # Skip full page text
+                if hasattr(text, 'bounding_poly') and text.bounding_poly.vertices:
+                    text_vertices = text.bounding_poly.vertices
+                    text_x = min(v.x for v in text_vertices)
+                    text_y = min(v.y for v in text_vertices)
+                    text_w = max(v.x for v in text_vertices) - text_x
+                    text_h = max(v.y for v in text_vertices) - text_y
+                    
+                    # Check if text overlaps with this region
+                    if (text_x < x + w and text_x + text_w > x and 
+                        text_y < y + h and text_y + text_h > y):
+                        region_text += text.description + " "
+            
+            region_text = region_text.upper()
+            
+            # NEWS STORY INDICATORS (these should NOT be ads)
+            news_indicators = [
+                # News article patterns
+                'REPORTED BY', 'STAFF WRITER', 'BY:', 'ASSOCIATED PRESS', 'AP',
+                'ACCORDING TO', 'OFFICIALS SAID', 'POLICE SAID', 'SAID THE',
+                'REPORTED THAT', 'INVESTIGATION', 'AUTHORITIES', 'DEPARTMENT',
+                # Story structure words  
+                'STORY CONTINUES', 'CONTINUED FROM', 'SEE STORY', 'PAGE A',
+                # News content
+                'CROWNED', 'KING AND QUEEN', 'WINNERS', 'CHAMPIONS', 'AWARDS',
+                'CAPTURES', 'CROWNS', 'TOURNAMENT', 'COMPETITION', 'CONTEST',
+                # Sports/events coverage
+                'SCHEDULE', 'SCORES', 'SEASON', 'GAME', 'MATCH', 'TEAM',
+                # General journalism words
+                'STUDENTS', 'SCHOOL', 'EDUCATION', 'COMMUNITY', 'LOCAL'
+            ]
+            
+            # Count news indicators
+            news_score = 0
+            for indicator in news_indicators:
+                if indicator in region_text:
+                    news_score += 1
+            
+            # BUSINESS/AD INDICATORS (these ARE likely ads) - ENHANCED
+            ad_indicators = [
+                # Traditional business indicators
+                'CALL NOW', 'VISIT US', 'CONTACT', 'HOURS:', 'OPEN',
+                'SPECIAL OFFER', 'SALE', 'DISCOUNT', 'FINANCING',
+                'SERVICES', 'REPAIR', 'INSTALLATION', 'FREE ESTIMATE',
+                # Phone number patterns (strong ad indicators)
+                '507-', 'PHONE:', 'TEL:', 'CALL:',
+                # Church and service business indicators
+                'CHURCH', 'PASTOR', 'WORSHIP', 'SUNDAY SERVICE',
+                'CLINIC', 'PHARMACY', 'DENTIST', 'DOCTOR', 'CARE',
+                # Business directory indicators
+                'INC', 'LLC', 'COMPANY', 'ENTERPRISES', 'SERVICES',
+                'CONSTRUCTION', 'CONTRACTOR', 'PLUMBING', 'ELECTRICAL'
+            ]
+            
+            ad_score = 0
+            for indicator in ad_indicators:
+                if indicator in region_text:
+                    ad_score += 1
+            
+            # Decision logic: if more news indicators than ad indicators, it's probably news
+            if news_score >= 2 and news_score > ad_score:
+                print(f"Filtering out likely news story (news_score={news_score}, ad_score={ad_score})")
+                return True  # This is likely a news story
+            
+            return False  # This might be an ad
+            
+        except Exception as e:
+            print(f"News story detection failed: {e}")
+            return False  # If we can't determine, err on the side of caution
+    
+    @staticmethod
+    def test_vision_api(image_path):
+        """Test function to verify Vision API connectivity and basic functionality"""
+        try:
+            print(f"Testing Google Vision API with: {image_path}")
+            
+            # Test basic connectivity
+            client = vision.ImageAnnotatorClient()
+            print("✓ Vision API client initialized successfully")
+            
+            # Load test image
+            with vision_io.open(image_path, 'rb') as image_file:
+                content = image_file.read()
+            
+            image = vision.Image(content=content)
+            print("✓ Test image loaded successfully")
+            
+            # Test logo detection
+            try:
+                response = client.logo_detection(image=image)
+                logos = response.logo_annotations
+                print(f"✓ Logo detection: Found {len(logos)} logos")
+            except Exception as e:
+                print(f"✗ Logo detection failed: {e}")
+            
+            # Test text detection
+            try:
+                response = client.text_detection(image=image)
+                texts = response.text_annotations
+                print(f"✓ Text detection: Found {len(texts)} text regions")
+            except Exception as e:
+                print(f"✗ Text detection failed: {e}")
+            
+            # Test object detection
+            try:
+                response = client.object_localization(image=image)
+                objects = response.localized_object_annotations
+                print(f"✓ Object detection: Found {len(objects)} objects")
+            except Exception as e:
+                print(f"✗ Object detection failed: {e}")
+            
+            # Test full ad detection
+            ads = GoogleVisionAdDetector.detect_ads(image_path)
+            print(f"✓ Full ad detection: Found {len(ads)} potential ads")
+            
+            for i, ad in enumerate(ads):
+                print(f"  Ad {i+1}: {ad['ad_type']} at ({ad['x']},{ad['y']}) size {ad['width']}x{ad['height']} confidence={ad['confidence']:.3f}")
+            
+            return True
+            
+        except Exception as e:
+            print(f"✗ Vision API test failed: {e}")
+            return False
 
 # AI Learning Engine for Automatic Ad Detection
 class AdLearningEngine:
@@ -1260,6 +2248,50 @@ class AdLearningEngine:
             
         print(f"Training data collection complete: {len(training_samples)} new samples")
         return len(training_samples)
+    
+    @staticmethod
+    def reset_training_data(publication_type=None, confirmation_code=None):
+        """Reset training data to start fresh with improved Vision AI detection"""
+        if confirmation_code != "RESET_TRAINING_CONFIRMED":
+            return {
+                'success': False, 
+                'error': 'Must provide confirmation_code="RESET_TRAINING_CONFIRMED" to reset training data'
+            }
+        
+        try:
+            # Count current training data
+            if publication_type:
+                current_count = TrainingData.query.filter_by(publication_type=publication_type).count()
+                training_query = TrainingData.query.filter_by(publication_type=publication_type)
+                model_query = MLModel.query.filter_by(publication_type=publication_type)
+            else:
+                current_count = TrainingData.query.count()
+                training_query = TrainingData.query
+                model_query = MLModel.query
+            
+            print(f"Resetting {current_count} training data records...")
+            
+            # Delete training data
+            training_deleted = training_query.delete()
+            
+            # Deactivate existing models (don't delete them, just deactivate for reference)
+            models_updated = model_query.update({'is_active': False})
+            
+            db.session.commit()
+            
+            return {
+                'success': True,
+                'training_data_deleted': training_deleted,
+                'models_deactivated': models_updated,
+                'message': f'Training data reset complete. {training_deleted} training records deleted, {models_updated} models deactivated. Ready for fresh training with improved Vision AI.'
+            }
+            
+        except Exception as e:
+            db.session.rollback()
+            return {
+                'success': False,
+                'error': f'Failed to reset training data: {str(e)}'
+            }
     
     @staticmethod
     def train_model(publication_type='broadsheet', min_samples=20, collect_new_data=False):
@@ -1568,15 +2600,44 @@ class AdLearningEngine:
                 
                 print(f"Scanning page {page.page_number} for ads with confidence threshold {confidence_threshold}")
                 
-                # Get typical ad sizes from training data for better detection windows
-                typical_ad_sizes = AdLearningEngine._get_typical_ad_sizes(publication.publication_type)
-                print(f"Using typical ad sizes for detection: {typical_ad_sizes}")
+                # PRIMARY: Try Google Vision AI first (if available)
+                vision_detected_boxes = []
+                if is_vision_api_available():
+                    try:
+                        print(f"Attempting Google Vision AI detection on page {page.page_number}")
+                        vision_detected_boxes = GoogleVisionAdDetector.detect_ads(
+                            image_path, publication.publication_type
+                        )
+                        print(f"Google Vision AI found {len(vision_detected_boxes)} ads on page {page.page_number}")
+                    except Exception as vision_error:
+                        error_type = handle_vision_api_error(vision_error, f"page {page.page_number} detection")
+                        print(f"Google Vision AI failed for page {page.page_number}: {vision_error}")
+                        vision_detected_boxes = []
+                else:
+                    print(f"Google Vision API not available, skipping for page {page.page_number}")
+                    vision_detected_boxes = []
                 
-                # Use intelligent content-aware detection system
-                detected_boxes = AdLearningEngine.intelligent_ad_detection(
-                    image_path, publication.publication_type, model, feature_names, 
-                    confidence_threshold, scaler, typical_ad_sizes
-                )
+                # FALLBACK: Use existing detection if Vision AI fails or finds nothing
+                fallback_detected_boxes = []
+                if len(vision_detected_boxes) == 0:
+                    print(f"Falling back to existing detection system for page {page.page_number}")
+                    try:
+                        # Get typical ad sizes from training data for better detection windows
+                        typical_ad_sizes = AdLearningEngine._get_typical_ad_sizes(publication.publication_type)
+                        print(f"Using typical ad sizes for fallback detection: {typical_ad_sizes}")
+                        
+                        # Use intelligent content-aware detection system
+                        fallback_detected_boxes = AdLearningEngine.intelligent_ad_detection(
+                            image_path, publication.publication_type, model, feature_names, 
+                            confidence_threshold, scaler, typical_ad_sizes
+                        )
+                        print(f"Fallback detection found {len(fallback_detected_boxes)} ads on page {page.page_number}")
+                    except Exception as fallback_error:
+                        print(f"Fallback detection also failed for page {page.page_number}: {fallback_error}")
+                        fallback_detected_boxes = []
+                
+                # Combine results (prioritize Vision AI results)
+                detected_boxes = vision_detected_boxes + fallback_detected_boxes
                 
                 print(f"Page {page.page_number} scan complete: {len(detected_boxes)} detections")
                 
@@ -1610,6 +2671,13 @@ class AdLearningEngine:
                     
                     print(f"Creating AdBox: position=({box['x']},{box['y']}) size=({box['width']}x{box['height']}) confidence={box['confidence']:.3f} column_inches={column_inches:.2f}")
                     
+                    # Determine ad_type based on detection method
+                    ad_type = 'ai_detected'  # Default fallback
+                    if 'ad_type' in box:
+                        ad_type = box['ad_type']  # Vision AI detected types
+                    elif 'predicted_type' in box:
+                        ad_type = box['predicted_type']  # Existing ML predicted types
+                    
                     ad_box = AdBox(
                         page_id=page.id,
                         x=box['x'],
@@ -1621,6 +2689,7 @@ class AdLearningEngine:
                         width_inches_rounded=width_rounded,
                         height_inches_rounded=height_rounded,
                         column_inches=column_inches,
+                        ad_type=ad_type,  # Use Vision AI ad type or fallback
                         is_ad=True,
                         confidence_score=box['confidence'],
                         detected_automatically=True,
@@ -3834,8 +4903,33 @@ def delete_box(box_id):
         ad_box = AdBox.query.get_or_404(box_id)
         page_id = ad_box.page_id
         
-        # Delete related training data first
-        TrainingData.query.filter_by(ad_box_id=box_id).delete()
+        # CRITICAL FIX: Create negative training example instead of deleting training data
+        # This teaches the system that this detection was WRONG
+        existing_training = TrainingData.query.filter_by(ad_box_id=box_id).first()
+        if existing_training:
+            # Convert to negative training example
+            existing_training.label = 'false_positive_deleted'  # Mark as user-rejected
+            existing_training.confidence_score = 0.0  # Negative confidence
+            existing_training.extracted_date = datetime.utcnow()  # Update timestamp
+            print(f"Created negative training example for deleted ad box {box_id}")
+        else:
+            # Create new negative training example if none exists
+            try:
+                page = Page.query.join(AdBox).filter(AdBox.id == box_id).first()
+                if page and page.publication:
+                    negative_training = TrainingData(
+                        ad_box_id=box_id,
+                        publication_type=page.publication.publication_type,
+                        features=json.dumps({'deleted_by_user': True, 'false_positive': True}),
+                        label='false_positive_deleted',
+                        confidence_score=0.0
+                    )
+                    db.session.add(negative_training)
+                    print(f"Created new negative training example for deleted ad box {box_id}")
+            except Exception as e:
+                print(f"Could not create negative training example: {e}")
+                # Don't fail the deletion if training example creation fails
+                pass
         
         db.session.delete(ad_box)
         db.session.commit()
@@ -4496,6 +5590,25 @@ def get_ml_stats():
     except Exception as e:
         return jsonify({'success': False, 'error': str(e)})
 
+@app.route('/api/ml/reset_training_data', methods=['POST'])
+@login_required
+def reset_training_data():
+    """Reset training data to start fresh with improved Vision AI"""
+    try:
+        data = request.get_json() or {}
+        publication_type = data.get('publication_type')  # Optional - can reset all or specific type
+        confirmation_code = data.get('confirmation_code')
+        
+        result = AdLearningEngine.reset_training_data(
+            publication_type=publication_type,
+            confirmation_code=confirmation_code
+        )
+        
+        return jsonify(result)
+        
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
 @app.route('/api/ml/collect_training_data', methods=['POST'])
 @login_required
 def collect_training_data():
@@ -4673,6 +5786,66 @@ with app.app_context():
             
     except Exception as e:
         print(f"Schema update error (may be normal): {e}")
+
+@app.route('/api/test-vision-api', methods=['GET'])
+@login_required
+def test_vision_api():
+    """Test Google Vision API connectivity and functionality"""
+    try:
+        # Check if any page images exist to test with
+        pages_dir = os.path.join('static', 'uploads', 'pages')
+        if not os.path.exists(pages_dir):
+            return jsonify({
+                'success': False, 
+                'error': 'No page images directory found',
+                'vision_api_available': is_vision_api_available()
+            })
+        
+        # Find first available page image
+        test_image = None
+        for filename in os.listdir(pages_dir):
+            if filename.endswith('.png'):
+                test_image = os.path.join(pages_dir, filename)
+                break
+        
+        if not test_image:
+            return jsonify({
+                'success': False,
+                'error': 'No test images found in pages directory',
+                'vision_api_available': is_vision_api_available()
+            })
+        
+        print(f"Testing Vision API with: {test_image}")
+        
+        # Test Vision API
+        api_working = GoogleVisionAdDetector.test_vision_api(test_image)
+        
+        if api_working:
+            # Test actual ad detection
+            ads = GoogleVisionAdDetector.detect_ads(test_image)
+            
+            return jsonify({
+                'success': True,
+                'vision_api_available': True,
+                'test_image': test_image,
+                'ads_detected': len(ads),
+                'ads': ads[:3],  # Show first 3 ads
+                'message': f'Vision API working! Detected {len(ads)} potential ads.'
+            })
+        else:
+            return jsonify({
+                'success': False,
+                'vision_api_available': False,
+                'test_image': test_image,
+                'error': 'Vision API test failed - check credentials and setup'
+            })
+    
+    except Exception as e:
+        return jsonify({
+            'success': False,
+            'error': f'Vision API test error: {str(e)}',
+            'vision_api_available': is_vision_api_available()
+        })
 
 def check_database_connection():
     """Check if database connection is working"""

@@ -56,3 +56,13 @@ static/uploads/
 .Trashes
 ehthumbs.db
 Thumbs.db
+
+# CRITICAL SECURITY - Google Vision API
+google-vision-credentials.json
+*-credentials.json
+*.json
+google-*.json
+
+# API Keys and Secrets
+config.py
+secrets.py

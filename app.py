@@ -325,7 +325,7 @@ def start_background_processing(pub_id):
                     start_time = time.time()
                     
                     try:
-                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.4)
+                        result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.25)
                         
                         if result['success']:
                             print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
@@ -2017,18 +2017,22 @@ class AdLearningEngine:
                         features_array = scaler.transform(features_array)
                     
                     # Get confidence from ML model
-                    if hasattr(model, 'predict_proba'):
-                        proba = model.predict_proba(features_array)[0]
-                        ml_confidence = proba[1] if len(proba) > 1 else proba[0]
+                    if model is not None:
+                        if hasattr(model, 'predict_proba'):
+                            proba = model.predict_proba(features_array)[0]
+                            ml_confidence = proba[1] if len(proba) > 1 else proba[0]
+                        else:
+                            prediction = model.predict(features_array)[0]
+                            ml_confidence = 0.8 if prediction == 1 else 0.2
                     else:
-                        prediction = model.predict(features_array)[0]
-                        ml_confidence = 0.8 if prediction == 1 else 0.2
+                        # Fallback: Use visual confidence as ML confidence
+                        ml_confidence = min(candidate['confidence'] * 1.2, 0.9)
                     
                     # Combine visual pattern confidence with ML confidence
                     combined_confidence = (candidate['confidence'] * 0.4 + ml_confidence * 0.6)
                     
-                    # Multi-stage confidence check - must pass ALL criteria
-                    if combined_confidence >= confidence_threshold and candidate['confidence'] > 0.4 and ml_confidence > 0.5:
+                    # Balanced multi-stage confidence check
+                    if combined_confidence >= confidence_threshold and candidate['confidence'] > 0.3:
                         print(f"CONFIRMED AD: {candidate['width']}x{candidate['height']} at ({candidate['x']},{candidate['y']}) confidence={combined_confidence:.3f}")
                         
                         # Check for overlaps before adding
@@ -2171,7 +2175,7 @@ class AdLearningEngine:
                         roi = gray_image[y:y+h, x:x+w]
                         confidence = AdLearningEngine._calculate_visual_ad_confidence(roi, x, y, w, h, width, height)
                         
-                        if confidence > 0.5:  # RAISED minimum visual confidence from 0.3 to 0.5
+                        if confidence > 0.35:  # Balanced minimum visual confidence - not too high, not too low
                             candidates.append({
                                 'x': x, 'y': y, 'width': w, 'height': h,
                                 'confidence': confidence,
@@ -2319,7 +2323,7 @@ class AdLearningEngine:
                         roi = gray_image[y:y+h, x:x+w]
                         confidence = AdLearningEngine._calculate_visual_ad_confidence(roi, x, y, w, h, width, height)
                         
-                        if confidence > 0.4:  # Higher threshold for borderless detection
+                        if confidence > 0.3:  # Balanced threshold for borderless detection
                             candidates.append({
                                 'x': x, 'y': y, 'width': w, 'height': h,
                                 'confidence': confidence,
@@ -2647,9 +2651,9 @@ class AdLearningEngine:
             elif 0.05 <= edge_density < 0.08:
                 ad_score += 1  # Minimal structure, possible ad
             elif edge_density < 0.05:  # Too little structure (likely empty space)
-                ad_score -= 3
+                ad_score -= 1
             elif edge_density > 0.35:   # Too much structure (likely dense text/articles)
-                ad_score -= 4  # Heavily penalize dense text regions
+                ad_score -= 2  # Moderate penalty for dense text regions
             
             # STRICTER white space requirements - ads need significant white space
             if white_space_ratio > 0.4:
@@ -2680,10 +2684,10 @@ class AdLearningEngine:
             # Additional text pattern detection - penalize regions with lots of small text
             # Use template matching to detect common text patterns
             text_pattern_score = AdLearningEngine._detect_text_patterns(roi)
-            ad_score -= text_pattern_score * 2  # Penalize text-heavy regions
+            ad_score -= text_pattern_score * 1  # Moderate penalty for text-heavy regions
             
-            # Final decision threshold - MUCH more restrictive
-            threshold = 6  # Raised from 4 to 6 - be much more selective
+            # Balanced decision threshold - allow legitimate ads while filtering false positives
+            threshold = 3  # Lowered from 6 to 3 - more balanced approach
             return ad_score >= threshold
             
         except Exception as e:

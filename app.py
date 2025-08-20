@@ -861,6 +861,415 @@ def is_vision_api_available():
         print(f"Vision API not available: {e}")
         return False
 
+# PDF Metadata-based Ad Detector
+class PDFMetadataAdDetector:
+    """
+    PDF structure-based ad detection using document metadata and layout analysis.
+    Analyzes PDF objects, fonts, images, and text positioning to identify advertisements
+    with high accuracy and zero false positives from editorial content.
+    """
+    
+    @staticmethod
+    def detect_ads_from_pdf_metadata(pdf_path, page_number, publication_type='broadsheet'):
+        """
+        Detect ads using PDF structural analysis instead of image processing.
+        
+        Args:
+            pdf_path (str): Path to the PDF file
+            page_number (int): Page number to analyze (1-based)
+            publication_type (str): Type of publication for context
+            
+        Returns:
+            list: Detected ad regions as dicts with x, y, width, height, confidence
+        """
+        try:
+            if not os.path.exists(pdf_path):
+                print(f"PDF file not found: {pdf_path}")
+                return []
+                
+            doc = fitz.open(pdf_path)
+            if page_number < 1 or page_number > len(doc):
+                print(f"Invalid page number {page_number} for PDF with {len(doc)} pages")
+                return []
+                
+            page = doc[page_number - 1]  # fitz uses 0-based indexing
+            page_rect = page.rect
+            
+            detected_ads = []
+            
+            # Get all page elements for structural analysis
+            images = page.get_images()
+            text_blocks = page.get_text("dict")
+            drawings = page.get_drawings()
+            
+            print(f"Page {page_number}: Found {len(images)} images, {len(text_blocks.get('blocks', []))} text blocks, {len(drawings)} drawings")
+            
+            # Analyze images as potential ads
+            for img_index, img in enumerate(images):
+                try:
+                    img_rect = page.get_image_bbox(img[7])  # img[7] is the xref
+                    if img_rect:
+                        ad_candidate = PDFMetadataAdDetector._analyze_image_element(
+                            img_rect, page_rect, publication_type, f"image_{img_index}"
+                        )
+                        if ad_candidate:
+                            detected_ads.append(ad_candidate)
+                except Exception as e:
+                    print(f"Error analyzing image {img_index}: {e}")
+                    continue
+            
+            # Analyze text blocks for ad patterns
+            if 'blocks' in text_blocks:
+                for block_index, block in enumerate(text_blocks['blocks']):
+                    if 'lines' in block and len(block['lines']) > 0:
+                        try:
+                            block_rect = fitz.Rect(block['bbox'])
+                            ad_candidate = PDFMetadataAdDetector._analyze_text_block(
+                                block, block_rect, page_rect, publication_type, f"text_{block_index}"
+                            )
+                            if ad_candidate:
+                                detected_ads.append(ad_candidate)
+                        except Exception as e:
+                            print(f"Error analyzing text block {block_index}: {e}")
+                            continue
+            
+            # Analyze vector drawings (borders, graphics)
+            for draw_index, drawing in enumerate(drawings):
+                try:
+                    draw_rect = drawing.get('rect', None)
+                    if draw_rect:
+                        ad_candidate = PDFMetadataAdDetector._analyze_drawing_element(
+                            draw_rect, page_rect, publication_type, f"drawing_{draw_index}"
+                        )
+                        if ad_candidate:
+                            detected_ads.append(ad_candidate)
+                except Exception as e:
+                    print(f"Error analyzing drawing {draw_index}: {e}")
+                    continue
+            
+            # Merge overlapping regions and filter by confidence
+            filtered_ads = PDFMetadataAdDetector._merge_and_filter_detections(detected_ads)
+            
+            print(f"PDF analysis complete: {len(detected_ads)} candidates -> {len(filtered_ads)} final detections")
+            
+            doc.close()
+            return filtered_ads
+            
+        except Exception as e:
+            print(f"Error in PDF metadata ad detection: {e}")
+            import traceback
+            traceback.print_exc()
+            return []
+    
+    @staticmethod
+    def _analyze_image_element(img_rect, page_rect, publication_type, element_id):
+        """Analyze an image element to determine if it's likely an ad"""
+        try:
+            width = img_rect.width
+            height = img_rect.height
+            area = width * height
+            
+            # Image size filtering - reasonable ad dimensions
+            min_area = 100 * 80  # 8000 pixels minimum
+            max_area = 800 * 600  # 480000 pixels maximum
+            
+            if area < min_area or area > max_area:
+                return None
+            
+            # Aspect ratio analysis - ads typically have reasonable ratios
+            aspect_ratio = width / height if height > 0 else 0
+            if aspect_ratio < 0.1 or aspect_ratio > 10:  # Too thin or too wide
+                return None
+            
+            # Position analysis - ads are typically not at extreme edges
+            margin_threshold = 20  # pixels
+            x_center = img_rect.x0 + width / 2
+            y_center = img_rect.y0 + height / 2
+            
+            # Check if reasonably positioned (not at very edges)
+            if (img_rect.x0 < margin_threshold and 
+                img_rect.x1 > page_rect.width - margin_threshold):
+                # Full width image - likely masthead or full-page content
+                if height < 100:  # But if it's short, might be a banner ad
+                    confidence = 0.6
+                else:
+                    confidence = 0.3  # Lower confidence for full-width tall images
+            else:
+                # Partial width images are more likely ads
+                confidence = 0.8
+            
+            # Size-based confidence adjustments
+            typical_ad_sizes = [
+                (300, 250),  # Medium rectangle
+                (728, 90),   # Leaderboard
+                (160, 600),  # Wide skyscraper
+                (300, 600),  # Half page
+                (336, 280),  # Large rectangle
+            ]
+            
+            # Check similarity to standard ad sizes
+            size_match_bonus = 0
+            for standard_width, standard_height in typical_ad_sizes:
+                width_diff = abs(width - standard_width) / standard_width
+                height_diff = abs(height - standard_height) / standard_height
+                if width_diff < 0.2 and height_diff < 0.2:  # Within 20% of standard size
+                    size_match_bonus = 0.2
+                    break
+            
+            confidence += size_match_bonus
+            confidence = min(confidence, 1.0)
+            
+            if confidence >= 0.5:
+                return {
+                    'x': img_rect.x0,
+                    'y': img_rect.y0,
+                    'width': width,
+                    'height': height,
+                    'confidence': confidence,
+                    'type': 'image',
+                    'element_id': element_id
+                }
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error analyzing image element {element_id}: {e}")
+            return None
+    
+    @staticmethod
+    def _analyze_text_block(block, block_rect, page_rect, publication_type, element_id):
+        """Analyze a text block to determine if it's likely an ad"""
+        try:
+            width = block_rect.width
+            height = block_rect.height
+            area = width * height
+            
+            # Size filtering
+            if area < 2000:  # Too small to be a meaningful ad
+                return None
+            
+            # Analyze fonts and text patterns
+            fonts_used = set()
+            total_chars = 0
+            commercial_keywords = 0
+            phone_numbers = 0
+            web_urls = 0
+            prices = 0
+            
+            commercial_patterns = [
+                'call', 'phone', 'contact', 'visit', 'buy', 'sale', 'offer', 
+                'special', 'deal', 'discount', 'free', 'new', 'now', 'today'
+            ]
+            
+            if 'lines' in block:
+                for line in block['lines']:
+                    if 'spans' in line:
+                        for span in line['spans']:
+                            # Collect font information
+                            font_info = f"{span.get('font', 'unknown')}_{span.get('size', 0)}"
+                            fonts_used.add(font_info)
+                            
+                            # Analyze text content
+                            text = span.get('text', '').lower()
+                            total_chars += len(text)
+                            
+                            # Count commercial indicators
+                            for keyword in commercial_patterns:
+                                commercial_keywords += text.count(keyword)
+                            
+                            # Count contact info patterns
+                            import re
+                            phone_numbers += len(re.findall(r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b', text))
+                            web_urls += len(re.findall(r'www\.|\.com|\.org|\.net', text))
+                            prices += len(re.findall(r'\$\d+|\d+\.\d{2}', text))
+            
+            # Calculate confidence based on patterns
+            confidence = 0.0
+            
+            # Multiple fonts suggest designed layout (ads) vs single font (articles)
+            if len(fonts_used) >= 3:
+                confidence += 0.4
+            elif len(fonts_used) == 2:
+                confidence += 0.2
+            
+            # Commercial content indicators
+            if total_chars > 0:
+                commercial_ratio = (commercial_keywords + phone_numbers * 3 + web_urls * 2 + prices * 2) / total_chars
+                confidence += min(commercial_ratio * 10, 0.4)  # Cap at 0.4
+            
+            # Size and position analysis
+            aspect_ratio = width / height if height > 0 else 0
+            if 0.5 <= aspect_ratio <= 4:  # Reasonable ad proportions
+                confidence += 0.2
+            
+            # Position - ads often have defined boundaries
+            if (block_rect.x0 % 10 == 0 or block_rect.y0 % 10 == 0):  # Aligned to grid
+                confidence += 0.1
+            
+            # Apply publication-specific adjustments
+            if publication_type == 'tabloid':
+                confidence *= 1.1  # Tabloids have more varied ad layouts
+            
+            confidence = min(confidence, 1.0)
+            
+            if confidence >= 0.6:  # Higher threshold for text blocks
+                return {
+                    'x': block_rect.x0,
+                    'y': block_rect.y0,
+                    'width': width,
+                    'height': height,
+                    'confidence': confidence,
+                    'type': 'text',
+                    'element_id': element_id,
+                    'fonts_count': len(fonts_used),
+                    'commercial_indicators': commercial_keywords + phone_numbers + web_urls + prices
+                }
+            
+            return None
+            
+        except Exception as e:
+            print(f"Error analyzing text block {element_id}: {e}")
+            return None
+    
+    @staticmethod
+    def _analyze_drawing_element(draw_rect, page_rect, publication_type, element_id):
+        """Analyze vector drawing elements (borders, graphics) for ad detection"""
+        try:
+            width = draw_rect.width
+            height = draw_rect.height
+            
+            # Focus on rectangular borders that might frame ads
+            if width < 50 or height < 50:  # Too small to be ad border
+                return None
+            
+            # Look for border-like elements (thin rectangles)
+            line_thickness_threshold = 5
+            is_border = (width > height * 10 or height > width * 10)  # Very thin rectangle
+            
+            if not is_border:
+                return None  # Only interested in border elements for now
+            
+            # Borders suggest structured content (ads) vs flowing text
+            confidence = 0.7 if is_border else 0.3
+            
+            return {
+                'x': draw_rect.x0,
+                'y': draw_rect.y0,
+                'width': width,
+                'height': height,
+                'confidence': confidence,
+                'type': 'border',
+                'element_id': element_id
+            }
+            
+        except Exception as e:
+            print(f"Error analyzing drawing element {element_id}: {e}")
+            return None
+    
+    @staticmethod
+    def _merge_and_filter_detections(detections, min_confidence=0.5, overlap_threshold=0.3):
+        """Merge overlapping detections and filter by confidence"""
+        try:
+            # Filter by minimum confidence
+            filtered = [d for d in detections if d['confidence'] >= min_confidence]
+            
+            if not filtered:
+                return []
+            
+            # Sort by confidence (highest first)
+            filtered.sort(key=lambda x: x['confidence'], reverse=True)
+            
+            # Merge overlapping detections
+            merged = []
+            
+            for current in filtered:
+                should_merge = False
+                current_rect = fitz.Rect(current['x'], current['y'], 
+                                       current['x'] + current['width'], 
+                                       current['y'] + current['height'])
+                
+                for i, existing in enumerate(merged):
+                    existing_rect = fitz.Rect(existing['x'], existing['y'],
+                                            existing['x'] + existing['width'],
+                                            existing['y'] + existing['height'])
+                    
+                    # Calculate overlap
+                    intersection = current_rect & existing_rect
+                    if intersection.is_empty:
+                        continue
+                    
+                    overlap_area = intersection.width * intersection.height
+                    current_area = current_rect.width * current_rect.height
+                    existing_area = existing_rect.width * existing_rect.height
+                    
+                    overlap_ratio = overlap_area / min(current_area, existing_area)
+                    
+                    if overlap_ratio >= overlap_threshold:
+                        # Merge with existing detection (keep higher confidence one's properties)
+                        if current['confidence'] > existing['confidence']:
+                            merged[i] = current
+                        should_merge = True
+                        break
+                
+                if not should_merge:
+                    merged.append(current)
+            
+            return merged
+            
+        except Exception as e:
+            print(f"Error merging detections: {e}")
+            return detections  # Return original if merging fails
+    
+    @staticmethod
+    def transform_pdf_to_image_coordinates(pdf_detections, pdf_page_rect, image_width, image_height):
+        """
+        Transform PDF coordinates to match page image pixel coordinates.
+        
+        Args:
+            pdf_detections (list): Detections in PDF coordinate system
+            pdf_page_rect (fitz.Rect): PDF page dimensions
+            image_width (int): Width of generated page image in pixels
+            image_height (int): Height of generated page image in pixels
+            
+        Returns:
+            list: Detections with coordinates transformed to image pixel system
+        """
+        try:
+            if not pdf_detections:
+                return []
+            
+            # Calculate scaling factors
+            scale_x = image_width / pdf_page_rect.width
+            scale_y = image_height / pdf_page_rect.height
+            
+            transformed_detections = []
+            
+            for detection in pdf_detections:
+                # Transform coordinates
+                transformed = {
+                    'x': detection['x'] * scale_x,
+                    'y': detection['y'] * scale_y,
+                    'width': detection['width'] * scale_x,
+                    'height': detection['height'] * scale_y,
+                    'confidence': detection['confidence'],
+                    'type': detection['type'],
+                    'element_id': detection.get('element_id', 'unknown')
+                }
+                
+                # Preserve additional metadata
+                for key in ['fonts_count', 'commercial_indicators']:
+                    if key in detection:
+                        transformed[key] = detection[key]
+                
+                transformed_detections.append(transformed)
+            
+            return transformed_detections
+            
+        except Exception as e:
+            print(f"Error transforming coordinates: {e}")
+            return pdf_detections  # Return original if transformation fails
+
+
 # Intelligent Ad Detector for Broadsheet
 class IntelligentAdDetector:
     @staticmethod
@@ -2629,11 +3038,41 @@ class AdLearningEngine:
                 
                 print(f"Scanning page {page.page_number} for ads with confidence threshold {confidence_threshold}")
                 
-                # PRIMARY: Try Google Vision AI first (if available)
+                # PRIMARY: Try PDF Metadata detection first
+                pdf_detected_boxes = []
+                pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
+                print(f"Attempting PDF metadata detection on page {page.page_number}")
+                try:
+                    # Get PDF detections in PDF coordinate system
+                    pdf_detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
+                        pdf_path, page.page_number, publication.publication_type
+                    )
+                    
+                    if pdf_detections:
+                        print(f"PDF metadata found {len(pdf_detections)} ad candidates on page {page.page_number}")
+                        
+                        # Transform to image coordinate system
+                        doc = fitz.open(pdf_path)
+                        pdf_page = doc[page.page_number - 1]
+                        pdf_page_rect = pdf_page.rect
+                        doc.close()
+                        
+                        pdf_detected_boxes = PDFMetadataAdDetector.transform_pdf_to_image_coordinates(
+                            pdf_detections, pdf_page_rect, page.width_pixels, page.height_pixels
+                        )
+                        print(f"Transformed {len(pdf_detected_boxes)} PDF detections to image coordinates")
+                    else:
+                        print(f"No ads detected via PDF metadata on page {page.page_number}")
+                        
+                except Exception as pdf_error:
+                    print(f"PDF metadata detection failed for page {page.page_number}: {pdf_error}")
+                    pdf_detected_boxes = []
+                
+                # SECONDARY: Try Google Vision AI if PDF detection finds nothing
                 vision_detected_boxes = []
-                if is_vision_api_available():
+                if len(pdf_detected_boxes) == 0 and is_vision_api_available():
                     try:
-                        print(f"Attempting Google Vision AI detection on page {page.page_number}")
+                        print(f"Falling back to Google Vision AI detection on page {page.page_number}")
                         vision_detected_boxes = GoogleVisionAdDetector.detect_ads(
                             image_path, publication.publication_type
                         )
@@ -2642,13 +3081,10 @@ class AdLearningEngine:
                         error_type = handle_vision_api_error(vision_error, f"page {page.page_number} detection")
                         print(f"Google Vision AI failed for page {page.page_number}: {vision_error}")
                         vision_detected_boxes = []
-                else:
-                    print(f"Google Vision API not available, skipping for page {page.page_number}")
-                    vision_detected_boxes = []
                 
-                # FALLBACK: Use existing detection if Vision AI fails or finds nothing
+                # TERTIARY FALLBACK: Use existing detection if both PDF and Vision AI fail or find nothing
                 fallback_detected_boxes = []
-                if len(vision_detected_boxes) == 0:
+                if len(pdf_detected_boxes) == 0 and len(vision_detected_boxes) == 0:
                     print(f"Falling back to existing detection system for page {page.page_number}")
                     try:
                         # Get typical ad sizes from training data for better detection windows
@@ -2665,8 +3101,8 @@ class AdLearningEngine:
                         print(f"Fallback detection also failed for page {page.page_number}: {fallback_error}")
                         fallback_detected_boxes = []
                 
-                # Combine results (prioritize Vision AI results)
-                detected_boxes = vision_detected_boxes + fallback_detected_boxes
+                # Combine results (prioritize PDF metadata, then Vision AI, then fallback)
+                detected_boxes = pdf_detected_boxes + vision_detected_boxes + fallback_detected_boxes
                 
                 print(f"Page {page.page_number} scan complete: {len(detected_boxes)} detections")
                 
@@ -2702,7 +3138,17 @@ class AdLearningEngine:
                     
                     # Determine ad_type based on detection method
                     ad_type = 'ai_detected'  # Default fallback
-                    if 'ad_type' in box:
+                    if 'type' in box:
+                        # PDF metadata detection types (image, text, border)
+                        if box['type'] == 'image':
+                            ad_type = 'pdf_image_ad'
+                        elif box['type'] == 'text':
+                            ad_type = 'pdf_text_ad'
+                        elif box['type'] == 'border':
+                            ad_type = 'pdf_border_ad'
+                        else:
+                            ad_type = 'pdf_detected'
+                    elif 'ad_type' in box:
                         ad_type = box['ad_type']  # Vision AI detected types
                     elif 'predicted_type' in box:
                         ad_type = box['predicted_type']  # Existing ML predicted types

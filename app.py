@@ -1039,7 +1039,7 @@ class PDFMetadataAdDetector:
     @staticmethod
     def detect_ads_from_pdf_metadata(pdf_path, page_number, publication_type='broadsheet'):
         """
-        Detect ads using PDF structural analysis instead of image processing.
+        Detect ads using PDF structural analysis focusing on bordered rectangles.
         
         Args:
             pdf_path (str): Path to the PDF file
@@ -1065,59 +1065,66 @@ class PDFMetadataAdDetector:
             detected_ads = []
             
             # Get all page elements for structural analysis
-            images = page.get_images()
-            text_blocks = page.get_text("dict")
             drawings = page.get_drawings()
             
-            print(f"Page {page_number}: Found {len(images)} images, {len(text_blocks.get('blocks', []))} text blocks, {len(drawings)} drawings")
+            print(f"Page {page_number}: Found {len(drawings)} drawings")
             
-            # Analyze images as potential ads
-            for img_index, img in enumerate(images):
-                try:
-                    img_rect = page.get_image_bbox(img[7])  # img[7] is the xref
-                    if img_rect:
-                        ad_candidate = PDFMetadataAdDetector._analyze_image_element(
-                            img_rect, page_rect, publication_type, f"image_{img_index}"
-                        )
-                        if ad_candidate:
-                            detected_ads.append(ad_candidate)
-                except Exception as e:
-                    print(f"Error analyzing image {img_index}: {e}")
-                    continue
+            # PRIORITY 1: Analyze bordered rectangles first (highest priority)
+            bordered_candidates = []
+            simple_drawing_candidates = []
             
-            # Analyze text blocks for ad patterns
-            if 'blocks' in text_blocks:
-                for block_index, block in enumerate(text_blocks['blocks']):
-                    if 'lines' in block and len(block['lines']) > 0:
-                        try:
-                            block_rect = fitz.Rect(block['bbox'])
-                            ad_candidate = PDFMetadataAdDetector._analyze_text_block(
-                                block, block_rect, page_rect, publication_type, f"text_{block_index}"
-                            )
-                            if ad_candidate:
-                                detected_ads.append(ad_candidate)
-                        except Exception as e:
-                            print(f"Error analyzing text block {block_index}: {e}")
-                            continue
-            
-            # Analyze vector drawings (borders, graphics)
             for draw_index, drawing in enumerate(drawings):
                 try:
+                    # Get drawing items count and border information
+                    items = drawing.get('items', [])
+                    items_count = len(items)
+                    
+                    # Check if this drawing has a border
+                    has_border = False
+                    for item in items:
+                        if isinstance(item, dict) and item.get('type') == 'rect':
+                            # Check if it's likely a border (stroke but no fill)
+                            if item.get('stroke') and not item.get('fill'):
+                                has_border = True
+                                break
+                    
                     draw_rect = drawing.get('rect', None)
                     if draw_rect:
-                        ad_candidate = PDFMetadataAdDetector._analyze_drawing_element(
-                            draw_rect, page_rect, publication_type, f"drawing_{draw_index}"
-                        )
-                        if ad_candidate:
-                            detected_ads.append(ad_candidate)
+                        element_id = f"drawing_{draw_index}"
+                        print(f"Drawing {draw_index}: {draw_rect.width:.0f}x{draw_rect.height:.0f} ({items_count} items) - Border: {has_border}")
+                        
+                        # Prioritize simple bordered rectangles
+                        if has_border and 1 <= items_count <= 3:
+                            ad_candidate = PDFMetadataAdDetector._analyze_drawing_element(
+                                drawing, draw_rect, page_rect, publication_type, element_id, True
+                            )
+                            if ad_candidate:
+                                bordered_candidates.append(ad_candidate)
+                        elif not has_border and items_count >= 4:
+                            # Ignore complex drawings without borders completely
+                            continue
+                        else:
+                            # Simple drawings without borders - lower priority
+                            ad_candidate = PDFMetadataAdDetector._analyze_drawing_element(
+                                drawing, draw_rect, page_rect, publication_type, element_id, False
+                            )
+                            if ad_candidate:
+                                simple_drawing_candidates.append(ad_candidate)
+                                
                 except Exception as e:
                     print(f"Error analyzing drawing {draw_index}: {e}")
                     continue
             
+            # Add bordered candidates first (highest confidence)
+            detected_ads.extend(bordered_candidates)
+            # Add simple drawing candidates only if we don't have many bordered ones
+            if len(bordered_candidates) < 10:
+                detected_ads.extend(simple_drawing_candidates[:5])  # Limit simple drawings
+            
             # Merge overlapping regions and filter by confidence
             filtered_ads = PDFMetadataAdDetector._merge_and_filter_detections(detected_ads)
             
-            print(f"PDF analysis complete: {len(detected_ads)} candidates -> {len(filtered_ads)} final detections")
+            print(f"PDF analysis complete: {len(bordered_candidates)} bordered + {len(simple_drawing_candidates)} simple -> {len(filtered_ads)} final detections")
             
             doc.close()
             return filtered_ads
@@ -1299,42 +1306,126 @@ class PDFMetadataAdDetector:
             return None
     
     @staticmethod
-    def _analyze_drawing_element(draw_rect, page_rect, publication_type, element_id):
-        """Analyze vector drawing elements (borders, graphics) for ad detection"""
+    def _analyze_drawing_element(drawing, draw_rect, page_rect, publication_type, element_id, has_border):
+        """Analyze vector drawing elements focusing on bordered rectangles for ad detection"""
         try:
             width = draw_rect.width
             height = draw_rect.height
             
-            # Focus on rectangular borders that might frame ads
-            if width < 50 or height < 50:  # Too small to be ad border
+            # REQUIREMENT D: Minimum size requirements
+            if width < 80 or height < 60:
                 return None
             
-            # Look for border-like elements (thin rectangles)
-            line_thickness_threshold = 5
-            is_border = (width > height * 10 or height > width * 10)  # Very thin rectangle
+            # REQUIREMENT E: Exclude rectangles larger than 90% of page width
+            if width > page_rect.width * 0.9:
+                return None
             
-            if not is_border:
-                return None  # Only interested in border elements for now
+            # Only process simple bordered rectangles (1-3 items) if has_border=True
+            # or simple drawings without borders
+            items = drawing.get('items', [])
+            items_count = len(items)
             
-            # Borders suggest structured content (ads) vs flowing text
-            confidence = 0.7 if is_border else 0.3
-            
-            return {
-                'x': draw_rect.x0,
-                'y': draw_rect.y0,
-                'width': width,
-                'height': height,
-                'confidence': confidence,
-                'type': 'border',
-                'element_id': element_id
-            }
+            if has_border:
+                # REQUIREMENT C: Only detect simple bordered rectangles (1-3 drawing items)
+                if items_count > 3:
+                    return None
+                
+                # Check if this looks like an editorial photo
+                if PDFMetadataAdDetector._is_likely_editorial_photo(draw_rect, page_rect):
+                    # REQUIREMENT F: Reduce confidence for likely photos
+                    confidence = 0.3
+                else:
+                    # REQUIREMENT A: High confidence for simple bordered rectangles
+                    confidence = 0.9
+                    
+                return {
+                    'x': draw_rect.x0,
+                    'y': draw_rect.y0,
+                    'width': width,
+                    'height': height,
+                    'confidence': confidence,
+                    'type': 'bordered_rectangle',
+                    'element_id': element_id,
+                    'border': True,
+                    'items_count': items_count
+                }
+            else:
+                # Non-bordered elements - much lower priority and confidence
+                if items_count >= 4:
+                    # REQUIREMENT C: Ignore complex drawings (4+ items)
+                    return None
+                
+                # Simple non-bordered drawings get very low confidence
+                confidence = 0.4
+                
+                return {
+                    'x': draw_rect.x0,
+                    'y': draw_rect.y0,
+                    'width': width,
+                    'height': height,
+                    'confidence': confidence,
+                    'type': 'simple_drawing',
+                    'element_id': element_id,
+                    'border': False,
+                    'items_count': items_count
+                }
             
         except Exception as e:
             print(f"Error analyzing drawing element {element_id}: {e}")
             return None
     
     @staticmethod
-    def _merge_and_filter_detections(detections, min_confidence=0.5, overlap_threshold=0.3):
+    def _is_likely_editorial_photo(draw_rect, page_rect):
+        """Filter out editorial photos using size, aspect ratio, and position analysis"""
+        try:
+            width = draw_rect.width
+            height = draw_rect.height
+            
+            # Check aspect ratios that are common for photos
+            aspect_ratio = width / height if height > 0 else 0
+            
+            # Common photo aspect ratios: 3:2 (1.5), 4:3 (1.33), 16:9 (1.78), 1:1 (1.0)
+            photo_ratios = [1.5, 1.33, 1.78, 1.0]  # 3:2, 4:3, 16:9, square
+            tolerance = 0.1
+            
+            is_photo_ratio = False
+            for ratio in photo_ratios:
+                if abs(aspect_ratio - ratio) <= tolerance or abs(aspect_ratio - (1/ratio)) <= tolerance:
+                    is_photo_ratio = True
+                    break
+            
+            if not is_photo_ratio:
+                return False  # Not a typical photo aspect ratio
+            
+            # Check size - large rectangles with photo ratios are likely photos
+            area = width * height
+            large_photo_threshold = 300 * 200  # 60,000 pixels
+            
+            if area >= large_photo_threshold:
+                return True  # Large + photo aspect ratio = likely editorial photo
+            
+            # Check position - photos often appear in content areas (center regions)
+            x_center = draw_rect.x0 + width / 2
+            y_center = draw_rect.y0 + height / 2
+            
+            page_center_x = page_rect.width / 2
+            page_center_y = page_rect.height / 2
+            
+            # If it's in the central content area and has photo proportions
+            distance_from_center = abs(x_center - page_center_x) + abs(y_center - page_center_y)
+            center_threshold = (page_rect.width + page_rect.height) / 4  # Within central quarter
+            
+            if distance_from_center <= center_threshold and area >= 180 * 120:  # 21,600 pixels
+                return True  # Central position + decent size + photo ratio = likely photo
+            
+            return False  # Probably an ad frame
+            
+        except Exception as e:
+            print(f"Error in photo detection: {e}")
+            return False
+    
+    @staticmethod
+    def _merge_and_filter_detections(detections, min_confidence=0.8, overlap_threshold=0.3):
         """Merge overlapping detections and filter by confidence"""
         try:
             # Filter by minimum confidence

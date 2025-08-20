@@ -333,9 +333,28 @@ def start_background_processing(pub_id):
                 try:
                     print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                     
-                    # Skip AI detection if Google Vision credentials are not available
+                    # Try PDF metadata detection first (doesn't require credentials)
+                    try:
+                        print(f"📄 Attempting PDF metadata-based ad detection")
+                        pdf_result = PDFAdDetectionEngine.detect_ads_from_pdf(publication.id)
+                        
+                        if pdf_result and pdf_result.get('success'):
+                            print(f"✅ PDF detection complete: {pdf_result['detections']} ads detected across {pdf_result['pages_processed']} pages")
+                            if pdf_result['detections'] > 0:
+                                print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
+                            else:
+                                print(f"ℹ️  No ads detected via PDF analysis - you can manually mark ads as usual")
+                        else:
+                            error_msg = pdf_result.get('error', 'PDF analysis failed') if pdf_result else 'No result returned'
+                            print(f"⚠️  PDF detection failed: {error_msg}")
+                            print(f"📝 Will try alternative detection methods if available")
+                    except Exception as pdf_error:
+                        print(f"⚠️  PDF detection failed with error: {pdf_error}")
+                        print(f"📝 Will try alternative detection methods if available")
+                    
+                    # Skip traditional AI detection if Google Vision credentials are not available
                     if not os.path.exists('google-vision-credentials.json'):
-                        print(f"⚠️  Google Vision credentials not found - skipping AI detection")
+                        print(f"⚠️  Google Vision credentials not found - skipping Vision AI detection")
                         print(f"📝 Publication processed successfully - continue with manual ad marking")
                     else:
                         # Timeout protection for auto-detection (robust error handling)
@@ -860,6 +879,154 @@ def is_vision_api_available():
     except Exception as e:
         print(f"Vision API not available: {e}")
         return False
+
+# PDF Ad Detection Engine (wrapper for upload processing)
+class PDFAdDetectionEngine:
+    """
+    High-level wrapper for PDF-based ad detection during upload processing.
+    Works independently of the full auto_detect_ads workflow.
+    """
+    
+    @staticmethod
+    def detect_ads_from_pdf(publication_id):
+        """
+        Detect ads using PDF metadata for a publication during upload processing.
+        
+        Args:
+            publication_id (int): ID of the publication to analyze
+            
+        Returns:
+            dict: Detection results with success status, detections count, etc.
+        """
+        try:
+            publication = Publication.query.get(publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
+            
+            pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
+            if not os.path.exists(pdf_path):
+                return {'success': False, 'error': f'PDF file not found: {pdf_path}'}
+            
+            pages = Page.query.filter_by(publication_id=publication.id).all()
+            if not pages:
+                return {'success': False, 'error': 'No pages found for publication'}
+            
+            print(f"📄 Processing {len(pages)} pages with PDF metadata detection")
+            
+            detections_count = 0
+            pages_processed = 0
+            
+            for page in pages:
+                try:
+                    print(f"📄 Analyzing page {page.page_number} for PDF metadata ads")
+                    
+                    # Get PDF detections
+                    pdf_detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
+                        pdf_path, page.page_number, publication.publication_type
+                    )
+                    
+                    if pdf_detections:
+                        print(f"✅ Found {len(pdf_detections)} ad candidates on page {page.page_number}")
+                        
+                        # Transform coordinates
+                        doc = fitz.open(pdf_path)
+                        pdf_page = doc[page.page_number - 1]
+                        pdf_page_rect = pdf_page.rect
+                        doc.close()
+                        
+                        transformed_detections = PDFMetadataAdDetector.transform_pdf_to_image_coordinates(
+                            pdf_detections, pdf_page_rect, page.width_pixels, page.height_pixels
+                        )
+                        
+                        # Create AdBox records
+                        for detection in transformed_detections:
+                            try:
+                                # Calculate measurements using existing logic
+                                config = PUBLICATION_CONFIGS[publication.publication_type]
+                                calculator = MeasurementCalculator()
+                                
+                                page_total_pixels = page.width_pixels * page.height_pixels if page.width_pixels and page.height_pixels else 1
+                                column_inches = calculator.pixels_to_inches(
+                                    detection['height'] * detection['width'],
+                                    page_total_pixels,
+                                    config.get('total_inches_per_page', 258)
+                                )
+                                
+                                # Calculate width and height inches
+                                if page.width_pixels and page.height_pixels:
+                                    width_inches = (detection['width'] / page.width_pixels) * config.get('total_inches_per_page', 258) * (config.get('width_units', 12) / 12)
+                                    height_inches = (detection['height'] / page.height_pixels) * config.get('total_inches_per_page', 258)
+                                else:
+                                    width_inches = column_inches / 10
+                                    height_inches = column_inches / 10
+                                
+                                width_rounded = round(width_inches * 16) / 16
+                                height_rounded = round(height_inches * 16) / 16
+                                
+                                # Determine ad type
+                                ad_type = 'pdf_detected'
+                                if detection['type'] == 'image':
+                                    ad_type = 'pdf_image_ad'
+                                elif detection['type'] == 'text':
+                                    ad_type = 'pdf_text_ad'
+                                elif detection['type'] == 'border':
+                                    ad_type = 'pdf_border_ad'
+                                
+                                # Create AdBox
+                                ad_box = AdBox(
+                                    page_id=page.id,
+                                    x=detection['x'],
+                                    y=detection['y'],
+                                    width=detection['width'],
+                                    height=detection['height'],
+                                    width_inches_raw=width_inches,
+                                    height_inches_raw=height_inches,
+                                    width_inches_rounded=width_rounded,
+                                    height_inches_rounded=height_rounded,
+                                    column_inches=column_inches,
+                                    ad_type=ad_type,
+                                    is_ad=True,
+                                    confidence_score=detection['confidence'],
+                                    detected_automatically=True,
+                                    user_verified=False
+                                )
+                                
+                                db.session.add(ad_box)
+                                detections_count += 1
+                                
+                                print(f"📦 Created ad box: {ad_type} at ({detection['x']:.0f},{detection['y']:.0f}) "
+                                      f"size {detection['width']:.0f}x{detection['height']:.0f} "
+                                      f"confidence={detection['confidence']:.3f}")
+                                
+                            except Exception as box_error:
+                                print(f"⚠️  Error creating ad box: {box_error}")
+                                continue
+                    else:
+                        print(f"ℹ️  No ads found on page {page.page_number}")
+                    
+                    pages_processed += 1
+                    
+                except Exception as page_error:
+                    print(f"⚠️  Error processing page {page.page_number}: {page_error}")
+                    continue
+            
+            # Commit all changes
+            if detections_count > 0:
+                db.session.commit()
+                print(f"✅ Successfully saved {detections_count} ad detections to database")
+            
+            return {
+                'success': True,
+                'detections': detections_count,
+                'pages_processed': pages_processed,
+                'detection_method': 'PDF_metadata'
+            }
+            
+        except Exception as e:
+            print(f"❌ PDF detection engine error: {e}")
+            db.session.rollback()
+            return {'success': False, 'error': str(e)}
+
 
 # PDF Metadata-based Ad Detector
 class PDFMetadataAdDetector:

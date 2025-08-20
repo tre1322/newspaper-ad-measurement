@@ -6676,10 +6676,9 @@ def delete_box(box_id):
         
         page_id = ad_box.page_id
         
-        # Delete training data first (only use existing columns)
-        training_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
-        for record in training_records:
-            db.session.delete(record)
+        # Delete training data first (avoid selecting non-existent columns)
+        from sqlalchemy import text
+        db.session.execute(text('DELETE FROM training_data WHERE ad_box_id = :box_id'), {'box_id': box_id})
         
         # Delete the ad box
         db.session.delete(ad_box)

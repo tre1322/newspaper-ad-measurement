@@ -13,7 +13,9 @@
       "Bash(alembic:*)",
       "Bash(git commit:*)",
       "Bash(git push:*)",
-      "Bash(git restore:*)"
+      "Bash(git restore:*)",
+      "Bash(flask --version)",
+      "Bash(set FLASK_APP=app.py)"
     ],
     "deny": [],
     "defaultMode": "acceptEdits",

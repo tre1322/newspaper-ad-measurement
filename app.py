@@ -1153,9 +1153,9 @@ class PDFAdDetectionEngine:
                 try:
                     print(f"📄 Analyzing page {page.page_number} for PDF metadata ads")
                     
-                    # Get PDF detections
+                    # Get PDF detections with filename intelligence
                     pdf_detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
-                        pdf_path, page.page_number, publication.publication_type
+                        pdf_path, page.page_number, publication.publication_type, publication.original_filename
                     )
                     
                     if pdf_detections:
@@ -1270,14 +1270,64 @@ class PDFMetadataAdDetector:
     """
     
     @staticmethod
-    def detect_ads_from_pdf_metadata(pdf_path, page_number, publication_type='broadsheet'):
+    def extract_size_hints_from_filename(original_filename):
+        """
+        Extract size hints from filename to improve ad detection accuracy.
+        
+        Args:
+            original_filename (str): The original filename
+            
+        Returns:
+            dict: Size hint information including dimensions and validation flags
+        """
+        import re
+        
+        if not original_filename:
+            return {'has_size_hint': False}
+        
+        # Common ad size patterns (width x height in inches)
+        size_patterns = [
+            r'(\d+(?:\.\d+)?)x(\d+(?:\.\d+)?)',  # Basic pattern like "3x5", "2x4", "1.5x2.5"
+            r'(\d+(?:\.\d+)?)\s*x\s*(\d+(?:\.\d+)?)',  # With spaces like "3 x 5", "1.5 x 2.5"
+        ]
+        
+        filename_lower = original_filename.lower()
+        
+        for pattern in size_patterns:
+            matches = re.findall(pattern, filename_lower)
+            if matches:
+                match = matches[0]
+                if len(match) == 2:  # Both patterns return 2 groups
+                    width_str, height_str = match
+                    try:
+                        width_inches = float(width_str)
+                        height_inches = float(height_str)
+                        
+                        # Validate reasonable ad sizes (0.5 to 20 inches)
+                        if 0.5 <= width_inches <= 20 and 0.5 <= height_inches <= 20:
+                            return {
+                                'has_size_hint': True,
+                                'expected_width_inches': width_inches,
+                                'expected_height_inches': height_inches,
+                                'confidence_boost': 1.4,  # 40% confidence boost
+                                'tolerance': 0.3  # 30% size tolerance
+                            }
+                    except ValueError:
+                        continue
+        
+        return {'has_size_hint': False}
+
+    @staticmethod
+    def detect_ads_from_pdf_metadata(pdf_path, page_number, publication_type='broadsheet', original_filename=None):
         """
         Detect ads using PDF structural analysis focusing on bordered rectangles.
+        Enhanced with filename intelligence to improve accuracy.
         
         Args:
             pdf_path (str): Path to the PDF file
             page_number (int): Page number to analyze (1-based)
             publication_type (str): Type of publication for context
+            original_filename (str, optional): Original filename to extract size hints
             
         Returns:
             list: Detected ad regions as dicts with x, y, width, height, confidence
@@ -1353,8 +1403,61 @@ class PDFMetadataAdDetector:
             # Merge overlapping regions and filter by confidence
             filtered_ads = PDFMetadataAdDetector._merge_and_filter_detections(detected_ads)
             
-            # Reduced logging
-            # pass
+            # Apply filename intelligence to boost confidence for matching sizes
+            filename_hints = PDFMetadataAdDetector.extract_size_hints_from_filename(original_filename)
+            if filename_hints['has_size_hint'] and filtered_ads:
+                # Calculate pixels per inch for this page
+                # Assuming standard newspaper sizes - adjust based on publication_type
+                if publication_type == 'tabloid':
+                    standard_width_inches = 11  # Standard tabloid width
+                    page_width_pixels = page_rect.width
+                    pixels_per_inch = page_width_pixels / standard_width_inches
+                else:  # broadsheet
+                    standard_width_inches = 13.5  # Standard broadsheet width  
+                    page_width_pixels = page_rect.width
+                    pixels_per_inch = page_width_pixels / standard_width_inches
+                
+                expected_width_px = filename_hints['expected_width_inches'] * pixels_per_inch
+                expected_height_px = filename_hints['expected_height_inches'] * pixels_per_inch
+                tolerance = filename_hints['tolerance']
+                confidence_boost = filename_hints['confidence_boost']
+                
+                print(f"🔍 Filename hints: {filename_hints['expected_width_inches']}x{filename_hints['expected_height_inches']} inches")
+                print(f"   Expected size: {expected_width_px:.0f}x{expected_height_px:.0f} pixels (PPE: {pixels_per_inch:.1f})")
+                
+                enhanced_ads = []
+                boosted_count = 0
+                reduced_count = 0
+                
+                for detection in filtered_ads:
+                    original_confidence = detection.get('confidence', 0.5)
+                    
+                    # Calculate size differences
+                    width_diff = abs(detection['width'] - expected_width_px) / expected_width_px
+                    height_diff = abs(detection['height'] - expected_height_px) / expected_height_px
+                    
+                    # Check if detection matches expected size within tolerance
+                    if width_diff < tolerance and height_diff < tolerance:
+                        # Boost confidence for detections matching expected size
+                        detection['confidence'] = min(original_confidence * confidence_boost, 0.95)
+                        detection['filename_match'] = True
+                        boosted_count += 1
+                    else:
+                        # Slightly reduce confidence for detections that don't match
+                        # But don't eliminate them entirely as filename might be wrong
+                        if width_diff > 0.7 or height_diff > 0.7:  # Very different sizes
+                            detection['confidence'] = original_confidence * 0.85
+                            reduced_count += 1
+                        detection['filename_match'] = False
+                    
+                    enhanced_ads.append(detection)
+                
+                if boosted_count > 0:
+                    print(f"✅ Boosted confidence for {boosted_count} detections matching filename size")
+                if reduced_count > 0:
+                    print(f"⚠️  Reduced confidence for {reduced_count} detections not matching filename size")
+                
+                filtered_ads = enhanced_ads
             
             doc.close()
             return filtered_ads
@@ -4096,9 +4199,9 @@ class AdLearningEngine:
                 pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
                 print(f"Attempting PDF metadata detection on page {page.page_number}")
                 try:
-                    # Get PDF detections in PDF coordinate system
+                    # Get PDF detections in PDF coordinate system with filename intelligence
                     pdf_detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
-                        pdf_path, page.page_number, publication.publication_type
+                        pdf_path, page.page_number, publication.publication_type, publication.original_filename
                     )
                     
                     if pdf_detections:
@@ -6771,9 +6874,9 @@ def auto_detect_ads_with_learning(page_id):
         
         print(f"Starting enhanced automatic detection for page {page_id}")
         
-        # PRIORITY 1-3: Use enhanced PDFMetadataAdDetector with all improvements
+        # PRIORITY 1-3: Use enhanced PDFMetadataAdDetector with all improvements and filename intelligence
         detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
-            page.pdf_path, page.page_number, publication.publication_type
+            page.pdf_path, page.page_number, publication.publication_type, publication.original_filename
         )
         
         if not detections:

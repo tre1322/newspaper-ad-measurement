@@ -689,7 +689,7 @@ class TrainingData(db.Model):
     confidence_score = db.Column(db.Float)  # User confidence in this label
     extracted_date = db.Column(db.DateTime, default=datetime.utcnow)
     used_in_training = db.Column(db.Boolean, default=False)
-    # New fields for negative training (COMMENTED OUT - columns don't exist in PostgreSQL database)
+    # New fields for negative training (COMMENTED OUT - will be enabled after PostgreSQL migration)
     # region_type = db.Column(db.String(50))  # photo, text_block, decorative, etc.
     # pdf_path = db.Column(db.String(500))  # Path to original PDF
     # page_number = db.Column(db.Integer)  # Page number in PDF

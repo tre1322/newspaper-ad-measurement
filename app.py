@@ -1481,30 +1481,30 @@ class PDFMetadataAdDetector:
             width = draw_rect.width
             height = draw_rect.height
             
-            # REQUIREMENT D: Minimum size requirements
-            if width < 80 or height < 60:
+            # CRITICAL FIX 1: Updated minimum size requirements (80x50, not 80x60)
+            if width < 80 or height < 50:
                 return None
             
-            # REQUIREMENT E: Exclude rectangles larger than 90% of page width
-            if width > page_rect.width * 0.9:
+            # CRITICAL FIX 2: Updated maximum size requirements
+            # 70% of page width, 50% of page height (not 90% width)
+            if width > page_rect.width * 0.7 or height > page_rect.height * 0.5:
                 return None
             
             # Only process simple bordered rectangles (1-3 items) if has_border=True
-            # or simple drawings without borders
             items = drawing.get('items', [])
             items_count = len(items)
             
             if has_border:
-                # REQUIREMENT C: Only detect simple bordered rectangles (1-3 drawing items)
+                # Only detect simple bordered rectangles (1-3 drawing items)
                 if items_count > 3:
                     return None
                 
-                # Check if this looks like an editorial photo
-                if PDFMetadataAdDetector._is_likely_editorial_photo(draw_rect, page_rect):
-                    # REQUIREMENT F: Reduce confidence for likely photos
-                    confidence = 0.3
+                # CRITICAL FIX 3: Enhanced photo detection
+                if PDFMetadataAdDetector._is_enhanced_editorial_photo(draw_rect, page_rect):
+                    # Photos get very low confidence (0.1, not 0.3)
+                    confidence = 0.1
                 else:
-                    # REQUIREMENT A: High confidence for simple bordered rectangles
+                    # High confidence for legitimate bordered rectangles
                     confidence = 0.9
                     
                 return {
@@ -1519,9 +1519,9 @@ class PDFMetadataAdDetector:
                     'items_count': items_count
                 }
             else:
-                # Non-bordered elements - much lower priority and confidence
+                # Non-bordered elements - much lower priority
                 if items_count >= 4:
-                    # REQUIREMENT C: Ignore complex drawings (4+ items)
+                    # Ignore complex drawings (4+ items)
                     return None
                 
                 # Simple non-bordered drawings get very low confidence
@@ -1544,16 +1544,27 @@ class PDFMetadataAdDetector:
             return None
     
     @staticmethod
-    def _is_likely_editorial_photo(draw_rect, page_rect):
-        """Filter out editorial photos using size, aspect ratio, and position analysis"""
+    def _is_enhanced_editorial_photo(draw_rect, page_rect):
+        """Enhanced editorial photo detection with stricter criteria"""
         try:
             width = draw_rect.width
             height = draw_rect.height
             
-            # Check aspect ratios that are common for photos
+            # CRITICAL FIX: Photo size threshold - photos usually larger than 200x150
+            if width < 200 or height < 150:
+                return False  # Too small to be a typical photo
+            
+            # Check aspect ratios common for photos
             aspect_ratio = width / height if height > 0 else 0
             
-            # Common photo aspect ratios: 3:2 (1.5), 4:3 (1.33), 16:9 (1.78), 1:1 (1.0)
+            # CRITICAL FIX: Specific aspect ratio check for photos
+            # If ratio is 1.3-1.8 AND size > 200x150, likely a photo
+            if 1.3 <= aspect_ratio <= 1.8 and width > 200 and height > 150:
+                # Additional check for position in main content area
+                if PDFMetadataAdDetector._is_in_main_content_area(draw_rect, page_rect):
+                    return True  # Large photo in content area = editorial photo
+            
+            # Check other common photo ratios with size requirements
             photo_ratios = [1.5, 1.33, 1.78, 1.0]  # 3:2, 4:3, 16:9, square
             tolerance = 0.1
             
@@ -1563,56 +1574,245 @@ class PDFMetadataAdDetector:
                     is_photo_ratio = True
                     break
             
-            if not is_photo_ratio:
-                return False  # Not a typical photo aspect ratio
-            
-            # Check size - large rectangles with photo ratios are likely photos
-            area = width * height
-            large_photo_threshold = 300 * 200  # 60,000 pixels
-            
-            if area >= large_photo_threshold:
-                return True  # Large + photo aspect ratio = likely editorial photo
-            
-            # Check position - photos often appear in content areas (center regions)
-            x_center = draw_rect.x0 + width / 2
-            y_center = draw_rect.y0 + height / 2
-            
-            page_center_x = page_rect.width / 2
-            page_center_y = page_rect.height / 2
-            
-            # If it's in the central content area and has photo proportions
-            distance_from_center = abs(x_center - page_center_x) + abs(y_center - page_center_y)
-            center_threshold = (page_rect.width + page_rect.height) / 4  # Within central quarter
-            
-            if distance_from_center <= center_threshold and area >= 180 * 120:  # 21,600 pixels
-                return True  # Central position + decent size + photo ratio = likely photo
+            if is_photo_ratio:
+                # Large photos with typical ratios in content area are likely editorial
+                area = width * height
+                if area >= 200 * 150 and PDFMetadataAdDetector._is_in_main_content_area(draw_rect, page_rect):
+                    return True
             
             return False  # Probably an ad frame
             
         except Exception as e:
-            print(f"Error in photo detection: {e}")
+            print(f"Error in enhanced photo detection: {e}")
+            return False
+    
+    @staticmethod
+    def _is_in_main_content_area(draw_rect, page_rect):
+        """Check if rectangle is in main content area (center 60% of page)"""
+        try:
+            # Calculate center position of the rectangle
+            rect_center_x = draw_rect.x0 + draw_rect.width / 2
+            rect_center_y = draw_rect.y0 + draw_rect.height / 2
+            
+            # Define main content area as center 60% of page
+            content_left = page_rect.width * 0.2  # 20% margin from left
+            content_right = page_rect.width * 0.8  # 20% margin from right
+            content_top = page_rect.height * 0.2   # 20% margin from top
+            content_bottom = page_rect.height * 0.8 # 20% margin from bottom
+            
+            # Check if rectangle center is in main content area
+            return (content_left <= rect_center_x <= content_right and 
+                   content_top <= rect_center_y <= content_bottom)
+            
+        except Exception as e:
+            print(f"Error checking content area: {e}")
             return False
     
     @staticmethod
     def _merge_and_filter_detections(detections, min_confidence=0.8, overlap_threshold=0.3):
-        """Merge overlapping detections and filter by confidence"""
+        """Advanced merge and filter with fragmentation fixes and nested removal"""
         try:
-            # Filter by minimum confidence
+            # STEP 1: Filter by minimum confidence
             filtered = [d for d in detections if d['confidence'] >= min_confidence]
             
             if not filtered:
                 return []
             
-            # Sort by confidence (highest first)
-            filtered.sort(key=lambda x: x['confidence'], reverse=True)
+            # STEP 2: Remove very small text elements (smaller than 80x50)
+            size_filtered = []
+            for detection in filtered:
+                width = detection['width']
+                height = detection['height']
+                if width >= 80 and height >= 50:
+                    size_filtered.append(detection)
+                else:
+                    print(f"Removing small element: {width:.0f}x{height:.0f}")
             
-            # Merge overlapping detections
+            if not size_filtered:
+                return []
+            
+            # STEP 3: Remove nested rectangles (small ones inside larger ones)
+            non_nested = PDFMetadataAdDetector._remove_nested_rectangles(size_filtered)
+            
+            # STEP 4: Merge adjacent/fragmented detections within 20 pixels
+            merged = PDFMetadataAdDetector._merge_adjacent_detections(non_nested, merge_distance=20)
+            
+            # STEP 5: Final overlap-based merging
+            final_merged = PDFMetadataAdDetector._merge_overlapping_detections(merged, overlap_threshold)
+            
+            # STEP 6: Sort by confidence (highest first)
+            final_merged.sort(key=lambda x: x['confidence'], reverse=True)
+            
+            return final_merged
+            
+        except Exception as e:
+            print(f"Error in advanced merge and filter: {e}")
+            return detections  # Return original if merging fails
+    
+    @staticmethod
+    def _remove_nested_rectangles(detections):
+        """Remove small rectangles that are completely inside larger ones"""
+        try:
+            if len(detections) <= 1:
+                return detections
+            
+            # Sort by area (largest first)
+            sorted_detections = sorted(detections, key=lambda d: d['width'] * d['height'], reverse=True)
+            
+            non_nested = []
+            
+            for i, current in enumerate(sorted_detections):
+                current_rect = fitz.Rect(current['x'], current['y'],
+                                       current['x'] + current['width'],
+                                       current['y'] + current['height'])
+                
+                is_nested = False
+                
+                # Check if current rectangle is inside any larger rectangle we've already kept
+                for existing in non_nested:
+                    existing_rect = fitz.Rect(existing['x'], existing['y'],
+                                            existing['x'] + existing['width'],
+                                            existing['y'] + existing['height'])
+                    
+                    # Check if current is completely inside existing (with small tolerance)
+                    tolerance = 5  # pixels
+                    if (current_rect.x0 >= existing_rect.x0 - tolerance and
+                        current_rect.y0 >= existing_rect.y0 - tolerance and
+                        current_rect.x1 <= existing_rect.x1 + tolerance and
+                        current_rect.y1 <= existing_rect.y1 + tolerance):
+                        
+                        print(f"Removing nested rectangle: {current['width']:.0f}x{current['height']:.0f} inside {existing['width']:.0f}x{existing['height']:.0f}")
+                        is_nested = True
+                        break
+                
+                if not is_nested:
+                    non_nested.append(current)
+            
+            return non_nested
+            
+        except Exception as e:
+            print(f"Error removing nested rectangles: {e}")
+            return detections
+    
+    @staticmethod
+    def _merge_adjacent_detections(detections, merge_distance=20):
+        """Merge detections that are within merge_distance pixels of each other"""
+        try:
+            if len(detections) <= 1:
+                return detections
+            
+            merged = []
+            used_indices = set()
+            
+            for i, current in enumerate(detections):
+                if i in used_indices:
+                    continue
+                
+                current_rect = fitz.Rect(current['x'], current['y'],
+                                       current['x'] + current['width'],
+                                       current['y'] + current['height'])
+                
+                # Find all detections that should be merged with current
+                to_merge = [current]
+                used_indices.add(i)
+                
+                for j, candidate in enumerate(detections):
+                    if j <= i or j in used_indices:
+                        continue
+                    
+                    candidate_rect = fitz.Rect(candidate['x'], candidate['y'],
+                                             candidate['x'] + candidate['width'],
+                                             candidate['y'] + candidate['height'])
+                    
+                    # Check if rectangles are within merge_distance
+                    if PDFMetadataAdDetector._are_rectangles_adjacent(current_rect, candidate_rect, merge_distance):
+                        to_merge.append(candidate)
+                        used_indices.add(j)
+                        print(f"Merging adjacent rectangles: {current['width']:.0f}x{current['height']:.0f} + {candidate['width']:.0f}x{candidate['height']:.0f}")
+                
+                # Create merged detection
+                if len(to_merge) == 1:
+                    merged.append(current)
+                else:
+                    merged_detection = PDFMetadataAdDetector._create_merged_detection(to_merge)
+                    merged.append(merged_detection)
+            
+            return merged
+            
+        except Exception as e:
+            print(f"Error merging adjacent detections: {e}")
+            return detections
+    
+    @staticmethod
+    def _are_rectangles_adjacent(rect1, rect2, max_distance):
+        """Check if two rectangles are within max_distance pixels of each other"""
+        try:
+            # Calculate minimum distance between rectangles
+            # If they overlap, distance is 0
+            if not (rect1 & rect2).is_empty:
+                return True
+            
+            # Calculate horizontal and vertical distances
+            horizontal_distance = max(0, max(rect1.x0 - rect2.x1, rect2.x0 - rect1.x1))
+            vertical_distance = max(0, max(rect1.y0 - rect2.y1, rect2.y0 - rect1.y1))
+            
+            # Check if within max_distance
+            return horizontal_distance <= max_distance and vertical_distance <= max_distance
+            
+        except Exception as e:
+            print(f"Error checking rectangle adjacency: {e}")
+            return False
+    
+    @staticmethod
+    def _create_merged_detection(detections_to_merge):
+        """Create a single detection from multiple adjacent detections"""
+        try:
+            if not detections_to_merge:
+                return None
+            
+            # Find bounding rectangle of all detections
+            min_x = min(d['x'] for d in detections_to_merge)
+            min_y = min(d['y'] for d in detections_to_merge)
+            max_x = max(d['x'] + d['width'] for d in detections_to_merge)
+            max_y = max(d['y'] + d['height'] for d in detections_to_merge)
+            
+            # Use highest confidence
+            max_confidence = max(d['confidence'] for d in detections_to_merge)
+            
+            # Use properties from highest confidence detection
+            best_detection = max(detections_to_merge, key=lambda d: d['confidence'])
+            
+            merged = {
+                'x': min_x,
+                'y': min_y,
+                'width': max_x - min_x,
+                'height': max_y - min_y,
+                'confidence': max_confidence,
+                'type': best_detection['type'],
+                'element_id': f"merged_{best_detection['element_id']}",
+                'border': best_detection.get('border', False),
+                'items_count': sum(d.get('items_count', 0) for d in detections_to_merge)
+            }
+            
+            return merged
+            
+        except Exception as e:
+            print(f"Error creating merged detection: {e}")
+            return detections_to_merge[0] if detections_to_merge else None
+    
+    @staticmethod
+    def _merge_overlapping_detections(detections, overlap_threshold=0.3):
+        """Traditional overlap-based merging as final step"""
+        try:
+            if len(detections) <= 1:
+                return detections
+            
             merged = []
             
-            for current in filtered:
+            for current in detections:
                 should_merge = False
-                current_rect = fitz.Rect(current['x'], current['y'], 
-                                       current['x'] + current['width'], 
+                current_rect = fitz.Rect(current['x'], current['y'],
+                                       current['x'] + current['width'],
                                        current['y'] + current['height'])
                 
                 for i, existing in enumerate(merged):
@@ -1632,7 +1832,7 @@ class PDFMetadataAdDetector:
                     overlap_ratio = overlap_area / min(current_area, existing_area)
                     
                     if overlap_ratio >= overlap_threshold:
-                        # Merge with existing detection (keep higher confidence one's properties)
+                        # Merge with existing detection (keep higher confidence)
                         if current['confidence'] > existing['confidence']:
                             merged[i] = current
                         should_merge = True
@@ -1644,8 +1844,8 @@ class PDFMetadataAdDetector:
             return merged
             
         except Exception as e:
-            print(f"Error merging detections: {e}")
-            return detections  # Return original if merging fails
+            print(f"Error in overlap-based merging: {e}")
+            return detections
     
     @staticmethod
     def transform_pdf_to_image_coordinates(pdf_detections, pdf_page_rect, image_width, image_height):

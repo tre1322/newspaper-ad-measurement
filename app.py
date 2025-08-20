@@ -689,15 +689,15 @@ class TrainingData(db.Model):
     confidence_score = db.Column(db.Float)  # User confidence in this label
     extracted_date = db.Column(db.DateTime, default=datetime.utcnow)
     used_in_training = db.Column(db.Boolean, default=False)
-    # New fields for negative training
-    region_type = db.Column(db.String(50))  # photo, text_block, decorative, etc.
-    pdf_path = db.Column(db.String(500))  # Path to original PDF
-    page_number = db.Column(db.Integer)  # Page number in PDF
-    x = db.Column(db.Float)  # Bounding box coordinates
-    y = db.Column(db.Float)
-    width = db.Column(db.Float)
-    height = db.Column(db.Float)
-    training_source = db.Column(db.String(50), default='user_correction')  # user_correction, automatic, manual
+    # New fields for negative training (COMMENTED OUT - columns don't exist in PostgreSQL database)
+    # region_type = db.Column(db.String(50))  # photo, text_block, decorative, etc.
+    # pdf_path = db.Column(db.String(500))  # Path to original PDF
+    # page_number = db.Column(db.Integer)  # Page number in PDF
+    # x = db.Column(db.Float)  # Bounding box coordinates
+    # y = db.Column(db.Float)
+    # width = db.Column(db.Float)
+    # height = db.Column(db.Float)
+    # training_source = db.Column(db.String(50), default='user_correction')  # user_correction, automatic, manual
 
 class NegativeTrainingCollector:
     """

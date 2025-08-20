@@ -727,12 +727,7 @@ class NegativeTrainingCollector:
                 publication_type='newspaper',
                 features=json.dumps(features),
                 label='false_positive',
-                confidence_score=1.0,  # User deletion = high confidence it's not an ad
-                region_type=region_type,
-                pdf_path=pdf_path,
-                page_number=page_number,
-                x=x, y=y, width=width, height=height,
-                training_source='user_correction'
+                confidence_score=1.0  # User deletion = high confidence it's not an ad
             )
             
             db.session.add(training_data)
@@ -758,14 +753,8 @@ class NegativeTrainingCollector:
             training_source (str): Source of training data
         """
         try:
-            if not ad_box.pdf_path or not ad_box.page_number:
-                return
-            
-            # Extract PDF metadata features
-            features = NegativeTrainingCollector._extract_pdf_features(
-                ad_box.pdf_path, ad_box.page_number, 
-                ad_box.x, ad_box.y, ad_box.width, ad_box.height
-            )
+            # For now, skip PDF feature extraction until proper migration is in place
+            features = {}
             
             # Save positive training example
             training_data = TrainingData(
@@ -773,12 +762,7 @@ class NegativeTrainingCollector:
                 publication_type=ad_box.publication.type if ad_box.publication else 'newspaper',
                 features=json.dumps(features),
                 label=ad_box.ad_type,
-                confidence_score=1.0,
-                region_type='advertisement',
-                pdf_path=ad_box.pdf_path,
-                page_number=ad_box.page_number,
-                x=ad_box.x, y=ad_box.y, width=ad_box.width, height=ad_box.height,
-                training_source=training_source
+                confidence_score=1.0
             )
             
             db.session.add(training_data)
@@ -6683,65 +6667,21 @@ def update_box(box_id):
 def delete_box(box_id):
     """Delete an ad box"""
     try:
-        # Ensure we start with a clean transaction state
-        db.session.rollback()  # Clear any failed transaction state
-        ad_box = AdBox.query.get_or_404(box_id)
+        # Start fresh transaction
+        db.session.rollback()  # Clear any existing failed transaction
+        
+        ad_box = db.session.get(AdBox, box_id)
+        if not ad_box:
+            return jsonify({'success': False, 'error': 'Ad box not found'})
+        
         page_id = ad_box.page_id
         
-        # PRIORITY 2: Enhanced negative training collection
-        # Collect negative training example before deletion
-        try:
-            page = Page.query.get(ad_box.page_id)
-            if page:
-                # Get PDF path from publication filename (temporary fix)
-                publication = Publication.query.get(page.publication_id)
-                if publication:
-                    pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
-                    if os.path.exists(pdf_path):
-                        # Determine region type based on ad characteristics
-                        region_type = 'unknown'
-                        if ad_box.ad_type:
-                            region_type = 'false_' + ad_box.ad_type
-                        elif ad_box.width >= 200 and ad_box.height >= 150:
-                            aspect_ratio = ad_box.width / ad_box.height
-                            if 1.3 <= aspect_ratio <= 1.8:
-                                region_type = 'photo'
-                            else:
-                                region_type = 'text_block'
-                        else:
-                            region_type = 'decorative'
-                        
-                        # Collect comprehensive negative training data (but skip DB save for now)
-                        print(f"Would collect negative training data: {region_type} at {ad_box.x:.0f},{ad_box.y:.0f} {ad_box.width:.0f}x{ad_box.height:.0f}")
-                
-        except Exception as e:
-            # Reduced logging to prevent rate limit
-            pass
+        # Delete training data first (only use existing columns)
+        training_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
+        for record in training_records:
+            db.session.delete(record)
         
-        # Delete existing training data records (temporarily disabled for migration)
-        try:
-            training_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
-            for training_record in training_records:
-                db.session.delete(training_record)
-            if training_records:
-                pass  # Reduced logging
-        except Exception as e:
-            # Skip training data deletion if columns don't exist yet
-            pass
-        
-        # Clean up any remaining training data records
-        try:
-            remaining_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
-            for record in remaining_records:
-                db.session.delete(record)
-        except Exception as cleanup_error:
-            # Skip cleanup if columns don't exist
-            pass
-        
-        # Execute deletion of training data first
-        db.session.flush()  # Force execution of training data deletions
-        
-        # Now safely delete the ad_box
+        # Delete the ad box
         db.session.delete(ad_box)
         db.session.commit()
         
@@ -6749,26 +6689,14 @@ def delete_box(box_id):
         update_totals(page_id)
         
         return jsonify({'success': True})
+        
     except Exception as e:
-        # Rollback and close the session to ensure clean state
-        try:
-            db.session.rollback()
-        except Exception:
-            # If rollback fails, remove and recreate the session
-            db.session.remove()
-        
+        db.session.rollback()
         print(f"Error deleting ad box {box_id}: {e}")
-        import traceback
-        traceback.print_exc()
-        
-        # Return a more specific error message
-        error_msg = str(e)
-        if "InFailedSqlTransaction" in error_msg:
-            error_msg = "Database transaction error. Please refresh the page and try again."
-        elif "does not exist" in error_msg.lower():
-            error_msg = "Ad box not found or already deleted."
-        
-        return jsonify({'success': False, 'error': error_msg}), 500
+        return jsonify({
+            'success': False, 
+            'error': 'Database transaction error. Please refresh the page and try again.'
+        })
 
 @app.route('/api/db_health', methods=['GET'])
 def db_health_check():
@@ -6871,8 +6799,7 @@ def add_box(page_id):
                 if features:
                     # Store legacy features if needed
                     existing = TrainingData.query.filter(
-                        TrainingData.ad_box_id == ad_box.id,
-                        TrainingData.training_source == 'legacy'
+                        TrainingData.ad_box_id == ad_box.id
                     ).first()
                     if not existing:
                         training_data = TrainingData(
@@ -6880,8 +6807,7 @@ def add_box(page_id):
                             publication_type=publication.publication_type,
                             features=json.dumps(features),
                             label=ad_box.ad_type,
-                            confidence_score=1.0,
-                            training_source='legacy'
+                            confidence_score=1.0
                         )
                         db.session.add(training_data)
                         
@@ -7055,14 +6981,16 @@ def auto_detect_ads_with_learning(page_id):
         page = Page.query.get_or_404(page_id)
         publication = Publication.query.get(page.publication_id)
         
-        if not page.pdf_path or not os.path.exists(page.pdf_path):
+        # Construct PDF path from publication filename
+        pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
+        if not os.path.exists(pdf_path):
             return jsonify({'success': False, 'error': 'PDF file not found'})
         
         print(f"Starting enhanced automatic detection for page {page_id}")
         
         # PRIORITY 1-3: Use enhanced PDFMetadataAdDetector with all improvements and filename intelligence
         detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
-            page.pdf_path, page.page_number, publication.publication_type, publication.original_filename
+            pdf_path, page.page_number, publication.publication_type, publication.original_filename
         )
         
         if not detections:
@@ -7197,9 +7125,7 @@ def confirm_auto_detection(page_id):
                 width=detection['width'],
                 height=detection['height'],
                 ad_type=detection.get('ad_type', 'open_display'),
-                column_inches=0,  # Will be calculated
-                pdf_path=page.pdf_path,
-                page_number=page.page_number
+                column_inches=0  # Will be calculated
             )
             
             db.session.add(ad_box)

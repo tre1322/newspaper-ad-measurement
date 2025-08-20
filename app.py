@@ -501,10 +501,22 @@ def process_publication_sync(pub_id):
             print(f"Basic processing completed for publication {pub_id}")
             
         except Exception as e:
+            # CRITICAL: Always rollback on database errors
+            try:
+                db.session.rollback()
+            except Exception:
+                db.session.remove()
+            
             print(f"Error in synchronous processing: {e}")
-            publication.set_processing_status('failed')
-            publication.set_processing_error(str(e))
-            db.session.commit()
+            import traceback
+            traceback.print_exc()
+            
+            try:
+                publication.set_processing_status('failed')
+                publication.set_processing_error(str(e))
+                db.session.commit()
+            except Exception as commit_error:
+                print(f"Failed to update error status: {commit_error}")
 
 def generate_page_image_if_needed(publication, page_number):
     """Generate page image on-demand if it doesn't exist"""
@@ -5913,11 +5925,23 @@ def upload():
                 return redirect(url_for('processing_status', pub_id=publication.id))
                 
             except Exception as e:
+                # CRITICAL: Always rollback on database errors
+                try:
+                    db.session.rollback()
+                except Exception:
+                    db.session.remove()
+                
                 print(f"💥 UPLOAD ERROR: {str(e)}")
                 import traceback
                 print(f"📋 Error traceback:")
                 traceback.print_exc()
-                flash(f'Error uploading file: {str(e)}', 'error')
+                
+                # Return user-friendly error message
+                error_msg = str(e)
+                if "InFailedSqlTransaction" in error_msg:
+                    error_msg = "Database transaction error. Please try uploading again."
+                
+                flash(f'Error uploading file: {error_msg}', 'error')
                 return redirect(request.url)
     
     return render_template('upload.html', pub_types=PUBLICATION_CONFIGS)
@@ -6533,10 +6557,12 @@ def download_csv_report(pub_id):
 @app.route('/api/update_box/<int:box_id>', methods=['POST'])
 def update_box(box_id):
     """Update box coordinates and measurements via API"""
-    ad_box = AdBox.query.get_or_404(box_id)
-    data = request.json
-    
     try:
+        # Clear any failed transaction state at start
+        db.session.rollback()
+        
+        ad_box = AdBox.query.get_or_404(box_id)
+        data = request.json
         # Update coordinates
         ad_box.x = data['x']
         ad_box.y = data['y'] 
@@ -6580,8 +6606,6 @@ def update_box(box_id):
         ad_box.column_inches = width_inches_raw * height_inches_raw
         ad_box.user_verified = True
         
-        db.session.commit()
-        
         # Automatically extract features for ML training when user modifies ad
         try:
             image_filename = f"{publication.filename}_page_{page.page_number}.png"
@@ -6612,9 +6636,11 @@ def update_box(box_id):
                         db.session.add(training_data)
                         print(f"Extracted ML features for updated ad box {ad_box.id}")
                     
-                    db.session.commit()
         except Exception as e:
             print(f"Warning: Could not extract features for training: {e}")
+        
+        # Commit all changes together
+        db.session.commit()
         
         # Recalculate page and publication totals
         update_totals(ad_box.page_id)
@@ -6634,7 +6660,24 @@ def update_box(box_id):
         })
         
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        # CRITICAL: Always rollback on database errors
+        try:
+            db.session.rollback()
+        except Exception:
+            db.session.remove()
+        
+        print(f"Error updating ad box: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Return user-friendly error message
+        error_msg = str(e)
+        if "InFailedSqlTransaction" in error_msg:
+            error_msg = "Database transaction error. Please refresh the page and try again."
+        elif "does not exist" in error_msg.lower():
+            error_msg = "Ad box not found or already deleted."
+        
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 @app.route('/api/delete_box/<int:box_id>', methods=['DELETE'])
 def delete_box(box_id):
@@ -6761,12 +6804,14 @@ def db_health_check():
 @app.route('/api/add_box/<int:page_id>', methods=['POST'])
 def add_box(page_id):
     """Add a new ad box"""
-    page = Page.query.get_or_404(page_id)
-    publication = Publication.query.get(page.publication_id)
-    config = PUBLICATION_CONFIGS[publication.publication_type]
-    data = request.json
-    
     try:
+        # Clear any failed transaction state at start
+        db.session.rollback()
+        
+        page = Page.query.get_or_404(page_id)
+        publication = Publication.query.get(page.publication_id)
+        config = PUBLICATION_CONFIGS[publication.publication_type]
+        data = request.json
         # Get screen calibration
         device_fingerprint = f"{request.headers.get('User-Agent', '')[:50]}"
         screen_calibration = CalibratedMeasurementCalculator.get_screen_calibration(device_fingerprint)
@@ -6808,7 +6853,7 @@ def add_box(page_id):
         )
         
         db.session.add(ad_box)
-        db.session.commit()
+        db.session.flush()  # Get the ad_box.id without committing
         
         # PRIORITY 4: Collect positive training data from manually created ad
         try:
@@ -6839,10 +6884,12 @@ def add_box(page_id):
                             training_source='legacy'
                         )
                         db.session.add(training_data)
-                        db.session.commit()
                         
         except Exception as e:
             print(f"Warning: Could not collect training data: {e}")
+        
+        # Commit all changes together
+        db.session.commit()
         
         # Recalculate totals
         update_totals(page_id)
@@ -6858,7 +6905,24 @@ def add_box(page_id):
         })
         
     except Exception as e:
-        return jsonify({'success': False, 'error': str(e)})
+        # CRITICAL: Always rollback on database errors
+        try:
+            db.session.rollback()
+        except Exception:
+            db.session.remove()
+        
+        print(f"Error adding ad box: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        # Return user-friendly error message
+        error_msg = str(e)
+        if "InFailedSqlTransaction" in error_msg:
+            error_msg = "Database transaction error. Please refresh the page and try again."
+        elif "does not exist" in error_msg.lower():
+            error_msg = "Page not found or invalid data."
+        
+        return jsonify({'success': False, 'error': error_msg}), 500
 
 @app.route('/api/intelligent_detect/<int:page_id>', methods=['POST'])
 def intelligent_detect_ad(page_id):
@@ -7880,6 +7944,72 @@ def check_database_connection():
     except Exception as e:
         print(f"Database connection ERROR: {e}")
         return False
+
+def safe_db_operation(operation_func, rollback_on_error=True):
+    """
+    Safely execute database operations with proper error handling
+    
+    Args:
+        operation_func: Function that performs database operations
+        rollback_on_error: Whether to rollback on error (default: True)
+    
+    Returns:
+        tuple: (success, result_or_error)
+    """
+    try:
+        # Clear any failed transaction state
+        db.session.rollback()
+        
+        # Execute the operation
+        result = operation_func()
+        
+        # Commit if successful
+        db.session.commit()
+        return True, result
+    
+    except Exception as e:
+        # Rollback on error
+        if rollback_on_error:
+            try:
+                db.session.rollback()
+            except Exception:
+                db.session.remove()
+        
+        print(f"Database operation failed: {e}")
+        import traceback
+        traceback.print_exc()
+        
+        return False, str(e)
+
+# GLOBAL DATABASE ERROR HANDLER
+@app.errorhandler(Exception)
+def handle_database_errors(error):
+    """Global handler for database transaction errors"""
+    error_str = str(error)
+    
+    # Handle database transaction errors specifically
+    if "InFailedSqlTransaction" in error_str or "psycopg2.errors.InFailedSqlTransaction" in error_str:
+        try:
+            db.session.rollback()
+        except Exception:
+            db.session.remove()
+        
+        print(f"Global database transaction error caught: {error}")
+        import traceback
+        traceback.print_exc()
+        
+        # Return appropriate response based on request type
+        if request.content_type == 'application/json' or request.is_json:
+            return jsonify({
+                'success': False, 
+                'error': 'Database transaction error. Please refresh the page and try again.'
+            }), 500
+        else:
+            flash('Database error occurred. Please refresh the page and try again.', 'error')
+            return redirect(request.url if request.method == 'GET' else url_for('index'))
+    
+    # Re-raise non-database errors
+    raise error
 
 if __name__ == '__main__':
     print("Starting Newspaper Ad Measurement System...")

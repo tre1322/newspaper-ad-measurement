@@ -1318,6 +1318,78 @@ class PDFMetadataAdDetector:
         return {'has_size_hint': False}
 
     @staticmethod
+    def matches_standard_ad_size(width_px, height_px, pixels_per_inch, filename_hints=None):
+        """
+        Check if dimensions match standard newspaper ad sizes.
+        
+        Args:
+            width_px (float): Width in pixels
+            height_px (float): Height in pixels  
+            pixels_per_inch (float): Pixel density for conversion
+            filename_hints (dict, optional): Size hints from filename for strict matching
+            
+        Returns:
+            tuple: (is_match, size_name, confidence_multiplier)
+        """
+        # Standard newspaper ad sizes (width, height) in inches
+        standard_sizes = [
+            (1, 2), (2, 1),    # Small classifieds
+            (2, 3), (3, 2),    # Small display ads  
+            (2, 4), (4, 2),    # Medium ads
+            (3, 5), (5, 3),    # Common display ads
+            (4, 6), (6, 4),    # Large display ads
+            (6, 8), (8, 6)     # Premium display ads
+        ]
+        
+        # If filename has size hints, be very strict and only look for that specific size
+        if filename_hints and filename_hints.get('has_size_hint'):
+            target_w_inch = filename_hints['expected_width_inches']
+            target_h_inch = filename_hints['expected_height_inches']
+            
+            # Check both orientations for the filename hint
+            target_sizes = [(target_w_inch, target_h_inch), (target_h_inch, target_w_inch)]
+            
+            for w_inch, h_inch in target_sizes:
+                expected_w = w_inch * pixels_per_inch
+                expected_h = h_inch * pixels_per_inch
+                
+                # Very strict matching for filename hints (15% tolerance)
+                width_diff = abs(width_px - expected_w) / expected_w
+                height_diff = abs(height_px - expected_h) / expected_h
+                
+                if width_diff < 0.15 and height_diff < 0.15:
+                    return True, f"{w_inch}x{h_inch}", 1.5  # High confidence boost
+            
+            # If filename hint doesn't match, be very restrictive
+            return False, None, 0.3
+        
+        # General standard size matching (20% tolerance)
+        best_match = None
+        best_confidence = 0.8  # Base confidence for standard sizes
+        
+        for w_inch, h_inch in standard_sizes:
+            expected_w = w_inch * pixels_per_inch
+            expected_h = h_inch * pixels_per_inch
+            
+            # Check with 20% tolerance
+            width_diff = abs(width_px - expected_w) / expected_w
+            height_diff = abs(height_px - expected_h) / expected_h
+            
+            if width_diff < 0.2 and height_diff < 0.2:
+                # Calculate confidence based on how close the match is
+                avg_diff = (width_diff + height_diff) / 2
+                confidence = 1.0 - (avg_diff * 2)  # Closer match = higher confidence
+                
+                if confidence > best_confidence:
+                    best_match = f"{w_inch}x{h_inch}"
+                    best_confidence = confidence
+        
+        if best_match:
+            return True, best_match, best_confidence
+        
+        return False, None, 0.0
+
+    @staticmethod
     def detect_ads_from_pdf_metadata(pdf_path, page_number, publication_type='broadsheet', original_filename=None):
         """
         Detect ads using PDF structural analysis focusing on bordered rectangles.
@@ -1403,61 +1475,62 @@ class PDFMetadataAdDetector:
             # Merge overlapping regions and filter by confidence
             filtered_ads = PDFMetadataAdDetector._merge_and_filter_detections(detected_ads)
             
-            # Apply filename intelligence to boost confidence for matching sizes
+            # Apply size-restricted filtering: Only detect standard newspaper ad sizes
             filename_hints = PDFMetadataAdDetector.extract_size_hints_from_filename(original_filename)
-            if filename_hints['has_size_hint'] and filtered_ads:
-                # Calculate pixels per inch for this page
-                # Assuming standard newspaper sizes - adjust based on publication_type
-                if publication_type == 'tabloid':
-                    standard_width_inches = 11  # Standard tabloid width
-                    page_width_pixels = page_rect.width
-                    pixels_per_inch = page_width_pixels / standard_width_inches
-                else:  # broadsheet
-                    standard_width_inches = 13.5  # Standard broadsheet width  
-                    page_width_pixels = page_rect.width
-                    pixels_per_inch = page_width_pixels / standard_width_inches
+            
+            # Calculate pixels per inch for this page
+            if publication_type == 'tabloid':
+                standard_width_inches = 11  # Standard tabloid width
+                page_width_pixels = page_rect.width
+                pixels_per_inch = page_width_pixels / standard_width_inches
+            else:  # broadsheet
+                standard_width_inches = 13.5  # Standard broadsheet width  
+                page_width_pixels = page_rect.width
+                pixels_per_inch = page_width_pixels / standard_width_inches
+            
+            if filename_hints['has_size_hint']:
+                print(f"🎯 Filename hints: {filename_hints['expected_width_inches']}x{filename_hints['expected_height_inches']} inches")
+                print(f"   Target size: {filename_hints['expected_width_inches'] * pixels_per_inch:.0f}x{filename_hints['expected_height_inches'] * pixels_per_inch:.0f} pixels (PPI: {pixels_per_inch:.1f})")
+            else:
+                print(f"📐 Size-restricted mode: Only detecting standard newspaper ad sizes (PPI: {pixels_per_inch:.1f})")
+            
+            # Apply size-restricted filtering to all detections
+            size_filtered_ads = []
+            matched_count = 0
+            rejected_count = 0
+            
+            for detection in filtered_ads:
+                width_px = detection['width']
+                height_px = detection['height']
+                original_confidence = detection.get('confidence', 0.5)
                 
-                expected_width_px = filename_hints['expected_width_inches'] * pixels_per_inch
-                expected_height_px = filename_hints['expected_height_inches'] * pixels_per_inch
-                tolerance = filename_hints['tolerance']
-                confidence_boost = filename_hints['confidence_boost']
+                # Check if detection matches any standard ad size
+                is_standard_size, size_name, confidence_multiplier = PDFMetadataAdDetector.matches_standard_ad_size(
+                    width_px, height_px, pixels_per_inch, filename_hints
+                )
                 
-                print(f"🔍 Filename hints: {filename_hints['expected_width_inches']}x{filename_hints['expected_height_inches']} inches")
-                print(f"   Expected size: {expected_width_px:.0f}x{expected_height_px:.0f} pixels (PPE: {pixels_per_inch:.1f})")
-                
-                enhanced_ads = []
-                boosted_count = 0
-                reduced_count = 0
-                
-                for detection in filtered_ads:
-                    original_confidence = detection.get('confidence', 0.5)
+                if is_standard_size:
+                    # Apply confidence adjustment based on how well it matches standard sizes
+                    new_confidence = min(original_confidence * confidence_multiplier, 0.95)
                     
-                    # Calculate size differences
-                    width_diff = abs(detection['width'] - expected_width_px) / expected_width_px
-                    height_diff = abs(detection['height'] - expected_height_px) / expected_height_px
+                    detection['confidence'] = new_confidence
+                    detection['standard_size'] = size_name
+                    detection['size_match'] = True
                     
-                    # Check if detection matches expected size within tolerance
-                    if width_diff < tolerance and height_diff < tolerance:
-                        # Boost confidence for detections matching expected size
-                        detection['confidence'] = min(original_confidence * confidence_boost, 0.95)
-                        detection['filename_match'] = True
-                        boosted_count += 1
+                    size_filtered_ads.append(detection)
+                    matched_count += 1
+                    
+                    if filename_hints.get('has_size_hint') and confidence_multiplier > 1.0:
+                        print(f"🎯 Perfect match: {size_name} inch ad (confidence: {original_confidence:.2f} -> {new_confidence:.2f})")
                     else:
-                        # Slightly reduce confidence for detections that don't match
-                        # But don't eliminate them entirely as filename might be wrong
-                        if width_diff > 0.7 or height_diff > 0.7:  # Very different sizes
-                            detection['confidence'] = original_confidence * 0.85
-                            reduced_count += 1
-                        detection['filename_match'] = False
-                    
-                    enhanced_ads.append(detection)
-                
-                if boosted_count > 0:
-                    print(f"✅ Boosted confidence for {boosted_count} detections matching filename size")
-                if reduced_count > 0:
-                    print(f"⚠️  Reduced confidence for {reduced_count} detections not matching filename size")
-                
-                filtered_ads = enhanced_ads
+                        print(f"✅ Standard size: {size_name} inch ad (confidence: {original_confidence:.2f} -> {new_confidence:.2f})")
+                else:
+                    # Reject detections that don't match standard ad sizes
+                    rejected_count += 1
+                    print(f"❌ Rejected non-standard size: {width_px:.0f}x{height_px:.0f}px ({width_px/pixels_per_inch:.1f}x{height_px/pixels_per_inch:.1f}in)")
+            
+            print(f"📊 Size filtering results: {matched_count} standard ads detected, {rejected_count} non-standard rejected")
+            filtered_ads = size_filtered_ads
             
             doc.close()
             return filtered_ads

@@ -6640,6 +6640,8 @@ def update_box(box_id):
 def delete_box(box_id):
     """Delete an ad box"""
     try:
+        # Ensure we start with a clean transaction state
+        db.session.rollback()  # Clear any failed transaction state
         ad_box = AdBox.query.get_or_404(box_id)
         page_id = ad_box.page_id
         
@@ -6705,9 +6707,56 @@ def delete_box(box_id):
         
         return jsonify({'success': True})
     except Exception as e:
-        db.session.rollback()
+        # Rollback and close the session to ensure clean state
+        try:
+            db.session.rollback()
+        except Exception:
+            # If rollback fails, remove and recreate the session
+            db.session.remove()
+        
         print(f"Error deleting ad box {box_id}: {e}")
-        return jsonify({'success': False, 'error': str(e)}), 500
+        import traceback
+        traceback.print_exc()
+        
+        # Return a more specific error message
+        error_msg = str(e)
+        if "InFailedSqlTransaction" in error_msg:
+            error_msg = "Database transaction error. Please refresh the page and try again."
+        elif "does not exist" in error_msg.lower():
+            error_msg = "Ad box not found or already deleted."
+        
+        return jsonify({'success': False, 'error': error_msg}), 500
+
+@app.route('/api/db_health', methods=['GET'])
+def db_health_check():
+    """Check database connection and transaction state"""
+    try:
+        # Clear any failed transaction state
+        db.session.rollback()
+        
+        # Test basic query
+        count = db.session.query(Publication).count()
+        
+        # Test transaction
+        db.session.execute(db.text("SELECT 1"))
+        db.session.commit()
+        
+        return jsonify({
+            'success': True, 
+            'status': 'healthy',
+            'publication_count': count
+        })
+    except Exception as e:
+        try:
+            db.session.rollback()
+        except Exception:
+            db.session.remove()
+        
+        return jsonify({
+            'success': False, 
+            'status': 'unhealthy',
+            'error': str(e)
+        }), 500
 
 @app.route('/api/add_box/<int:page_id>', methods=['POST'])
 def add_box(page_id):

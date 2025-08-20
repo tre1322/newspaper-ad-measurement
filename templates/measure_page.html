@@ -1190,6 +1190,12 @@ function initializeCopyButtonState() {
 }
 
 function deleteFullPageAd(boxId) {
+    attemptDeleteFullPageAd(boxId, 1);
+}
+
+function attemptDeleteFullPageAd(boxId, attempt) {
+    const maxAttempts = 2;
+    
     fetch(`/api/delete_box/${boxId}`, {
         method: 'DELETE'
     })
@@ -1212,12 +1218,24 @@ function deleteFullPageAd(boxId) {
             
             showSuccessMessage('Full-page ad deleted successfully');
         } else {
-            showErrorMessage('Error deleting full-page ad: ' + data.error);
+            if (data.error && data.error.includes('Database transaction error') && attempt < maxAttempts) {
+                setTimeout(() => attemptDeleteFullPageAd(boxId, attempt + 1), 1000);
+            } else {
+                let errorMsg = data.error || 'Unknown error occurred';
+                if (errorMsg.includes('Database transaction error')) {
+                    errorMsg += ' Please refresh the page if this persists.';
+                }
+                showErrorMessage('Error deleting full-page ad: ' + errorMsg);
+            }
         }
     })
     .catch(error => {
         console.error('Error deleting full-page ad:', error);
-        showErrorMessage('Network error occurred');
+        if (attempt < maxAttempts) {
+            setTimeout(() => attemptDeleteFullPageAd(boxId, attempt + 1), 1000);
+        } else {
+            showErrorMessage('Network error occurred. Please check your connection and try again.');
+        }
     });
 }
 
@@ -1837,6 +1855,12 @@ function createSpecialEditionAd(x, y, adType, inches) {
 }
 
 function deleteSpecialEditionAd(boxId) {
+    attemptDeleteSpecialEditionAd(boxId, 1);
+}
+
+function attemptDeleteSpecialEditionAd(boxId, attempt) {
+    const maxAttempts = 2;
+    
     fetch(`/api/delete_box/${boxId}`, {
         method: 'DELETE'
     })
@@ -1857,12 +1881,24 @@ function deleteSpecialEditionAd(boxId) {
             
             updatePageTotal();
         } else {
-            alert('Error deleting ad: ' + data.error);
+            if (data.error && data.error.includes('Database transaction error') && attempt < maxAttempts) {
+                setTimeout(() => attemptDeleteSpecialEditionAd(boxId, attempt + 1), 1000);
+            } else {
+                let errorMsg = data.error || 'Unknown error occurred';
+                if (errorMsg.includes('Database transaction error')) {
+                    errorMsg += ' Please refresh the page if this persists.';
+                }
+                alert('Error deleting ad: ' + errorMsg);
+            }
         }
     })
     .catch(error => {
         console.error('Error deleting ad:', error);
-        alert('Error deleting ad. Please try again.');
+        if (attempt < maxAttempts) {
+            setTimeout(() => attemptDeleteSpecialEditionAd(boxId, attempt + 1), 1000);
+        } else {
+            alert('Error deleting ad. Please check your connection and try again.');
+        }
     });
 }
 
@@ -2316,6 +2352,13 @@ function makeDraggable(element) {
 }
 
 function deleteAdBox(boxId) {
+    // First attempt to delete
+    attemptDeleteAdBox(boxId, 1);
+}
+
+function attemptDeleteAdBox(boxId, attempt) {
+    const maxAttempts = 2;
+    
     fetch(`/api/delete_box/${boxId}`, {
         method: 'DELETE'
     })
@@ -2337,12 +2380,32 @@ function deleteAdBox(boxId) {
             updatePageTotalRegular();
             showSuccessMessage('Ad deleted successfully');
         } else {
-            showErrorMessage('Error deleting ad: ' + data.error);
+            // Handle database transaction errors with retry
+            if (data.error && data.error.includes('Database transaction error') && attempt < maxAttempts) {
+                console.log(`Database transaction error on attempt ${attempt}, retrying...`);
+                // Wait a moment then retry
+                setTimeout(() => {
+                    attemptDeleteAdBox(boxId, attempt + 1);
+                }, 1000);
+            } else {
+                let errorMsg = data.error || 'Unknown error occurred';
+                if (errorMsg.includes('Database transaction error')) {
+                    errorMsg += ' Please refresh the page if this persists.';
+                }
+                showErrorMessage('Error deleting ad: ' + errorMsg);
+            }
         }
     })
     .catch(error => {
         console.error('Error deleting ad:', error);
-        showErrorMessage('Network error occurred');
+        if (attempt < maxAttempts) {
+            console.log(`Network error on attempt ${attempt}, retrying...`);
+            setTimeout(() => {
+                attemptDeleteAdBox(boxId, attempt + 1);
+            }, 1000);
+        } else {
+            showErrorMessage('Network error occurred. Please check your connection and try again.');
+        }
     });
 }
 

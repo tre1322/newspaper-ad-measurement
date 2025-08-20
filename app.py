@@ -670,13 +670,243 @@ class MLModel(db.Model):
 
 class TrainingData(db.Model):
     id = db.Column(db.Integer, primary_key=True)
-    ad_box_id = db.Column(db.Integer, db.ForeignKey('ad_box.id'), nullable=False)
+    ad_box_id = db.Column(db.Integer, db.ForeignKey('ad_box.id'), nullable=True)  # Nullable for negative examples
     publication_type = db.Column(db.String(50), nullable=False)
     features = db.Column(db.Text)  # JSON serialized feature vector
-    label = db.Column(db.String(50), nullable=False)  # ad type or 'not_ad'
+    label = db.Column(db.String(50), nullable=False)  # ad type, 'not_ad', 'false_positive', etc.
     confidence_score = db.Column(db.Float)  # User confidence in this label
     extracted_date = db.Column(db.DateTime, default=datetime.utcnow)
     used_in_training = db.Column(db.Boolean, default=False)
+    # New fields for negative training
+    region_type = db.Column(db.String(50))  # photo, text_block, decorative, etc.
+    pdf_path = db.Column(db.String(500))  # Path to original PDF
+    page_number = db.Column(db.Integer)  # Page number in PDF
+    x = db.Column(db.Float)  # Bounding box coordinates
+    y = db.Column(db.Float)
+    width = db.Column(db.Float)
+    height = db.Column(db.Float)
+    training_source = db.Column(db.String(50), default='user_correction')  # user_correction, automatic, manual
+
+class NegativeTrainingCollector:
+    """
+    Collects negative training examples from user corrections
+    and improves automatic detection accuracy
+    """
+    
+    @staticmethod
+    def collect_negative_example(pdf_path, page_number, x, y, width, height, region_type='unknown'):
+        """
+        Collect a negative training example from a deleted ad box
+        
+        Args:
+            pdf_path (str): Path to PDF file
+            page_number (int): Page number (1-based)
+            x, y, width, height (float): Bounding box of false positive
+            region_type (str): Type of false positive (photo, text_block, decorative, etc.)
+        """
+        try:
+            # Extract PDF metadata features from the region
+            features = NegativeTrainingCollector._extract_pdf_features(
+                pdf_path, page_number, x, y, width, height
+            )
+            
+            # Save negative training example
+            training_data = TrainingData(
+                publication_type='newspaper',
+                features=json.dumps(features),
+                label='false_positive',
+                confidence_score=1.0,  # User deletion = high confidence it's not an ad
+                region_type=region_type,
+                pdf_path=pdf_path,
+                page_number=page_number,
+                x=x, y=y, width=width, height=height,
+                training_source='user_correction'
+            )
+            
+            db.session.add(training_data)
+            db.session.commit()
+            
+            print(f"Collected negative training example: {region_type} at {x:.0f},{y:.0f} {width:.0f}x{height:.0f}")
+            
+            # Trigger model retraining if enough new examples
+            NegativeTrainingCollector._trigger_retraining_if_needed()
+            
+        except Exception as e:
+            print(f"Error collecting negative example: {e}")
+            db.session.rollback()
+    
+    @staticmethod
+    def collect_positive_example(ad_box, training_source='manual'):
+        """
+        Collect a positive training example from a confirmed ad
+        
+        Args:
+            ad_box (AdBox): Confirmed ad box
+            training_source (str): Source of training data
+        """
+        try:
+            if not ad_box.pdf_path or not ad_box.page_number:
+                return
+            
+            # Extract PDF metadata features
+            features = NegativeTrainingCollector._extract_pdf_features(
+                ad_box.pdf_path, ad_box.page_number, 
+                ad_box.x, ad_box.y, ad_box.width, ad_box.height
+            )
+            
+            # Save positive training example
+            training_data = TrainingData(
+                ad_box_id=ad_box.id,
+                publication_type=ad_box.publication.type if ad_box.publication else 'newspaper',
+                features=json.dumps(features),
+                label=ad_box.ad_type,
+                confidence_score=1.0,
+                region_type='advertisement',
+                pdf_path=ad_box.pdf_path,
+                page_number=ad_box.page_number,
+                x=ad_box.x, y=ad_box.y, width=ad_box.width, height=ad_box.height,
+                training_source=training_source
+            )
+            
+            db.session.add(training_data)
+            db.session.commit()
+            
+            print(f"Collected positive training example: {ad_box.ad_type} at {ad_box.x:.0f},{ad_box.y:.0f} {ad_box.width:.0f}x{ad_box.height:.0f}")
+            
+        except Exception as e:
+            print(f"Error collecting positive example: {e}")
+            db.session.rollback()
+    
+    @staticmethod
+    def _extract_pdf_features(pdf_path, page_number, x, y, width, height):
+        """
+        Extract comprehensive PDF metadata features for ML training
+        
+        Returns:
+            dict: Feature vector with PDF metadata characteristics
+        """
+        try:
+            import fitz
+            
+            if not os.path.exists(pdf_path):
+                return {}
+            
+            doc = fitz.open(pdf_path)
+            page = doc[page_number - 1]
+            
+            # Define region rectangle
+            region_rect = fitz.Rect(x, y, x + width, y + height)
+            
+            features = {
+                # Basic geometric features
+                'width': width,
+                'height': height,
+                'area': width * height,
+                'aspect_ratio': width / height if height > 0 else 0,
+                'perimeter': 2 * (width + height),
+                
+                # Page position features
+                'x_position': x / page.rect.width if page.rect.width > 0 else 0,
+                'y_position': y / page.rect.height if page.rect.height > 0 else 0,
+                'center_x': (x + width/2) / page.rect.width if page.rect.width > 0 else 0,
+                'center_y': (y + height/2) / page.rect.height if page.rect.height > 0 else 0,
+                'relative_width': width / page.rect.width if page.rect.width > 0 else 0,
+                'relative_height': height / page.rect.height if page.rect.height > 0 else 0,
+                
+                # Content analysis features
+                'has_border': False,
+                'border_complexity': 0,
+                'has_images': False,
+                'image_count': 0,
+                'has_text': False,
+                'text_density': 0,
+                'drawing_count': 0,
+                'drawing_complexity': 0
+            }
+            
+            # Analyze drawings in region
+            drawings = page.get_drawings()
+            region_drawings = []
+            
+            for drawing in drawings:
+                draw_rect = drawing.get('rect')
+                if draw_rect and region_rect.intersects(draw_rect):
+                    region_drawings.append(drawing)
+            
+            features['drawing_count'] = len(region_drawings)
+            
+            if region_drawings:
+                # Analyze border characteristics
+                for drawing in region_drawings:
+                    items = drawing.get('items', [])
+                    features['drawing_complexity'] += len(items)
+                    
+                    # Simple border detection
+                    if 1 <= len(items) <= 3:
+                        draw_rect = drawing.get('rect')
+                        if (draw_rect and 
+                            abs(draw_rect.width - width) < 20 and 
+                            abs(draw_rect.height - height) < 20):
+                            features['has_border'] = True
+                            features['border_complexity'] = len(items)
+            
+            # Analyze images in region
+            images = page.get_images()
+            for img_index, img in enumerate(images):
+                try:
+                    img_rect = page.get_image_bbox(img[7])
+                    if img_rect and region_rect.intersects(img_rect):
+                        features['has_images'] = True
+                        features['image_count'] += 1
+                except:
+                    continue
+            
+            # Analyze text in region
+            text_blocks = page.get_text('dict')
+            region_text_blocks = 0
+            total_text_chars = 0
+            
+            if 'blocks' in text_blocks:
+                for block in text_blocks['blocks']:
+                    if 'bbox' in block:
+                        block_rect = fitz.Rect(block['bbox'])
+                        if region_rect.intersects(block_rect):
+                            region_text_blocks += 1
+                            if 'lines' in block:
+                                for line in block['lines']:
+                                    if 'spans' in line:
+                                        for span in line['spans']:
+                                            total_text_chars += len(span.get('text', ''))
+            
+            features['has_text'] = region_text_blocks > 0
+            features['text_density'] = total_text_chars / (width * height) if (width * height) > 0 else 0
+            
+            doc.close()
+            
+            return features
+            
+        except Exception as e:
+            print(f"Error extracting PDF features: {e}")
+            return {}
+    
+    @staticmethod
+    def _trigger_retraining_if_needed():
+        """
+        Trigger model retraining if enough new training examples have been collected
+        """
+        try:
+            # Count unused training examples
+            unused_count = TrainingData.query.filter_by(used_in_training=False).count()
+            
+            if unused_count >= 10:  # Retrain every 10 new examples
+                print(f"Triggering model retraining with {unused_count} new examples")
+                # TODO: Implement actual ML model retraining
+                # For now, just mark examples as used
+                TrainingData.query.filter_by(used_in_training=False).update({'used_in_training': True})
+                db.session.commit()
+                
+        except Exception as e:
+            print(f"Error in retraining trigger: {e}")
 
 # Publication configurations
 PUBLICATION_CONFIGS = {
@@ -1481,13 +1711,13 @@ class PDFMetadataAdDetector:
             width = draw_rect.width
             height = draw_rect.height
             
-            # CRITICAL FIX 1: Updated minimum size requirements (80x50, not 80x60)
-            if width < 80 or height < 50:
+            # PRIORITY 3: Updated size requirements based on newspaper analysis
+            # Minimum ad size: 100x80 pixels (increased from 80x50)
+            if width < 100 or height < 80:
                 return None
             
-            # CRITICAL FIX 2: Updated maximum size requirements
-            # 70% of page width, 50% of page height (not 90% width)
-            if width > page_rect.width * 0.7 or height > page_rect.height * 0.5:
+            # Maximum ad size: 60% page width, 40% page height (reduced from 70%/50%)
+            if width > page_rect.width * 0.6 or height > page_rect.height * 0.4:
                 return None
             
             # Only process simple bordered rectangles (1-3 items) if has_border=True
@@ -1499,13 +1729,21 @@ class PDFMetadataAdDetector:
                 if items_count > 3:
                     return None
                 
-                # CRITICAL FIX 3: Enhanced photo detection
-                if PDFMetadataAdDetector._is_enhanced_editorial_photo(draw_rect, page_rect):
-                    # Photos get very low confidence (0.1, not 0.3)
+                # PRIORITY 1: Enhanced container vs content detection
+                container_analysis = PDFMetadataAdDetector._analyze_container_vs_content(drawing, draw_rect, page_rect)
+                
+                if container_analysis['is_photo_container']:
+                    # Photo containers get very low confidence
                     confidence = 0.1
-                else:
-                    # High confidence for legitimate bordered rectangles
+                elif container_analysis['is_complex_ad_container']:
+                    # Complex ad containers get high confidence - detect outer boundary
                     confidence = 0.9
+                elif container_analysis['is_business_directory_item']:
+                    # Business directory items get high confidence - keep individual
+                    confidence = 0.95
+                else:
+                    # Standard bordered rectangles
+                    confidence = 0.85
                     
                 return {
                     'x': draw_rect.x0,
@@ -1542,6 +1780,137 @@ class PDFMetadataAdDetector:
         except Exception as e:
             print(f"Error analyzing drawing element {element_id}: {e}")
             return None
+    
+    @staticmethod
+    def _analyze_container_vs_content(drawing, draw_rect, page_rect):
+        """
+        PRIORITY 1: Analyze whether this is a container (ad boundary) or internal content
+        
+        Returns:
+            dict: Analysis results with container type classification
+        """
+        try:
+            width = draw_rect.width
+            height = draw_rect.height
+            
+            analysis = {
+                'is_photo_container': False,
+                'is_complex_ad_container': False,
+                'is_business_directory_item': False,
+                'confidence_modifier': 0
+            }
+            
+            # Get drawing complexity
+            items = drawing.get('items', [])
+            items_count = len(items)
+            
+            # PRIORITY 1: Photo container detection
+            # If rectangular region contains mostly image data, mark as photo
+            if PDFMetadataAdDetector._contains_mostly_image_data(draw_rect, page_rect):
+                analysis['is_photo_container'] = True
+                return analysis
+            
+            # PRIORITY 1: Business directory detection
+            # Small to medium rectangles with business-like dimensions
+            if (100 <= width <= 300 and 80 <= height <= 200 and 
+                PDFMetadataAdDetector._is_in_directory_layout(draw_rect, page_rect)):
+                analysis['is_business_directory_item'] = True
+                return analysis
+            
+            # PRIORITY 1: Complex ad container detection
+            # Large rectangles that likely contain internal photos/text
+            if (width >= 250 and height >= 150 and 
+                PDFMetadataAdDetector._likely_contains_internal_content(draw_rect, page_rect)):
+                analysis['is_complex_ad_container'] = True
+                return analysis
+            
+            return analysis
+            
+        except Exception as e:
+            print(f"Error in container analysis: {e}")
+            return {'is_photo_container': False, 'is_complex_ad_container': False, 
+                   'is_business_directory_item': False, 'confidence_modifier': 0}
+    
+    @staticmethod
+    def _contains_mostly_image_data(draw_rect, page_rect):
+        """
+        PRIORITY 1: Check if rectangular region contains mostly image data
+        """
+        try:
+            # This is a simplified check - in production, you'd analyze the actual PDF content
+            width = draw_rect.width
+            height = draw_rect.height
+            aspect_ratio = width / height if height > 0 else 0
+            
+            # Photo characteristics: reasonable size + photo-like aspect ratio
+            if width >= 200 and height >= 150:
+                # Check for photo aspect ratios
+                photo_ratios = [1.5, 1.33, 1.78, 1.0]  # 3:2, 4:3, 16:9, square
+                for ratio in photo_ratios:
+                    if abs(aspect_ratio - ratio) <= 0.1 or abs(aspect_ratio - (1/ratio)) <= 0.1:
+                        # In content area = likely editorial photo
+                        if PDFMetadataAdDetector._is_in_main_content_area(draw_rect, page_rect):
+                            return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error checking image data: {e}")
+            return False
+    
+    @staticmethod
+    def _is_in_directory_layout(draw_rect, page_rect):
+        """
+        PRIORITY 1: Check if rectangle is part of a business directory layout
+        """
+        try:
+            # Business directories typically have:
+            # 1. Multiple similar-sized rectangles
+            # 2. Grid-like arrangement
+            # 3. Consistent spacing
+            
+            # For now, use position-based heuristics
+            # Bottom half of page often contains directories/classifieds
+            rect_center_y = draw_rect.y0 + draw_rect.height / 2
+            page_center_y = page_rect.height / 2
+            
+            # Lower half of page + reasonable business card size
+            if rect_center_y > page_center_y:
+                width = draw_rect.width
+                height = draw_rect.height
+                # Typical business card proportions
+                if 100 <= width <= 300 and 80 <= height <= 150:
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error checking directory layout: {e}")
+            return False
+    
+    @staticmethod
+    def _likely_contains_internal_content(draw_rect, page_rect):
+        """
+        PRIORITY 1: Check if large rectangle likely contains internal photos/text
+        """
+        try:
+            width = draw_rect.width
+            height = draw_rect.height
+            area = width * height
+            
+            # Large rectangles are more likely to contain internal content
+            if area >= 250 * 150:  # 37,500 square pixels
+                # Check if it's positioned like a complex ad
+                # (not in extreme corners, reasonable proportions)
+                aspect_ratio = width / height if height > 0 else 0
+                if 0.3 <= aspect_ratio <= 4.0:  # Reasonable ad proportions
+                    return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error checking internal content: {e}")
+            return False
     
     @staticmethod
     def _is_enhanced_editorial_photo(draw_rect, page_rect):
@@ -1696,7 +2065,7 @@ class PDFMetadataAdDetector:
     
     @staticmethod
     def _merge_adjacent_detections(detections, merge_distance=20):
-        """Merge detections that are within merge_distance pixels of each other"""
+        """PRIORITY 1: Smart merge that preserves business directories but merges fragmented ads"""
         try:
             if len(detections) <= 1:
                 return detections
@@ -1712,7 +2081,14 @@ class PDFMetadataAdDetector:
                                        current['x'] + current['width'],
                                        current['y'] + current['height'])
                 
-                # Find all detections that should be merged with current
+                # PRIORITY 1: Don't merge business directory items
+                if current.get('type') == 'bordered_rectangle' and current['confidence'] >= 0.95:
+                    # High confidence items (business directory) should not be merged
+                    merged.append(current)
+                    used_indices.add(i)
+                    continue
+                
+                # Find detections that should be merged with current
                 to_merge = [current]
                 used_indices.add(i)
                 
@@ -1720,15 +2096,26 @@ class PDFMetadataAdDetector:
                     if j <= i or j in used_indices:
                         continue
                     
+                    # PRIORITY 1: Don't merge business directory items
+                    if candidate.get('type') == 'bordered_rectangle' and candidate['confidence'] >= 0.95:
+                        continue
+                    
                     candidate_rect = fitz.Rect(candidate['x'], candidate['y'],
                                              candidate['x'] + candidate['width'],
                                              candidate['y'] + candidate['height'])
                     
-                    # Check if rectangles are within merge_distance
-                    if PDFMetadataAdDetector._are_rectangles_adjacent(current_rect, candidate_rect, merge_distance):
+                    # PRIORITY 1: Smart merging rules
+                    should_merge = False
+                    
+                    # Only merge if both are likely parts of the same complex ad
+                    if (PDFMetadataAdDetector._are_rectangles_adjacent(current_rect, candidate_rect, merge_distance) and
+                        PDFMetadataAdDetector._should_merge_rectangles(current, candidate)):
+                        should_merge = True
+                    
+                    if should_merge:
                         to_merge.append(candidate)
                         used_indices.add(j)
-                        print(f"Merging adjacent rectangles: {current['width']:.0f}x{current['height']:.0f} + {candidate['width']:.0f}x{candidate['height']:.0f}")
+                        print(f"Merging fragmented ad parts: {current['width']:.0f}x{current['height']:.0f} + {candidate['width']:.0f}x{candidate['height']:.0f}")
                 
                 # Create merged detection
                 if len(to_merge) == 1:
@@ -1740,8 +2127,39 @@ class PDFMetadataAdDetector:
             return merged
             
         except Exception as e:
-            print(f"Error merging adjacent detections: {e}")
+            print(f"Error in smart merging: {e}")
             return detections
+    
+    @staticmethod
+    def _should_merge_rectangles(rect1, rect2):
+        """PRIORITY 1: Determine if two rectangles should be merged based on newspaper rules"""
+        try:
+            # Don't merge business directory items (high confidence, small-medium size)
+            if (rect1['confidence'] >= 0.95 or rect2['confidence'] >= 0.95):
+                return False
+            
+            # Don't merge if both are large (likely separate ads)
+            area1 = rect1['width'] * rect1['height']
+            area2 = rect2['width'] * rect2['height']
+            
+            if area1 >= 40000 and area2 >= 40000:  # Both large (200x200)
+                return False
+            
+            # Do merge if one is small and they're adjacent (likely fragmented ad)
+            min_area = min(area1, area2)
+            if min_area < 20000:  # One is small (< ~140x140)
+                return True
+            
+            # Do merge if similar sizes and close together (likely split ad)
+            size_ratio = max(area1, area2) / min(area1, area2)
+            if size_ratio <= 3.0:  # Similar sizes
+                return True
+            
+            return False
+            
+        except Exception as e:
+            print(f"Error checking merge criteria: {e}")
+            return False
     
     @staticmethod
     def _are_rectangles_adjacent(rect1, rect2, max_distance):
@@ -6041,51 +6459,48 @@ def delete_box(box_id):
         ad_box = AdBox.query.get_or_404(box_id)
         page_id = ad_box.page_id
         
-        # CRITICAL FIX: Delete ALL training data records for this ad_box to avoid foreign key constraint
-        training_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
-        if training_records:
-            # Log negative training information before deleting
-            try:
-                # Get publication through ad_box -> page relationship
-                page = Page.query.get(ad_box.page_id)
-                publication = Publication.query.get(page.publication_id) if page else None
+        # PRIORITY 2: Enhanced negative training collection
+        # Collect negative training example before deletion
+        try:
+            page = Page.query.get(ad_box.page_id)
+            if page and page.pdf_path:
+                # Determine region type based on ad characteristics
+                region_type = 'unknown'
+                if ad_box.ad_type:
+                    region_type = 'false_' + ad_box.ad_type
+                elif ad_box.width >= 200 and ad_box.height >= 150:
+                    aspect_ratio = ad_box.width / ad_box.height
+                    if 1.3 <= aspect_ratio <= 1.8:
+                        region_type = 'photo'
+                    else:
+                        region_type = 'text_block'
+                else:
+                    region_type = 'decorative'
                 
-                if page and publication:
-                    # Create a standalone negative training record without ad_box_id dependency
-                    negative_features = {
-                        'deleted_by_user': True, 
-                        'false_positive': True,
-                        'original_ad_box_id': box_id,  # Store reference for logging
-                        'x': ad_box.x,
-                        'y': ad_box.y, 
-                        'width': ad_box.width,
-                        'height': ad_box.height,
-                        'ad_type': ad_box.ad_type,
-                        'training_records_count': len(training_records),
-                        'publication_type': publication.publication_type,
-                        'page_number': page.page_number
-                    }
-                    
-                    print(f"Negative training data logged for deleted ad box {box_id}: {negative_features}")
-                    
-            except Exception as e:
-                print(f"Could not log negative training data: {e}")
-            
-            # Delete ALL training data records first to avoid foreign key constraint
-            for training_record in training_records:
-                db.session.delete(training_record)
-            print(f"Deleted {len(training_records)} training data records for ad box {box_id}")
+                # Collect comprehensive negative training data
+                NegativeTrainingCollector.collect_negative_example(
+                    page.pdf_path, page.page_number,
+                    ad_box.x, ad_box.y, ad_box.width, ad_box.height,
+                    region_type=region_type
+                )
+                
+        except Exception as e:
+            print(f"Error collecting negative training data: {e}")
         
-        # Additional safety check - force delete any remaining training data records
-        # This catches any records that might have been missed by the initial query
+        # Delete existing training data records
+        training_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
+        for training_record in training_records:
+            db.session.delete(training_record)
+        if training_records:
+            print(f"Deleted {len(training_records)} old training data records for ad box {box_id}")
+        
+        # Clean up any remaining training data records
         try:
             remaining_records = TrainingData.query.filter_by(ad_box_id=box_id).all()
-            if remaining_records:
-                print(f"Found {len(remaining_records)} additional training records to delete")
-                for record in remaining_records:
-                    db.session.delete(record)
+            for record in remaining_records:
+                db.session.delete(record)
         except Exception as cleanup_error:
-            print(f"Warning during additional cleanup: {cleanup_error}")
+            print(f"Warning during cleanup: {cleanup_error}")
         
         # Execute deletion of training data first
         db.session.flush()  # Force execution of training data deletions
@@ -6155,31 +6570,39 @@ def add_box(page_id):
         db.session.add(ad_box)
         db.session.commit()
         
-        # Automatically extract features for ML training
+        # PRIORITY 4: Collect positive training data from manually created ad
         try:
+            # Collect comprehensive positive training example
+            NegativeTrainingCollector.collect_positive_example(ad_box, training_source='manual')
+            
+            # Legacy feature extraction (keep for compatibility)
             image_filename = f"{publication.filename}_page_{page.page_number}.png"
             image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
             
-            if os.path.exists(image_path):
+            if os.path.exists(image_path) and hasattr(globals().get('AdLearningEngine', None), 'extract_features'):
                 box_coords = {'x': data['x'], 'y': data['y'], 'width': data['width'], 'height': data['height']}
                 features = AdLearningEngine.extract_features(image_path, box_coords)
                 
                 if features:
-                    # Check if training data already exists
-                    existing = TrainingData.query.filter_by(ad_box_id=ad_box.id).first()
+                    # Store legacy features if needed
+                    existing = TrainingData.query.filter(
+                        TrainingData.ad_box_id == ad_box.id,
+                        TrainingData.training_source == 'legacy'
+                    ).first()
                     if not existing:
                         training_data = TrainingData(
                             ad_box_id=ad_box.id,
                             publication_type=publication.publication_type,
                             features=json.dumps(features),
                             label=ad_box.ad_type,
-                            confidence_score=1.0
+                            confidence_score=1.0,
+                            training_source='legacy'
                         )
                         db.session.add(training_data)
                         db.session.commit()
-                        print(f"Extracted ML features for new ad box {ad_box.id}")
+                        
         except Exception as e:
-            print(f"Warning: Could not extract features for training: {e}")
+            print(f"Warning: Could not collect training data: {e}")
         
         # Recalculate totals
         update_totals(page_id)
@@ -6319,6 +6742,194 @@ def intelligent_detect_ad(page_id):
         })
         
     except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/auto_detect_ads/<int:page_id>', methods=['POST'])
+def auto_detect_ads_with_learning(page_id):
+    """PRIORITY 1-4: Enhanced automatic ad detection with negative training"""
+    try:
+        page = Page.query.get_or_404(page_id)
+        publication = Publication.query.get(page.publication_id)
+        
+        if not page.pdf_path or not os.path.exists(page.pdf_path):
+            return jsonify({'success': False, 'error': 'PDF file not found'})
+        
+        print(f"Starting enhanced automatic detection for page {page_id}")
+        
+        # PRIORITY 1-3: Use enhanced PDFMetadataAdDetector with all improvements
+        detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
+            page.pdf_path, page.page_number, publication.publication_type
+        )
+        
+        if not detections:
+            return jsonify({
+                'success': True,
+                'detections': [],
+                'message': 'No ads detected with current settings'
+            })
+        
+        # Convert detections to format expected by frontend
+        formatted_detections = []
+        for detection in detections:
+            formatted_detections.append({
+                'x': detection['x'],
+                'y': detection['y'],
+                'width': detection['width'],
+                'height': detection['height'],
+                'confidence': detection['confidence'],
+                'type': detection.get('type', 'bordered_rectangle'),
+                'element_id': detection.get('element_id', 'unknown'),
+                'has_border': detection.get('border', False),
+                'is_merged': 'merged' in detection.get('element_id', ''),
+                'classification': AutoDetectionClassifier.classify_detection(detection)
+            })
+        
+        print(f"Enhanced detection complete: {len(formatted_detections)} ads found")
+        
+        return jsonify({
+            'success': True,
+            'detections': formatted_detections,
+            'total_found': len(formatted_detections),
+            'detection_method': 'enhanced_pdf_metadata',
+            'learning_enabled': True
+        })
+        
+    except Exception as e:
+        print(f"Error in enhanced auto detection: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
+
+class AutoDetectionClassifier:
+    """
+    PRIORITY 4: Classify detected regions for better user understanding
+    """
+    
+    @staticmethod
+    def classify_detection(detection):
+        """
+        Classify detection type for user interface
+        
+        Returns:
+            dict: Classification with user-friendly labels
+        """
+        try:
+            confidence = detection['confidence']
+            width = detection['width']
+            height = detection['height']
+            has_border = detection.get('border', False)
+            
+            classification = {
+                'category': 'unknown',
+                'description': 'Unknown element',
+                'user_action': 'review',
+                'color': '#666666'
+            }
+            
+            if confidence == 0.1:
+                classification.update({
+                    'category': 'photo',
+                    'description': 'Editorial photo (likely not an ad)',
+                    'user_action': 'probably_delete',
+                    'color': '#ff6b6b'  # Red
+                })
+            elif confidence >= 0.95:
+                classification.update({
+                    'category': 'business_directory',
+                    'description': 'Business directory item',
+                    'user_action': 'probably_keep',
+                    'color': '#51cf66'  # Green
+                })
+            elif confidence >= 0.85 and has_border:
+                if width >= 250 and height >= 150:
+                    classification.update({
+                        'category': 'complex_ad',
+                        'description': 'Complex ad (outer boundary)',
+                        'user_action': 'review_boundary',
+                        'color': '#339af0'  # Blue
+                    })
+                else:
+                    classification.update({
+                        'category': 'standard_ad',
+                        'description': 'Standard bordered ad',
+                        'user_action': 'probably_keep',
+                        'color': '#51cf66'  # Green
+                    })
+            else:
+                classification.update({
+                    'category': 'uncertain',
+                    'description': 'Uncertain - needs review',
+                    'user_action': 'review',
+                    'color': '#ffd43b'  # Yellow
+                })
+            
+            return classification
+            
+        except Exception as e:
+            print(f"Error classifying detection: {e}")
+            return {
+                'category': 'error',
+                'description': 'Classification error',
+                'user_action': 'review',
+                'color': '#666666'
+            }
+
+@app.route('/api/confirm_auto_detection/<int:page_id>', methods=['POST'])
+def confirm_auto_detection(page_id):
+    """PRIORITY 4: Confirm automatic detections and collect positive training data"""
+    try:
+        page = Page.query.get_or_404(page_id)
+        data = request.json
+        confirmed_detections = data.get('confirmed_detections', [])
+        
+        created_boxes = []
+        
+        for detection in confirmed_detections:
+            # Create ad box from confirmed detection
+            ad_box = AdBox(
+                page_id=page_id,
+                x=detection['x'],
+                y=detection['y'],
+                width=detection['width'],
+                height=detection['height'],
+                ad_type=detection.get('ad_type', 'open_display'),
+                column_inches=0,  # Will be calculated
+                pdf_path=page.pdf_path,
+                page_number=page.page_number
+            )
+            
+            db.session.add(ad_box)
+            db.session.flush()  # Get ID
+            
+            # PRIORITY 4: Collect positive training data
+            NegativeTrainingCollector.collect_positive_example(
+                ad_box, training_source='automatic_confirmed'
+            )
+            
+            created_boxes.append({
+                'id': ad_box.id,
+                'x': ad_box.x,
+                'y': ad_box.y,
+                'width': ad_box.width,
+                'height': ad_box.height
+            })
+        
+        db.session.commit()
+        
+        # Update page totals
+        update_totals(page_id)
+        
+        print(f"Confirmed {len(created_boxes)} automatic detections for page {page_id}")
+        
+        return jsonify({
+            'success': True,
+            'created_boxes': created_boxes,
+            'total_confirmed': len(created_boxes)
+        })
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error confirming auto detections: {e}")
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/add_special_edition_ad/<int:page_id>', methods=['POST'])

@@ -931,10 +931,10 @@ PUBLICATION_CONFIGS = {
         'total_inches_per_page': 125,
         'name': 'Special Edition Tabloid',
         'preset_ads': {
-            'eighth': {'inches': 15, 'name': '1/8 Page'},
-            'quarter': {'inches': 30, 'name': '1/4 Page'},
-            'half': {'inches': 60, 'name': '1/2 Page'},
-            'full': {'inches': 125, 'name': 'Full Page'}
+            'eighth': {'inches': 14.04, 'name': '1/8 Page'},
+            'quarter': {'inches': 28.88, 'name': '1/4 Page'},
+            'half': {'inches': 59.28, 'name': '1/2 Page'},
+            'full': {'inches': 120.24, 'name': 'Full Page'}
         }
     },
     'peach': {

@@ -505,17 +505,17 @@
                 <!-- Context Menu for Special Edition -->
                 {% if publication.publication_type == 'special_edition' %}
                 <div class="context-menu" id="contextMenu">
-                    <div class="context-menu-item" data-ad-type="eighth" data-inches="15">
-                        1/8 Page Ad (15 inches)
+                    <div class="context-menu-item" data-ad-type="eighth" data-inches="14.04">
+                        1/8 Page Ad (14.04 inches)
                     </div>
-                    <div class="context-menu-item" data-ad-type="quarter" data-inches="30">
-                        1/4 Page Ad (30 inches)
+                    <div class="context-menu-item" data-ad-type="quarter" data-inches="28.88">
+                        1/4 Page Ad (28.88 inches)
                     </div>
-                    <div class="context-menu-item" data-ad-type="half" data-inches="60">
-                        1/2 Page Ad (60 inches)
+                    <div class="context-menu-item" data-ad-type="half" data-inches="59.28">
+                        1/2 Page Ad (59.28 inches)
                     </div>
-                    <div class="context-menu-item" data-ad-type="full" data-inches="125">
-                        Full Page Ad (125 inches)
+                    <div class="context-menu-item" data-ad-type="full" data-inches="120.24">
+                        Full Page Ad (120.24 inches)
                     </div>
                 </div>
                 {% endif %}
@@ -561,10 +561,10 @@
                                                 <div class="fw-bold text-primary">Ad #{{ loop.index }}</div>
                                                 <div class="text-success">{{ "%.0f"|format(box.column_inches) }}" inches</div>
                                                 <div class="small text-muted">
-                                                    {% if box.column_inches == 15 %}1/8 Page{% endif %}
-                                                    {% if box.column_inches == 30 %}1/4 Page{% endif %}
-                                                    {% if box.column_inches == 60 %}1/2 Page{% endif %}
-                                                    {% if box.column_inches == 125 %}Full Page{% endif %}
+                                                    {% if box.column_inches == 14.04 %}1/8 Page{% endif %}
+                                                    {% if box.column_inches == 28.88 %}1/4 Page{% endif %}
+                                                    {% if box.column_inches == 59.28 %}1/2 Page{% endif %}
+                                                    {% if box.column_inches == 120.24 %}Full Page{% endif %}
                                                 </div>
                                             {% else %}
                                                 <div class="fw-bold text-primary">{{ "%.1f"|format(box.column_inches) }}" inches</div>
@@ -1910,10 +1910,10 @@ function addSpecialEditionAdToList(adData, adNumber) {
     adItem.dataset.boxId = adData.box_id;
     
     let adTypeName = '';
-    if (adData.column_inches === 15) adTypeName = '1/8 Page';
-    if (adData.column_inches === 30) adTypeName = '1/4 Page';
-    if (adData.column_inches === 60) adTypeName = '1/2 Page';
-    if (adData.column_inches === 125) adTypeName = 'Full Page';
+    if (adData.column_inches === 14.04) adTypeName = '1/8 Page';
+    if (adData.column_inches === 28.88) adTypeName = '1/4 Page';
+    if (adData.column_inches === 59.28) adTypeName = '1/2 Page';
+    if (adData.column_inches === 120.24) adTypeName = 'Full Page';
     
     adItem.innerHTML = `
         <div class="d-flex justify-content-between align-items-start">

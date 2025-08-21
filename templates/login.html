@@ -3,118 +3,161 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Login - Newspaper Ad Measurement</title>
+    <title>Login - Quadd.ai</title>
     <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.1.3/dist/css/bootstrap.min.css" rel="stylesheet">
     <link href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css" rel="stylesheet">
     <style>
         body {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            background: #f8f9fa;
             min-height: 100vh;
             display: flex;
             align-items: center;
             justify-content: center;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
         }
         
         .login-card {
-            background: rgba(255, 255, 255, 0.95);
-            backdrop-filter: blur(10px);
-            border-radius: 15px;
-            box-shadow: 0 15px 35px rgba(0, 0, 0, 0.1);
-            border: 1px solid rgba(255, 255, 255, 0.2);
-        }
-        
-        .login-header {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            color: white;
-            border-radius: 15px 15px 0 0;
-            padding: 2rem;
-            text-align: center;
-        }
-        
-        .login-body {
-            padding: 2rem;
-        }
-        
-        .form-control {
-            border-radius: 10px;
-            border: 2px solid #e9ecef;
-            padding: 0.75rem 1rem;
-            font-size: 1rem;
-            transition: all 0.3s ease;
-        }
-        
-        .form-control:focus {
-            border-color: #667eea;
-            box-shadow: 0 0 0 0.2rem rgba(102, 126, 234, 0.25);
-        }
-        
-        .btn-login {
-            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-            border: none;
-            border-radius: 10px;
-            padding: 0.75rem 2rem;
-            font-size: 1rem;
-            font-weight: 600;
-            color: white;
-            transition: all 0.3s ease;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0, 0, 0, 0.08);
+            border: 1px solid #e9ecef;
+            max-width: 400px;
             width: 100%;
         }
         
-        .btn-login:hover {
-            transform: translateY(-2px);
-            box-shadow: 0 5px 15px rgba(102, 126, 234, 0.4);
-            color: white;
+        .login-body {
+            padding: 3rem 2.5rem;
+            text-align: center;
         }
         
-        .alert {
-            border-radius: 10px;
-            border: none;
+        .logo-container {
+            margin-bottom: 2rem;
         }
         
-        .password-input-wrapper {
+        .logo-img {
+            width: 80px;
+            height: 80px;
+            object-fit: contain;
+            margin-bottom: 1.5rem;
+        }
+        
+        .logo-text {
+            color: #1e5a96;
+            font-size: 2.2rem;
+            font-weight: 600;
+            margin-bottom: 0.25rem;
+        }
+        
+        .logo-tagline {
+            color: #6c757d;
+            font-size: 0.9rem;
+            margin-bottom: 2.5rem;
+        }
+        
+        .form-group {
+            text-align: left;
+            margin-bottom: 1.5rem;
+        }
+        
+        .form-label {
+            color: #495057;
+            font-size: 0.9rem;
+            font-weight: 500;
+            margin-bottom: 0.5rem;
+        }
+        
+        .required {
+            color: #dc3545;
+        }
+        
+        .form-control {
+            border-radius: 6px;
+            border: 1px solid #ced4da;
+            padding: 0.75rem 1rem;
+            font-size: 1rem;
+            transition: border-color 0.15s ease-in-out, box-shadow 0.15s ease-in-out;
+            background-color: #fff;
+        }
+        
+        .form-control:focus {
+            border-color: #1e5a96;
+            box-shadow: 0 0 0 0.2rem rgba(30, 90, 150, 0.25);
+        }
+        
+        .form-control::placeholder {
+            color: #adb5bd;
+        }
+        
+        .password-wrapper {
             position: relative;
         }
         
         .password-toggle {
             position: absolute;
-            right: 15px;
+            right: 12px;
             top: 50%;
             transform: translateY(-50%);
             cursor: pointer;
             color: #6c757d;
-            z-index: 5;
+            font-size: 1rem;
         }
         
         .password-toggle:hover {
-            color: #667eea;
+            color: #1e5a96;
         }
         
-        .app-icon {
-            font-size: 3rem;
-            margin-bottom: 1rem;
-            opacity: 0.9;
+        .btn-signin {
+            background-color: #1e5a96;
+            border: none;
+            border-radius: 6px;
+            padding: 0.75rem 1.5rem;
+            font-size: 1rem;
+            font-weight: 500;
+            color: white;
+            width: 100%;
+            margin-bottom: 1.5rem;
+            transition: background-color 0.15s ease-in-out;
+        }
+        
+        .btn-signin:hover {
+            background-color: #1a4c7d;
+            color: white;
+        }
+        
+        .forgot-password {
+            color: #1e5a96;
+            text-decoration: none;
+            font-size: 0.9rem;
+        }
+        
+        .forgot-password:hover {
+            color: #1a4c7d;
+            text-decoration: underline;
+        }
+        
+        .alert {
+            border-radius: 6px;
+            font-size: 0.9rem;
+            margin-bottom: 1.5rem;
         }
     </style>
 </head>
 <body>
     <div class="container">
         <div class="row justify-content-center">
-            <div class="col-md-5 col-lg-4">
+            <div class="col-12">
                 <div class="card login-card">
-                    <div class="login-header">
-                        <div class="app-icon">
-                            <i class="fas fa-newspaper"></i>
-                        </div>
-                        <h3 class="mb-0">Newspaper Ad Measurement</h3>
-                        <p class="mb-0 mt-2 opacity-75">Secure Access Required</p>
-                    </div>
-                    
                     <div class="login-body">
+                        <div class="logo-container">
+                            <img src="/static/images/quad-logo.jpg" alt="Quadd.ai Logo" class="logo-img">
+                            <div class="logo-text">Quadd.ai</div>
+                            <div class="logo-tagline">Simplify. Accelerate. Evolve.</div>
+                        </div>
+                        
                         {% with messages = get_flashed_messages(with_categories=true) %}
                             {% if messages %}
                                 {% for category, message in messages %}
                                     <div class="alert alert-{{ 'danger' if category == 'error' else category }} alert-dismissible fade show" role="alert">
-                                        <i class="fas fa-{{ 'exclamation-triangle' if category == 'error' else 'info-circle' }}"></i>
                                         {{ message }}
                                         <button type="button" class="btn-close" data-bs-dismiss="alert"></button>
                                     </div>
@@ -123,31 +166,25 @@
                         {% endwith %}
                         
                         <form method="post">
-                            <div class="mb-4">
+                            <div class="form-group">
                                 <label for="password" class="form-label">
-                                    <i class="fas fa-lock"></i> Access Password
+                                    Password <span class="required">*</span>
                                 </label>
-                                <div class="password-input-wrapper">
+                                <div class="password-wrapper">
                                     <input type="password" class="form-control" id="password" name="password" 
-                                           placeholder="Enter access password" required autofocus>
+                                           placeholder="Your password" required autofocus>
                                     <span class="password-toggle" onclick="togglePassword()">
-                                        <i class="fas fa-eye" id="password-eye"></i>
+                                        <i class="far fa-eye" id="password-eye"></i>
                                     </span>
                                 </div>
                             </div>
                             
-                            <div class="d-grid">
-                                <button type="submit" class="btn btn-login">
-                                    <i class="fas fa-sign-in-alt"></i> Access System
-                                </button>
-                            </div>
+                            <button type="submit" class="btn btn-signin">
+                                Sign in
+                            </button>
+                            
+                            <a href="#" class="forgot-password">Forgot password?</a>
                         </form>
-                        
-                        <div class="text-center mt-4">
-                            <small class="text-muted">
-                                <i class="fas fa-shield-alt"></i> Authorized Access Only
-                            </small>
-                        </div>
                     </div>
                 </div>
             </div>
@@ -162,25 +199,18 @@
             
             if (passwordInput.type === 'password') {
                 passwordInput.type = 'text';
-                passwordEye.classList.remove('fa-eye');
-                passwordEye.classList.add('fa-eye-slash');
+                passwordEye.classList.remove('far', 'fa-eye');
+                passwordEye.classList.add('far', 'fa-eye-slash');
             } else {
                 passwordInput.type = 'password';
-                passwordEye.classList.remove('fa-eye-slash');
-                passwordEye.classList.add('fa-eye');
+                passwordEye.classList.remove('far', 'fa-eye-slash');
+                passwordEye.classList.add('far', 'fa-eye');
             }
         }
         
         // Auto-focus on page load
         document.addEventListener('DOMContentLoaded', function() {
             document.getElementById('password').focus();
-        });
-        
-        // Handle Enter key
-        document.getElementById('password').addEventListener('keypress', function(e) {
-            if (e.key === 'Enter') {
-                this.closest('form').submit();
-            }
         });
     </script>
 </body>

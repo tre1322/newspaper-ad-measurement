@@ -895,12 +895,36 @@ class NegativeTrainingCollector:
         try:
             # Count unused training examples
             unused_count = TrainingData.query.filter_by(used_in_training=False).count()
-            
+
             if unused_count >= 10:  # Retrain every 10 new examples
-                # Reduced logging
-                # pass
-                # TODO: Implement actual ML model retraining
-                # For now, just mark examples as used
+                print(f"Triggering automatic retraining with {unused_count} new samples...")
+
+                # Get publication types with new training data
+                pub_types_query = db.session.query(TrainingData.publication_type).filter_by(used_in_training=False).distinct()
+                pub_types = [row[0] for row in pub_types_query.all()]
+
+                # Retrain models for each publication type that has new data
+                for pub_type in pub_types:
+                    try:
+                        type_unused = TrainingData.query.filter_by(
+                            publication_type=pub_type,
+                            used_in_training=False
+                        ).count()
+
+                        if type_unused >= 5:  # Minimum samples per type for retraining
+                            result = AdLearningEngine.train_model(
+                                publication_type=pub_type,
+                                min_samples=15,  # Lower threshold for automatic retraining
+                                collect_new_data=True
+                            )
+                            if result.get('success'):
+                                print(f"Auto-retrained {pub_type} model: {result.get('accuracy', 'N/A')}% accuracy")
+                            else:
+                                print(f"Auto-retraining failed for {pub_type}: {result.get('error')}")
+                    except Exception as retrain_error:
+                        print(f"Error auto-retraining {pub_type}: {retrain_error}")
+
+                # Mark all examples as used after attempting retraining
                 TrainingData.query.filter_by(used_in_training=False).update({'used_in_training': True})
                 db.session.commit()
                 
@@ -3637,44 +3661,52 @@ class AdLearningEngine:
         try:
             import time
             start_time = time.time()
-            
+
             # Load image (removed excessive debug logging for performance)
             img = cv2.imread(image_path)
             if img is None:
                 return None
-            
+
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
             x, y, w, h = int(box_coords['x']), int(box_coords['y']), int(box_coords['width']), int(box_coords['height'])
-            
+
             # Ensure coordinates are within image bounds
             img_h, img_w = gray.shape
             x = max(0, min(x, img_w - 1))
             y = max(0, min(y, img_h - 1))
             w = min(w, img_w - x)
             h = min(h, img_h - y)
-            
+
             # Extract region of interest (removed debug logging for performance)
             roi = gray[y:y+h, x:x+w]
             if roi.size == 0 or w <= 0 or h <= 0:
                 return None
-            
+
             # Feature extraction
             features = {}
-            
+
             # 1. Basic geometric features
             features['width'] = w
             features['height'] = h
             features['area'] = w * h
             features['aspect_ratio'] = w / h if h > 0 else 0
             features['perimeter'] = 2 * (w + h)
-            
+
             # 2. Position features (normalized by image size)
             img_h, img_w = gray.shape
             features['x_normalized'] = x / img_w
             features['y_normalized'] = y / img_h
             features['center_x_normalized'] = (x + w/2) / img_w
             features['center_y_normalized'] = (y + h/2) / img_h
-            
+
+            # NEW: Layout position features (key for distinguishing ads vs editorial)
+            features['is_left_edge'] = 1 if x < img_w * 0.05 else 0
+            features['is_right_edge'] = 1 if (x + w) > img_w * 0.95 else 0
+            features['is_top_edge'] = 1 if y < img_h * 0.1 else 0
+            features['is_bottom_edge'] = 1 if (y + h) > img_h * 0.9 else 0
+            features['is_center_horizontal'] = 1 if 0.3 < (x + w/2) / img_w < 0.7 else 0
+            features['is_center_vertical'] = 1 if 0.3 < (y + h/2) / img_h < 0.7 else 0
+
             # 3. Content analysis features
             features['mean_intensity'] = np.mean(roi)
             features['std_intensity'] = np.std(roi)
@@ -3742,6 +3774,65 @@ class AdLearningEngine:
                 features['rectangularity'] = contour_area / bounding_area if bounding_area > 0 else 0
             else:
                 features['rectangularity'] = 0
+
+            # NEW: Enhanced features for ad vs editorial distinction
+            # 11. Text density analysis (ads often have less text than editorial)
+            blur_kernel_size = max(3, min(w, h) // 20)
+            if blur_kernel_size % 2 == 0:
+                blur_kernel_size += 1
+
+            blurred = cv2.GaussianBlur(roi, (blur_kernel_size, blur_kernel_size), 0)
+            text_threshold = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)[1]
+            text_regions = cv2.morphologyEx(text_threshold, cv2.MORPH_CLOSE,
+                                          cv2.getStructuringElement(cv2.MORPH_RECT, (3, 1)))
+            features['text_density'] = np.sum(text_regions == 0) / text_regions.size
+
+            # 12. Border prominence (ads often have strong borders)
+            border_width = max(1, min(w, h) // 50)
+            if border_width < min(w//2, h//2):
+                border_mask = np.zeros_like(roi)
+                cv2.rectangle(border_mask, (0, 0), (w-1, h-1), 255, border_width)
+                border_pixels = roi[border_mask > 0]
+                center_pixels = roi[border_mask == 0]
+                if len(border_pixels) > 0 and len(center_pixels) > 0:
+                    features['border_prominence'] = abs(np.mean(border_pixels) - np.mean(center_pixels))
+                else:
+                    features['border_prominence'] = 0
+            else:
+                features['border_prominence'] = 0
+
+            # 13. Contrast patterns (ads often have high contrast elements)
+            local_contrast = cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8,8))
+            enhanced = local_contrast.apply(roi)
+            contrast_diff = np.mean(np.abs(enhanced.astype(np.float32) - roi.astype(np.float32)))
+            features['local_contrast_enhancement'] = contrast_diff
+
+            # 14. Structural features (ads are more structured than editorial text)
+            h_kernel_size = max(1, min(w//4, 40))
+            v_kernel_size = max(1, min(h//4, 40))
+            horizontal_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (h_kernel_size, 1))
+            vertical_kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (1, v_kernel_size))
+
+            horizontal_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, horizontal_kernel)
+            vertical_lines = cv2.morphologyEx(edges, cv2.MORPH_OPEN, vertical_kernel)
+
+            features['horizontal_structure'] = np.sum(horizontal_lines > 0) / horizontal_lines.size
+            features['vertical_structure'] = np.sum(vertical_lines > 0) / vertical_lines.size
+            features['structural_ratio'] = (features['horizontal_structure'] + features['vertical_structure']) / 2
+
+            # 15. Image content detection (ads often contain more images)
+            # Large uniform regions might indicate images/graphics
+            uniform_regions = cv2.morphologyEx(binary_roi, cv2.MORPH_OPEN,
+                                             cv2.getStructuringElement(cv2.MORPH_RECT, (10, 10)))
+            features['uniform_region_ratio'] = np.sum(uniform_regions == 255) / uniform_regions.size
+
+            # 16. Size-based features (ads have typical size patterns)
+            total_page_area = img_w * img_h
+            features['area_ratio_to_page'] = (w * h) / total_page_area
+            features['is_small_ad'] = 1 if (w * h) < total_page_area * 0.02 else 0  # <2% of page
+            features['is_large_ad'] = 1 if (w * h) > total_page_area * 0.15 else 0  # >15% of page
+            features['is_banner_shaped'] = 1 if w > h * 3 else 0  # Wide banner format
+            features['is_square_shaped'] = 1 if 0.8 < (w/h) < 1.2 else 0  # Nearly square
             
             # Convert numpy types to native Python types for JSON serialization
             for key, value in features.items():
@@ -6329,6 +6420,44 @@ def publication_report(pub_id):
     # Calculate compliance metrics
     config = PUBLICATION_CONFIGS[publication.publication_type]
     
+    # AUTOMATIC AI LEARNING: Trigger retraining when reports are generated
+    try:
+        print(f"Report generation triggering ML retraining for {publication.publication_type}...")
+
+        # Collect any missing training data from this publication
+        pub_ad_boxes = AdBox.query.join(Page).filter(
+            Page.publication_id == pub_id,
+            AdBox.user_verified == True
+        ).all()
+
+        missing_training_count = 0
+        for ad_box in pub_ad_boxes:
+            existing_training = TrainingData.query.filter_by(ad_box_id=ad_box.id).first()
+            if not existing_training:
+                missing_training_count += 1
+
+        if missing_training_count > 0:
+            print(f"Collecting training data from {missing_training_count} missing ad boxes...")
+            collected = AdLearningEngine.collect_training_data(max_samples=missing_training_count)
+            print(f"Collected {collected} training samples from this publication")
+
+        # Attempt to retrain the model for this publication type
+        result = AdLearningEngine.train_model(
+            publication_type=publication.publication_type,
+            min_samples=10,  # Lower threshold for report-triggered retraining
+            collect_new_data=False  # We just collected above
+        )
+
+        if result.get('success'):
+            print(f"Successfully retrained {publication.publication_type} model: {result.get('accuracy', 'N/A')}% accuracy")
+            flash(f'AI model retrained with latest data - {result.get("accuracy", "N/A")}% accuracy', 'info')
+        else:
+            print(f"Model retraining not needed or failed: {result.get('error')}")
+
+    except Exception as ml_error:
+        print(f"ML retraining during report generation failed: {ml_error}")
+        # Don't let ML errors break report generation
+
     report_data = {
         'publication': publication,
         'config': config,
@@ -6338,7 +6467,7 @@ def publication_report(pub_id):
         'ai_detected_boxes': ai_detected_boxes,
         'generated_date': datetime.now()
     }
-    
+
     return render_template('report.html', **report_data)
 
 @app.route('/download_pdf/<int:pub_id>')

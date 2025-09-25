@@ -181,7 +181,136 @@
                 </div>
             </div>
         </div>
-        
+
+        <!-- AI Learning Status -->
+        {% if ai_learning_status and ai_learning_status.enabled %}
+        <div class="report-card card">
+            <div class="card-header bg-warning text-dark">
+                <h4 class="mb-0"><i class="fas fa-brain"></i> AI Learning Status</h4>
+            </div>
+            <div class="card-body">
+                {% if ai_learning_status.learning_summary %}
+                <div class="alert alert-info mb-3">
+                    <i class="fas fa-robot"></i> <strong>Automatic Learning:</strong> {{ ai_learning_status.learning_summary }}
+                </div>
+                {% endif %}
+
+                <div class="row">
+                    <div class="col-md-3">
+                        <div class="stat-card" style="background: linear-gradient(135deg, #ff9a9e 0%, #fecfef 100%);">
+                            <div class="stat-number">{{ ai_learning_status.publication_patterns_learned or 0 }}</div>
+                            <div class="stat-label">New Patterns Learned</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="stat-card" style="background: linear-gradient(135deg, #a18cd1 0%, #fbc2eb 100%);">
+                            <div class="stat-number">{{ ai_learning_status.total_training_samples or 0 }}</div>
+                            <div class="stat-label">Total Training Patterns</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="stat-card" style="background: linear-gradient(135deg, #ffecd2 0%, #fcb69f 100%);">
+                            <div class="stat-number">
+                                {% if ai_learning_status.model_accuracy %}
+                                    {{ "%.1f"|format(ai_learning_status.model_accuracy) }}%
+                                {% else %}
+                                    --
+                                {% endif %}
+                            </div>
+                            <div class="stat-label">Model Accuracy</div>
+                        </div>
+                    </div>
+                    <div class="col-md-3">
+                        <div class="stat-card" style="background: linear-gradient(135deg, #89f7fe 0%, #66a6ff 100%);">
+                            <div class="stat-number">
+                                {% if ai_learning_status.model_updated %}
+                                    <i class="fas fa-check-circle"></i>
+                                {% else %}
+                                    <i class="fas fa-clock"></i>
+                                {% endif %}
+                            </div>
+                            <div class="stat-label">Model Updated</div>
+                        </div>
+                    </div>
+                </div>
+
+                <hr>
+
+                <div class="row">
+                    <div class="col-md-12">
+                        <h6><i class="fas fa-info-circle"></i> AI Learning Details</h6>
+                        <div class="table-responsive">
+                            <table class="table table-sm">
+                                <tr>
+                                    <td><strong>Publication Type:</strong></td>
+                                    <td>{{ publication.publication_type }}</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Learning Status:</strong></td>
+                                    <td>
+                                        {% if ai_learning_status.model_updated %}
+                                            <span class="badge bg-success">
+                                                <i class="fas fa-brain"></i> Model Updated
+                                            </span>
+                                        {% elif ai_learning_status.total_training_samples >= 10 %}
+                                            <span class="badge bg-info">
+                                                <i class="fas fa-sync-alt"></i> Model Refreshed
+                                            </span>
+                                        {% else %}
+                                            <span class="badge bg-warning text-dark">
+                                                <i class="fas fa-hourglass-half"></i> Collecting Patterns
+                                            </span>
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                <tr>
+                                    <td><strong>User Measurements in Publication:</strong></td>
+                                    <td>{{ user_created_boxes }} ad measurements</td>
+                                </tr>
+                                <tr>
+                                    <td><strong>Next AI Learning:</strong></td>
+                                    <td>
+                                        {% if ai_learning_status.total_training_samples >= 10 %}
+                                            Automatic with next report generation
+                                        {% else %}
+                                            After {{ 10 - ai_learning_status.total_training_samples }} more measurements
+                                        {% endif %}
+                                    </td>
+                                </tr>
+                                {% if ai_learning_status.error_message %}
+                                <tr class="table-danger">
+                                    <td><strong>Learning Error:</strong></td>
+                                    <td>{{ ai_learning_status.error_message }}</td>
+                                </tr>
+                                {% endif %}
+                            </table>
+                        </div>
+
+                        {% if ai_learning_status.total_training_samples >= 10 %}
+                        <div class="alert alert-success mt-3">
+                            <i class="fas fa-lightbulb"></i> <strong>Smart Detection Active!</strong>
+                            The AI has learned enough patterns to automatically detect similar ads in future {{ publication.publication_type }} publications.
+                            Your corrections continue to make the system smarter.
+                        </div>
+                        {% elif ai_learning_status.total_training_samples > 0 %}
+                        <div class="alert alert-info mt-3">
+                            <i class="fas fa-seedling"></i> <strong>Learning in Progress:</strong>
+                            Keep making ad measurements! After {{ 10 - ai_learning_status.total_training_samples }} more verified measurements,
+                            the AI will be smart enough to automatically detect ads in {{ publication.publication_type }} publications.
+                        </div>
+                        {% else %}
+                        <div class="alert alert-light mt-3">
+                            <i class="fas fa-graduation-cap"></i> <strong>AI Learning Starting:</strong>
+                            This is the first {{ publication.publication_type }} publication. As you verify ad measurements,
+                            the AI will learn your patterns and start detecting similar ads automatically.
+                        </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </div>
+        </div>
+        {% endif %}
+
         <!-- Page Breakdown -->
         <div class="report-card card">
             <div class="card-header bg-info text-white">

@@ -6420,42 +6420,91 @@ def publication_report(pub_id):
     # Calculate compliance metrics
     config = PUBLICATION_CONFIGS[publication.publication_type]
     
-    # AUTOMATIC AI LEARNING: Trigger retraining when reports are generated
-    try:
-        print(f"Report generation triggering ML retraining for {publication.publication_type}...")
+    # AUTOMATIC AI LEARNING: Seamlessly learn from this publication during report generation
+    ai_learning_status = {
+        'enabled': True,
+        'publication_patterns_learned': 0,
+        'total_training_samples': 0,
+        'model_accuracy': None,
+        'model_updated': False,
+        'learning_summary': '',
+        'error_message': None
+    }
 
-        # Collect any missing training data from this publication
+    try:
+        print(f"AUTOMATIC AI LEARNING: Processing {publication.publication_type} publication...")
+
+        # Step 1: Extract all user-verified measurements from this publication as training data
         pub_ad_boxes = AdBox.query.join(Page).filter(
             Page.publication_id == pub_id,
             AdBox.user_verified == True
         ).all()
 
-        missing_training_count = 0
+        # Count patterns we can learn from this publication
+        patterns_to_learn = 0
         for ad_box in pub_ad_boxes:
             existing_training = TrainingData.query.filter_by(ad_box_id=ad_box.id).first()
             if not existing_training:
-                missing_training_count += 1
+                patterns_to_learn += 1
 
-        if missing_training_count > 0:
-            print(f"Collecting training data from {missing_training_count} missing ad boxes...")
-            collected = AdLearningEngine.collect_training_data(max_samples=missing_training_count)
-            print(f"Collected {collected} training samples from this publication")
+        ai_learning_status['publication_patterns_learned'] = patterns_to_learn
 
-        # Attempt to retrain the model for this publication type
-        result = AdLearningEngine.train_model(
-            publication_type=publication.publication_type,
-            min_samples=10,  # Lower threshold for report-triggered retraining
-            collect_new_data=False  # We just collected above
-        )
+        # Step 2: Collect training data from this publication
+        if patterns_to_learn > 0:
+            print(f"LEARNING: Extracting patterns from {patterns_to_learn} user measurements...")
+            collected = AdLearningEngine.collect_training_data(max_samples=patterns_to_learn, batch_size=10)
+            print(f"LEARNING: Successfully extracted {collected} ad patterns from this publication")
 
-        if result.get('success'):
-            print(f"Successfully retrained {publication.publication_type} model: {result.get('accuracy', 'N/A')}% accuracy")
-            flash(f'AI model retrained with latest data - {result.get("accuracy", "N/A")}% accuracy', 'info')
+            # Update status
+            ai_learning_status['publication_patterns_learned'] = collected
         else:
-            print(f"Model retraining not needed or failed: {result.get('error')}")
+            print(f"LEARNING: All patterns from this publication already learned")
+
+        # Step 3: Get total training samples available
+        total_samples = TrainingData.query.filter_by(publication_type=publication.publication_type).count()
+        ai_learning_status['total_training_samples'] = total_samples
+
+        # Step 4: Update ML models with new data automatically
+        if total_samples >= 10:  # Minimum samples for reliable training
+            print(f"LEARNING: Updating {publication.publication_type} AI model with {total_samples} total patterns...")
+
+            result = AdLearningEngine.train_model(
+                publication_type=publication.publication_type,
+                min_samples=10,  # Lower threshold for report-triggered retraining
+                collect_new_data=False  # We just collected above
+            )
+
+            if result.get('success'):
+                ai_learning_status['model_updated'] = True
+                ai_learning_status['model_accuracy'] = result.get('validation_accuracy', 0) * 100
+
+                print(f"LEARNING: Successfully updated AI model - {ai_learning_status['model_accuracy']:.1f}% accuracy")
+
+                # Create learning summary
+                if patterns_to_learn > 0:
+                    ai_learning_status['learning_summary'] = f"AI learned {patterns_to_learn} new patterns from this publication and updated the {publication.publication_type} model (now {ai_learning_status['model_accuracy']:.1f}% accurate with {total_samples} total patterns)"
+                else:
+                    ai_learning_status['learning_summary'] = f"AI model refreshed with all {total_samples} known patterns ({ai_learning_status['model_accuracy']:.1f}% accuracy)"
+
+                # User feedback
+                if patterns_to_learn > 0:
+                    flash(f'AI learned {patterns_to_learn} new patterns from this publication! Model is now {ai_learning_status["model_accuracy"]:.1f}% accurate.', 'success')
+
+            else:
+                error_msg = result.get('error', 'Unknown error')
+                print(f"LEARNING: Model update failed: {error_msg}")
+                ai_learning_status['error_message'] = error_msg
+                ai_learning_status['learning_summary'] = f"Collected {patterns_to_learn} new patterns but model update failed: {error_msg}"
+        else:
+            # Not enough data yet
+            ai_learning_status['learning_summary'] = f"Collected {patterns_to_learn} patterns from this publication. Need {10 - total_samples} more patterns to create reliable AI model."
+
+        print(f"AUTOMATIC AI LEARNING COMPLETE: {ai_learning_status['learning_summary']}")
 
     except Exception as ml_error:
-        print(f"ML retraining during report generation failed: {ml_error}")
+        print(f"LEARNING ERROR: {ml_error}")
+        ai_learning_status['error_message'] = str(ml_error)
+        ai_learning_status['learning_summary'] = f"AI learning encountered an error: {str(ml_error)}"
         # Don't let ML errors break report generation
 
     report_data = {
@@ -6465,7 +6514,8 @@ def publication_report(pub_id):
         'total_boxes': total_boxes,
         'user_created_boxes': user_created_boxes,
         'ai_detected_boxes': ai_detected_boxes,
-        'generated_date': datetime.now()
+        'generated_date': datetime.now(),
+        'ai_learning_status': ai_learning_status
     }
 
     return render_template('report.html', **report_data)

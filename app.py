@@ -3424,63 +3424,56 @@ class SimpleAdDetector:
 
     @staticmethod
     def _find_bordered_rectangles(image):
-        """Find rectangular regions with borders (where real ads are)"""
+        """Find rectangular regions with borders that are BUSINESS ADS, not editorial photos"""
         try:
             gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
 
-            # Use multiple edge detection strategies to catch different ad types
-
-            # Strategy 1: Standard edge detection for clear borders
-            edges1 = cv2.Canny(gray, 50, 150, apertureSize=3)
-
-            # Strategy 2: More sensitive edge detection for subtle borders
-            edges2 = cv2.Canny(gray, 30, 100, apertureSize=3)
-
-            # Strategy 3: Morphological operations to find text blocks with borders
-            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            # Use morphological operations to find solid bordered regions
+            # This helps distinguish ads (solid borders) from photo edges
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
             morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-            edges3 = cv2.Canny(morph, 40, 120, apertureSize=3)
 
-            # Combine all edge maps
-            edges = cv2.bitwise_or(edges1, cv2.bitwise_or(edges2, edges3))
+            # Edge detection to find bordered regions (relaxed thresholds)
+            edges = cv2.Canny(morph, 40, 120, apertureSize=3)
 
-            # Find contours with both external and internal hierarchy
-            contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+            # Dilate to connect border segments
+            kernel_dilate = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            edges = cv2.dilate(edges, kernel_dilate, iterations=1)
+
+            # Find contours
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
             rectangles = []
 
             for contour in contours:
-                # Approximate contour to polygon
-                epsilon = 0.02 * cv2.arcLength(contour, True)
+                # Only consider very rectangular contours (ads have clean borders)
+                epsilon = 0.01 * cv2.arcLength(contour, True)  # Stricter approximation
                 approx = cv2.approxPolyDP(contour, epsilon, True)
 
-                # Check if it's roughly rectangular (4-8 vertices)
-                if 4 <= len(approx) <= 8:
+                # Must be very rectangular (4-6 vertices for clean ads)
+                if 4 <= len(approx) <= 6:
                     x, y, w, h = cv2.boundingRect(contour)
 
-                    # Calculate aspect ratio
+                    # Calculate properties
                     aspect_ratio = w / h if h > 0 else 0
-
-                    # Calculate area
                     area = w * h
-
-                    # Calculate how rectangular it is
                     contour_area = cv2.contourArea(contour)
                     rectangularity = contour_area / area if area > 0 else 0
 
-                    # Score based on how ad-like it is
-                    confidence = SimpleAdDetector._score_ad_candidate(w, h, aspect_ratio, rectangularity, area)
+                    # STRICT filtering to exclude editorial photos
+                    if SimpleAdDetector._is_likely_business_ad(image, x, y, w, h, rectangularity, aspect_ratio):
+                        confidence = SimpleAdDetector._score_ad_candidate(w, h, aspect_ratio, rectangularity, area)
 
-                    if confidence > 0.2:  # Keep more candidates (relaxed threshold)
-                        rectangles.append({
-                            'x': x,
-                            'y': y,
-                            'width': w,
-                            'height': h,
-                            'confidence': confidence,
-                            'aspect_ratio': aspect_ratio,
-                            'area': area
-                        })
+                        if confidence > 0.7:  # MUCH higher threshold to be very conservative
+                            rectangles.append({
+                                'x': x,
+                                'y': y,
+                                'width': w,
+                                'height': h,
+                                'confidence': confidence,
+                                'aspect_ratio': aspect_ratio,
+                                'area': area
+                            })
 
             # Sort by confidence
             rectangles.sort(key=lambda r: r['confidence'], reverse=True)
@@ -3490,6 +3483,62 @@ class SimpleAdDetector:
         except Exception as e:
             print(f"Error finding bordered rectangles: {e}")
             return []
+
+    @staticmethod
+    def _is_likely_business_ad(image, x, y, w, h, rectangularity, aspect_ratio):
+        """
+        SIMPLE RULE: Only detect rectangles with visible borders AND business content
+        EXCLUDE: All photos, sports images, editorial content
+        """
+        try:
+            # Extract the region
+            region = image[y:y+h, x:x+w]
+            if region.size == 0:
+                return False
+
+            image_height, image_width = image.shape[:2]
+
+            # RULE 1: Must have very clean rectangular border (ads have borders, photos don't)
+            if rectangularity < 0.85:  # MUCH stricter - ads have perfect rectangles
+                return False
+
+            # RULE 2: EXCLUDE large regions (photos are large, business ads are smaller)
+            if w > image_width * 0.4 or h > image_height * 0.35:  # Allow larger business ads
+                return False
+
+            # RULE 3: Business ad size constraints (very strict)
+            if w < 150 or h < 60:  # Too small
+                return False
+            if w > 600 or h > 400:  # Too large (likely editorial photo)
+                return False
+
+            # RULE 4: EXCLUDE common photo aspect ratios
+            # Sports photos: 4:3 (1.33), 3:2 (1.5)
+            if 1.2 <= aspect_ratio <= 1.6:  # Common photo ratios excluded
+                return False
+
+            # RULE 5: Allow business ad shapes (horizontal rectangles)
+            if aspect_ratio < 1.8 or aspect_ratio > 5.0:  # Must be horizontal rectangle
+                return False
+
+            # RULE 6: Position filtering - only exclude if in center AND large
+            # Only apply position filtering to larger regions that could be photos
+            if w > 200 and h > 150:  # Only check position for photo-sized regions
+                center_x = image_width / 2
+                center_y = image_height / 2
+                region_center_x = x + w/2
+                region_center_y = y + h/2
+
+                # If large region in center content area, likely editorial
+                if (abs(region_center_x - center_x) < image_width * 0.25 and
+                    abs(region_center_y - center_y) < image_height * 0.25):
+                    return False
+
+            return True
+
+        except Exception as e:
+            print(f"Error in business ad classification: {e}")
+            return False
 
     @staticmethod
     def _score_ad_candidate(width, height, aspect_ratio, rectangularity, area):
@@ -3605,7 +3654,7 @@ class SimpleAdDetector:
 
     @staticmethod
     def _merge_adjacent_detections(rectangles):
-        """Merge detections that are within 30 pixels of each other"""
+        """AGGRESSIVELY merge any overlapping or nearby detections to prevent multiple boxes"""
         if not rectangles:
             return rectangles
 
@@ -3616,7 +3665,7 @@ class SimpleAdDetector:
             if i in used:
                 continue
 
-            # Find all rectangles within 30 pixels
+            # Find ALL rectangles that overlap or are close (very aggressive)
             cluster = [rect]
             used.add(i)
 
@@ -3624,8 +3673,9 @@ class SimpleAdDetector:
                 if j in used:
                     continue
 
-                # Check if rectangles are within 30 pixels
-                if SimpleAdDetector._are_adjacent(rect, other_rect, threshold=30):
+                # Much more aggressive merging - within 100 pixels OR any overlap
+                if (SimpleAdDetector._are_adjacent(rect, other_rect, threshold=100) or
+                    SimpleAdDetector._calculate_overlap(rect, other_rect) > 0.1):
                     cluster.append(other_rect)
                     used.add(j)
 
@@ -3639,7 +3689,7 @@ class SimpleAdDetector:
         return merged
 
     @staticmethod
-    def _are_adjacent(rect1, rect2, threshold=30):
+    def _are_adjacent(rect1, rect2, threshold=50):
         """Check if two rectangles are within threshold pixels of each other"""
         # Calculate distances between rectangles
         x1_min, y1_min = rect1['x'], rect1['y']

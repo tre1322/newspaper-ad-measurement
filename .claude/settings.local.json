@@ -16,7 +16,8 @@
       "Bash(git restore:*)",
       "Bash(flask --version)",
       "Bash(set FLASK_APP=app.py)",
-      "Bash(git checkout:*)"
+      "Bash(git checkout:*)",
+      "Bash(del nul)"
     ],
     "deny": [],
     "defaultMode": "acceptEdits",

@@ -335,24 +335,23 @@ def start_background_processing(pub_id):
                 try:
                     print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                     
-                    # EMERGENCY ROLLBACK: Use PDF detection (was working before)
+                    # SIMPLE WORKING DETECTION: Find actual bordered ads
                     try:
-                        print(f"📄 Starting PDF-based ad detection (ROLLBACK)")
-                        pdf_result = PDFAdDetectionEngine.detect_ads_from_pdf(publication.id)
+                        print(f"🎯 Starting SIMPLE ad detection - bordered regions only")
+                        simple_result = SimpleAdDetector.detect_bordered_ads(publication.id)
 
-                        if pdf_result and pdf_result.get('success'):
-                            print(f"SUCCESS: PDF detection complete: {pdf_result['detections']} ads detected across {pdf_result['pages_processed']} pages")
-                            if pdf_result['detections'] > 0:
-                                print(f"Next: Review the auto-detected ads on the measurement pages to verify accuracy")
+                        if simple_result and simple_result.get('success'):
+                            print(f"SUCCESS: Simple detection complete: {simple_result['detections']} ads detected across {simple_result['pages_processed']} pages")
+                            if simple_result['detections'] > 0:
+                                print(f"Next: Review the detected ads - should see actual business ads")
                             else:
-                                print(f"No ads detected via PDF analysis - you can manually mark ads as usual")
+                                print(f"No bordered ads detected - check image quality")
                         else:
-                            error_msg = pdf_result.get('error', 'PDF analysis failed') if pdf_result else 'No result returned'
-                            print(f"PDF detection failed: {error_msg}")
-                            print(f"Will try alternative detection methods if available")
-                    except Exception as pdf_error:
-                        print(f"PDF detection failed with error: {pdf_error}")
-                        print(f"Will try alternative detection methods if available")
+                            error_msg = simple_result.get('error', 'Simple detection failed') if simple_result else 'No result returned'
+                            print(f"Simple detection failed: {error_msg}")
+                    except Exception as simple_error:
+                        print(f"Simple detection failed with error: {simple_error}")
+                        print(f"Falling back to manual detection only")
 
                 except Exception as outer_error:
                     print(f"⚠️  Hybrid detection phase failed: {outer_error}")
@@ -3325,6 +3324,258 @@ class HybridDetectionPipeline:
         except Exception as e:
             print(f"Error getting hybrid detection status: {e}")
             return {'success': False, 'error': str(e)}
+
+
+class SimpleAdDetector:
+    """Simple, working ad detection that finds actual bordered advertisements"""
+
+    @staticmethod
+    def detect_bordered_ads(publication_id):
+        """
+        Detect ads by finding bordered rectangular regions (where real ads are)
+        No complex text analysis - just find rectangles that look like ads
+        """
+        try:
+            print(f"Starting simple bordered ad detection for publication {publication_id}")
+
+            publication = Publication.query.get(publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
+
+            pages = Page.query.filter_by(publication_id=publication_id).all()
+            if not pages:
+                return {'success': False, 'error': 'No pages found'}
+
+            total_detections = 0
+            config = PUBLICATION_CONFIGS.get(publication.publication_type, PUBLICATION_CONFIGS['broadsheet'])
+
+            for page in pages:
+                print(f"Processing page {page.page_number} for bordered ads...")
+
+                # Load page image
+                image_filename = f"{publication.filename}_page_{page.page_number}.png"
+                image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+
+                if not os.path.exists(image_path):
+                    print(f"Warning: Page image not found: {image_path}")
+                    continue
+
+                page_image = cv2.imread(image_path)
+                if page_image is None:
+                    print(f"Warning: Could not load page image: {image_path}")
+                    continue
+
+                # Find bordered rectangles (actual ads)
+                ad_regions = SimpleAdDetector._find_bordered_rectangles(page_image)
+
+                # Filter to realistic ad sizes
+                filtered_ads = SimpleAdDetector._filter_realistic_ads(ad_regions)
+
+                print(f"Found {len(filtered_ads)} bordered ads on page {page.page_number}")
+
+                # Create AdBox entries
+                for ad in filtered_ads:
+                    # Calculate measurements
+                    dpi = getattr(page, 'pixels_per_inch', 150) or 150
+                    width_inches = ad['width'] / dpi
+                    height_inches = ad['height'] / dpi
+                    column_inches = width_inches * height_inches
+
+                    # Round measurements
+                    width_rounded = round(width_inches * 16) / 16
+                    height_rounded = round(height_inches * 16) / 16
+
+                    # Create AdBox
+                    ad_box = AdBox(
+                        page_id=page.id,
+                        x=float(ad['x']),
+                        y=float(ad['y']),
+                        width=float(ad['width']),
+                        height=float(ad['height']),
+                        width_inches_raw=width_inches,
+                        height_inches_raw=height_inches,
+                        width_inches_rounded=width_rounded,
+                        height_inches_rounded=height_rounded,
+                        column_inches=column_inches,
+                        ad_type='bordered_ad',
+                        is_ad=True,
+                        detected_automatically=True,
+                        confidence_score=ad['confidence'],
+                        user_verified=False
+                    )
+
+                    db.session.add(ad_box)
+                    total_detections += 1
+
+                db.session.commit()
+
+            return {
+                'success': True,
+                'detections': total_detections,
+                'pages_processed': len(pages),
+                'message': f'Detected {total_detections} bordered ads'
+            }
+
+        except Exception as e:
+            print(f"Error in simple ad detection: {e}")
+            import traceback
+            traceback.print_exc()
+            return {'success': False, 'error': str(e)}
+
+    @staticmethod
+    def _find_bordered_rectangles(image):
+        """Find rectangular regions with borders (where real ads are)"""
+        try:
+            gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
+
+            # Use multiple edge detection strategies to catch different ad types
+
+            # Strategy 1: Standard edge detection for clear borders
+            edges1 = cv2.Canny(gray, 50, 150, apertureSize=3)
+
+            # Strategy 2: More sensitive edge detection for subtle borders
+            edges2 = cv2.Canny(gray, 30, 100, apertureSize=3)
+
+            # Strategy 3: Morphological operations to find text blocks with borders
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+            morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+            edges3 = cv2.Canny(morph, 40, 120, apertureSize=3)
+
+            # Combine all edge maps
+            edges = cv2.bitwise_or(edges1, cv2.bitwise_or(edges2, edges3))
+
+            # Find contours with both external and internal hierarchy
+            contours, _ = cv2.findContours(edges, cv2.RETR_TREE, cv2.CHAIN_APPROX_SIMPLE)
+
+            rectangles = []
+
+            for contour in contours:
+                # Approximate contour to polygon
+                epsilon = 0.02 * cv2.arcLength(contour, True)
+                approx = cv2.approxPolyDP(contour, epsilon, True)
+
+                # Check if it's roughly rectangular (4-8 vertices)
+                if 4 <= len(approx) <= 8:
+                    x, y, w, h = cv2.boundingRect(contour)
+
+                    # Calculate aspect ratio
+                    aspect_ratio = w / h if h > 0 else 0
+
+                    # Calculate area
+                    area = w * h
+
+                    # Calculate how rectangular it is
+                    contour_area = cv2.contourArea(contour)
+                    rectangularity = contour_area / area if area > 0 else 0
+
+                    # Score based on how ad-like it is
+                    confidence = SimpleAdDetector._score_ad_candidate(w, h, aspect_ratio, rectangularity, area)
+
+                    if confidence > 0.3:  # Only keep decent candidates
+                        rectangles.append({
+                            'x': x,
+                            'y': y,
+                            'width': w,
+                            'height': h,
+                            'confidence': confidence,
+                            'aspect_ratio': aspect_ratio,
+                            'area': area
+                        })
+
+            # Sort by confidence
+            rectangles.sort(key=lambda r: r['confidence'], reverse=True)
+
+            return rectangles
+
+        except Exception as e:
+            print(f"Error finding bordered rectangles: {e}")
+            return []
+
+    @staticmethod
+    def _score_ad_candidate(width, height, aspect_ratio, rectangularity, area):
+        """Score how likely a rectangle is to be an ad"""
+        score = 0.0
+
+        # Size scoring - include smaller business directory ads
+        if 150 <= width <= 400 and 80 <= height <= 200:
+            score += 0.5  # Business directory size
+        elif 100 <= width <= 600 and 60 <= height <= 300:
+            score += 0.3  # Small to medium ads
+        elif 80 <= width <= 800 and 50 <= height <= 400:
+            score += 0.2  # Any reasonable ad size
+
+        # Aspect ratio scoring - business ads can be various shapes
+        if 1.5 <= aspect_ratio <= 3.0:
+            score += 0.3  # Typical business ad ratio
+        elif 1.0 <= aspect_ratio <= 4.0:
+            score += 0.2  # Reasonable ad ratio
+        elif 0.7 <= aspect_ratio <= 6.0:
+            score += 0.1  # Any reasonable ratio
+
+        # Area scoring - lower minimum for business directory
+        if area >= 8000:   # 100x80 minimum
+            score += 0.2
+        elif area >= 4000:   # 80x50 minimum
+            score += 0.1
+
+        # Rectangularity scoring - ads should be rectangular
+        if rectangularity >= 0.6:
+            score += 0.2
+        elif rectangularity >= 0.4:
+            score += 0.1
+
+        return min(1.0, score)
+
+    @staticmethod
+    def _filter_realistic_ads(rectangles):
+        """Filter to only realistic ad sizes and remove overlaps"""
+        filtered = []
+
+        for rect in rectangles:
+            # Minimum size filter - business directory ads can be smaller
+            if rect['width'] >= 80 and rect['height'] >= 50:
+                # Maximum size filter - not the whole page
+                if rect['width'] <= 600 and rect['height'] <= 400:
+                    # Check for overlaps with existing
+                    is_duplicate = False
+                    for existing in filtered:
+                        overlap = SimpleAdDetector._calculate_overlap(rect, existing)
+                        if overlap > 0.3:  # 30% overlap = duplicate
+                            is_duplicate = True
+                            break
+
+                    if not is_duplicate:
+                        filtered.append(rect)
+
+        return filtered
+
+    @staticmethod
+    def _calculate_overlap(rect1, rect2):
+        """Calculate overlap ratio between two rectangles"""
+        try:
+            x1_min, y1_min = rect1['x'], rect1['y']
+            x1_max, y1_max = x1_min + rect1['width'], y1_min + rect1['height']
+
+            x2_min, y2_min = rect2['x'], rect2['y']
+            x2_max, y2_max = x2_min + rect2['width'], y2_min + rect2['height']
+
+            # Calculate intersection
+            inter_x_min = max(x1_min, x2_min)
+            inter_y_min = max(y1_min, y2_min)
+            inter_x_max = min(x1_max, x2_max)
+            inter_y_max = min(y1_max, y2_max)
+
+            if inter_x_min < inter_x_max and inter_y_min < inter_y_max:
+                intersection = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+                area1 = rect1['width'] * rect1['height']
+                area2 = rect2['width'] * rect2['height']
+                union = area1 + area2 - intersection
+                return intersection / union if union > 0 else 0
+
+            return 0.0
+
+        except:
+            return 0.0
 
 
 # Publication configurations

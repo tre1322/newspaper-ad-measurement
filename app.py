@@ -1165,14 +1165,14 @@ class PDFAdDetectionEngine:
             if not pages:
                 return {'success': False, 'error': 'No pages found for publication'}
             
-            print(f"📄 Processing {len(pages)} pages with PDF metadata detection")
+            print(f"Processing {len(pages)} pages with PDF metadata detection")
             
             detections_count = 0
             pages_processed = 0
             
             for page in pages:
                 try:
-                    print(f"📄 Analyzing page {page.page_number} for PDF metadata ads")
+                    print(f"Analyzing page {page.page_number} for PDF metadata ads")
                     
                     # Get PDF detections with filename intelligence
                     pdf_detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
@@ -1180,7 +1180,7 @@ class PDFAdDetectionEngine:
                     )
                     
                     if pdf_detections:
-                        print(f"✅ Found {len(pdf_detections)} ad candidates on page {page.page_number}")
+                        print(f"Found {len(pdf_detections)} ad candidates on page {page.page_number}")
                         
                         # Transform coordinates
                         doc = fitz.open(pdf_path)
@@ -1219,12 +1219,16 @@ class PDFAdDetectionEngine:
                                 
                                 # Determine ad type
                                 ad_type = 'pdf_detected'
-                                if detection['type'] == 'image':
+                                if detection['ad_type'] == 'image_ad':
                                     ad_type = 'pdf_image_ad'
-                                elif detection['type'] == 'text':
+                                elif detection['ad_type'] == 'text_ad':
                                     ad_type = 'pdf_text_ad'
-                                elif detection['type'] == 'border':
+                                elif detection['ad_type'] == 'bordered_ad':
                                     ad_type = 'pdf_border_ad'
+                                elif detection['ad_type'] == 'mixed_ad':
+                                    ad_type = 'pdf_mixed_ad'
+                                else:
+                                    ad_type = f"pdf_{detection['ad_type']}"
                                 
                                 # Create AdBox
                                 ad_box = AdBox(
@@ -1248,26 +1252,26 @@ class PDFAdDetectionEngine:
                                 db.session.add(ad_box)
                                 detections_count += 1
                                 
-                                print(f"📦 Created ad box: {ad_type} at ({detection['x']:.0f},{detection['y']:.0f}) "
+                                print(f"Created ad box: {ad_type} at ({detection['x']:.0f},{detection['y']:.0f}) "
                                       f"size {detection['width']:.0f}x{detection['height']:.0f} "
                                       f"confidence={detection['confidence']:.3f}")
                                 
                             except Exception as box_error:
-                                print(f"⚠️  Error creating ad box: {box_error}")
+                                print(f"Error creating ad box: {box_error}")
                                 continue
                     else:
-                        print(f"ℹ️  No ads found on page {page.page_number}")
+                        print(f"No ads found on page {page.page_number}")
                     
                     pages_processed += 1
                     
                 except Exception as page_error:
-                    print(f"⚠️  Error processing page {page.page_number}: {page_error}")
+                    print(f"Error processing page {page.page_number}: {page_error}")
                     continue
             
             # Commit all changes
             if detections_count > 0:
                 db.session.commit()
-                print(f"✅ Successfully saved {detections_count} ad detections to database")
+                print(f"Successfully saved {detections_count} ad detections to database")
             
             return {
                 'success': True,
@@ -1277,7 +1281,7 @@ class PDFAdDetectionEngine:
             }
             
         except Exception as e:
-            print(f"❌ PDF detection engine error: {e}")
+            print(f"PDF detection engine error: {e}")
             db.session.rollback()
             return {'success': False, 'error': str(e)}
 

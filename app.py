@@ -3471,7 +3471,7 @@ class SimpleAdDetector:
                     # Score based on how ad-like it is
                     confidence = SimpleAdDetector._score_ad_candidate(w, h, aspect_ratio, rectangularity, area)
 
-                    if confidence > 0.3:  # Only keep decent candidates
+                    if confidence > 0.2:  # Keep more candidates (relaxed threshold)
                         rectangles.append({
                             'x': x,
                             'y': y,
@@ -3493,61 +3493,87 @@ class SimpleAdDetector:
 
     @staticmethod
     def _score_ad_candidate(width, height, aspect_ratio, rectangularity, area):
-        """Score how likely a rectangle is to be an ad"""
+        """Score how likely a rectangle is to be an ad (focusing on business ads, not editorial photos)"""
         score = 0.0
 
-        # Size scoring - include smaller business directory ads
-        if 150 <= width <= 400 and 80 <= height <= 200:
-            score += 0.5  # Business directory size
-        elif 100 <= width <= 600 and 60 <= height <= 300:
-            score += 0.3  # Small to medium ads
-        elif 80 <= width <= 800 and 50 <= height <= 400:
-            score += 0.2  # Any reasonable ad size
+        # Size scoring to include more business ads while excluding editorial photos
+        if 200 <= width <= 400 and 150 <= height <= 250:
+            score += 0.6  # Ideal business directory size
+        elif 250 <= width <= 500 and 150 <= height <= 300:
+            score += 0.5  # Medium business ad
+        elif 150 <= width <= 600 and 100 <= height <= 400:
+            score += 0.4  # Any business ad size (relaxed minimum)
+        elif 100 <= width <= 800 and 80 <= height <= 500:
+            score += 0.2  # Smaller business ads (classified style)
 
-        # Aspect ratio scoring - business ads can be various shapes
-        if 1.5 <= aspect_ratio <= 3.0:
-            score += 0.3  # Typical business ad ratio
-        elif 1.0 <= aspect_ratio <= 4.0:
-            score += 0.2  # Reasonable ad ratio
-        elif 0.7 <= aspect_ratio <= 6.0:
-            score += 0.1  # Any reasonable ratio
+        # Aspect ratio scoring - business ads have rectangular layouts
+        # Editorial photos often have different ratios
+        if 1.3 <= aspect_ratio <= 2.5:
+            score += 0.4  # Typical business ad ratio (horizontal rectangular)
+        elif 2.5 <= aspect_ratio <= 4.0:
+            score += 0.3  # Banner-style ads
+        elif 1.0 <= aspect_ratio <= 1.3:
+            score += 0.2  # Square-ish ads (less common but valid)
 
-        # Area scoring - lower minimum for business directory
-        if area >= 8000:   # 100x80 minimum
+        # Area scoring - business ads need sufficient space for content
+        if 30000 <= area <= 150000:  # 200x150 to 500x300 range
+            score += 0.3
+        elif 15000 <= area <= 250000:  # Broader business ad range
             score += 0.2
-        elif area >= 4000:   # 80x50 minimum
+        elif area >= 8000:  # Minimum ad area (100x80)
             score += 0.1
 
-        # Rectangularity scoring - ads should be rectangular
-        if rectangularity >= 0.6:
-            score += 0.2
+        # Rectangularity scoring - ads should be very rectangular
+        # Editorial photos often have irregular borders
+        if rectangularity >= 0.8:
+            score += 0.3  # Very rectangular (ideal for ads)
+        elif rectangularity >= 0.6:
+            score += 0.2  # Reasonably rectangular
         elif rectangularity >= 0.4:
-            score += 0.1
+            score += 0.1  # Somewhat rectangular
 
-        return min(1.0, score)
+        # Penalize very large areas (likely editorial photos or page elements)
+        if area > 400000:  # Too large to be a typical business ad (relaxed)
+            score -= 0.3
+
+        # Penalize very square ratios (often editorial photos)
+        if 0.95 <= aspect_ratio <= 1.05:  # Very square only
+            score -= 0.1
+
+        return max(0.0, min(1.0, score))
 
     @staticmethod
     def _filter_realistic_ads(rectangles):
-        """Filter to only realistic ad sizes and remove overlaps"""
-        filtered = []
-
+        """Filter to only realistic ad sizes, merge adjacent detections, and remove overlaps"""
+        # First, apply size filtering (relaxed to capture more business ads)
+        size_filtered = []
         for rect in rectangles:
-            # Minimum size filter - business directory ads can be smaller
-            if rect['width'] >= 80 and rect['height'] >= 50:
+            # Relaxed minimum size to capture smaller business directory ads
+            if rect['width'] >= 100 and rect['height'] >= 80:
                 # Maximum size filter - not the whole page
-                if rect['width'] <= 600 and rect['height'] <= 400:
-                    # Check for overlaps with existing
-                    is_duplicate = False
-                    for existing in filtered:
-                        overlap = SimpleAdDetector._calculate_overlap(rect, existing)
-                        if overlap > 0.3:  # 30% overlap = duplicate
-                            is_duplicate = True
-                            break
+                if rect['width'] <= 800 and rect['height'] <= 500:
+                    size_filtered.append(rect)
 
-                    if not is_duplicate:
-                        filtered.append(rect)
+        # Sort by confidence for merging
+        size_filtered.sort(key=lambda r: r['confidence'], reverse=True)
 
-        return filtered
+        # Merge adjacent detections within 30 pixels
+        merged = SimpleAdDetector._merge_adjacent_detections(size_filtered)
+
+        # Remove overlaps after merging
+        final_filtered = []
+        for rect in merged:
+            is_duplicate = False
+            for existing in final_filtered:
+                overlap = SimpleAdDetector._calculate_overlap(rect, existing)
+                if overlap > 0.3:  # 30% overlap = duplicate
+                    is_duplicate = True
+                    break
+
+            if not is_duplicate:
+                final_filtered.append(rect)
+
+        return final_filtered
 
     @staticmethod
     def _calculate_overlap(rect1, rect2):
@@ -3576,6 +3602,99 @@ class SimpleAdDetector:
 
         except:
             return 0.0
+
+    @staticmethod
+    def _merge_adjacent_detections(rectangles):
+        """Merge detections that are within 30 pixels of each other"""
+        if not rectangles:
+            return rectangles
+
+        merged = []
+        used = set()
+
+        for i, rect in enumerate(rectangles):
+            if i in used:
+                continue
+
+            # Find all rectangles within 30 pixels
+            cluster = [rect]
+            used.add(i)
+
+            for j, other_rect in enumerate(rectangles[i+1:], i+1):
+                if j in used:
+                    continue
+
+                # Check if rectangles are within 30 pixels
+                if SimpleAdDetector._are_adjacent(rect, other_rect, threshold=30):
+                    cluster.append(other_rect)
+                    used.add(j)
+
+            # Merge cluster into single detection
+            if len(cluster) == 1:
+                merged.append(cluster[0])
+            else:
+                merged_rect = SimpleAdDetector._merge_rectangle_cluster(cluster)
+                merged.append(merged_rect)
+
+        return merged
+
+    @staticmethod
+    def _are_adjacent(rect1, rect2, threshold=30):
+        """Check if two rectangles are within threshold pixels of each other"""
+        # Calculate distances between rectangles
+        x1_min, y1_min = rect1['x'], rect1['y']
+        x1_max, y1_max = x1_min + rect1['width'], y1_min + rect1['height']
+
+        x2_min, y2_min = rect2['x'], rect2['y']
+        x2_max, y2_max = x2_min + rect2['width'], y2_min + rect2['height']
+
+        # Check horizontal distance
+        h_dist = 0
+        if x1_max < x2_min:
+            h_dist = x2_min - x1_max
+        elif x2_max < x1_min:
+            h_dist = x1_min - x2_max
+
+        # Check vertical distance
+        v_dist = 0
+        if y1_max < y2_min:
+            v_dist = y2_min - y1_max
+        elif y2_max < y1_min:
+            v_dist = y1_min - y2_max
+
+        # Adjacent if both distances are within threshold
+        return h_dist <= threshold and v_dist <= threshold
+
+    @staticmethod
+    def _merge_rectangle_cluster(cluster):
+        """Merge a cluster of rectangles into a single bounding rectangle"""
+        if not cluster:
+            return None
+
+        # Find bounding box that encompasses all rectangles
+        min_x = min(rect['x'] for rect in cluster)
+        min_y = min(rect['y'] for rect in cluster)
+        max_x = max(rect['x'] + rect['width'] for rect in cluster)
+        max_y = max(rect['y'] + rect['height'] for rect in cluster)
+
+        # Use highest confidence from cluster
+        max_confidence = max(rect['confidence'] for rect in cluster)
+
+        # Calculate merged rectangle properties
+        merged_width = max_x - min_x
+        merged_height = max_y - min_y
+        merged_aspect_ratio = merged_width / merged_height if merged_height > 0 else 0
+        merged_area = merged_width * merged_height
+
+        return {
+            'x': min_x,
+            'y': min_y,
+            'width': merged_width,
+            'height': merged_height,
+            'confidence': max_confidence,
+            'aspect_ratio': merged_aspect_ratio,
+            'area': merged_area
+        }
 
 
 # Publication configurations

@@ -335,80 +335,48 @@ def start_background_processing(pub_id):
                 try:
                     print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                     
-                    # Try PDF metadata detection first (doesn't require credentials)
+                    # Use NEW Hybrid Logo Recognition + Manual Detection System
                     try:
-                        print(f"📄 Attempting PDF metadata-based ad detection")
-                        pdf_result = PDFAdDetectionEngine.detect_ads_from_pdf(publication.id)
-                        
-                        if pdf_result and pdf_result.get('success'):
-                            print(f"✅ PDF detection complete: {pdf_result['detections']} ads detected across {pdf_result['pages_processed']} pages")
-                            if pdf_result['detections'] > 0:
+                        print(f"🤖 Starting HYBRID Logo Recognition + Detection System")
+
+                        # Initialize the new hybrid detection pipeline
+                        hybrid_pipeline = HybridDetectionPipeline()
+
+                        # Run hybrid detection in auto mode (logo recognition first)
+                        hybrid_result = hybrid_pipeline.detect_ads_hybrid(publication.id, mode='auto')
+
+                        if hybrid_result and hybrid_result.get('success'):
+                            total_detections = hybrid_result.get('total_detections', 0)
+                            logo_detections = hybrid_result.get('logo_detections', 0)
+                            business_logos = hybrid_result.get('business_logos_found', [])
+
+                            print(f"✅ HYBRID DETECTION COMPLETE: {total_detections} ads detected across {hybrid_result.get('pages_processed', 0)} pages")
+
+                            if logo_detections > 0:
+                                print(f"🏢 Logo Recognition: {logo_detections} business ads auto-detected")
+                                print(f"📝 Businesses found: {', '.join(business_logos)}")
+
+                            if total_detections > 0:
                                 print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
+                                print(f"💡 Use hybrid detection interface for manual enhancement if needed")
                             else:
-                                print(f"ℹ️  No ads detected via PDF analysis - you can manually mark ads as usual")
+                                print(f"ℹ️  No known business logos detected - use manual detection for new/unique ads")
+                                print(f"💡 Manual ads will be learned for future automatic detection")
                         else:
-                            error_msg = pdf_result.get('error', 'PDF analysis failed') if pdf_result else 'No result returned'
-                            print(f"⚠️  PDF detection failed: {error_msg}")
-                            print(f"📝 Will try alternative detection methods if available")
-                    except Exception as pdf_error:
-                        print(f"⚠️  PDF detection failed with error: {pdf_error}")
-                        print(f"📝 Will try alternative detection methods if available")
+                            error_msg = hybrid_result.get('error', 'Hybrid detection failed') if hybrid_result else 'No result returned'
+                            print(f"⚠️  Hybrid detection failed: {error_msg}")
+                            print(f"📝 Will fall back to manual detection only")
+
+                    except Exception as hybrid_error:
+                        print(f"⚠️  Hybrid detection failed with error: {hybrid_error}")
+                        print(f"📝 Falling back to manual detection interface")
                     
-                    # Skip traditional AI detection if Google Vision credentials are not available
-                    if not os.path.exists('google-vision-credentials.json'):
-                        print(f"⚠️  Google Vision credentials not found - skipping Vision AI detection")
-                        print(f"📝 Publication processed successfully - continue with manual ad marking")
-                    else:
-                        # Timeout protection for auto-detection (robust error handling)
-                        import time
-                        start_time = time.time()
-                        
-                        try:
-                            # Test if Vision API is available before attempting detection
-                            if not is_vision_api_available():
-                                print(f"⚠️  Google Vision API not available - skipping AI detection")
-                                print(f"📝 Publication processed successfully - continue with manual ad marking")
-                            else:
-                                # Proceed with AI detection with memory management
-                                result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.1)
-                                
-                                if result and result.get('success'):
-                                    print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")
-                                    if result['detections'] > 0:
-                                        print(f"📊 Model used: {result.get('model_used', 'Unknown')}")
-                                        print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
-                                    else:
-                                        print(f"ℹ️  No ads detected above confidence threshold - you can manually mark ads as usual")
-                                else:
-                                    error_msg = result.get('error', 'Unknown error') if result else 'No result returned'
-                                    print(f"⚠️  AI detection failed: {error_msg}")
-                                    print(f"📝 Publication processed successfully - continue with manual ad marking")
-                                    
-                        except MemoryError as me:
-                            print(f"⚠️  AI detection failed due to memory constraints: {me}")
-                            print(f"📝 Publication processed successfully - continue with manual ad marking")
-                        except ImportError as ie:
-                            print(f"⚠️  AI detection failed due to missing dependencies: {ie}")
-                            print(f"📝 Publication processed successfully - continue with manual ad marking")
-                        except Exception as detection_error:
-                            print(f"⚠️  AI detection failed with error: {detection_error}")
-                            print(f"📝 Publication processed successfully - continue with manual ad marking")
-                        finally:
-                            # Check if we exceeded timeout and cleanup
-                            elapsed = time.time() - start_time
-                            if elapsed > 300:  # 5 minutes
-                                print(f"⚠️  AI detection took {elapsed:.1f}s (timeout threshold: 300s)")
-                            
-                            # Force garbage collection to free memory
-                            try:
-                                import gc
-                                gc.collect()
-                            except:
-                                pass
-                            
+                    # OLD DETECTION SYSTEM REMOVED - Now using Hybrid Logo Recognition System above
+                    print(f"📝 Publication processed successfully - review ads using new hybrid detection interface")
+
                 except Exception as outer_error:
-                    print(f"⚠️  AI detection phase failed completely: {outer_error}")
-                    print(f"📝 Publication processed successfully - continue with manual ad marking")
+                    print(f"⚠️  Hybrid detection phase failed: {outer_error}")
+                    print(f"📝 Publication processed successfully - use manual detection interface")
                 
                 # Mark as completed
                 publication.processed = True
@@ -9486,22 +9454,57 @@ def intelligent_detect_ad(page_id):
 
 @app.route('/api/auto_detect_ads/<int:page_id>', methods=['POST'])
 def auto_detect_ads_with_learning(page_id):
-    """PRIORITY 1-4: Enhanced automatic ad detection with negative training"""
+    """NEW: Hybrid logo recognition + manual detection for single page"""
     try:
         page = Page.query.get_or_404(page_id)
         publication = Publication.query.get(page.publication_id)
-        
-        # Construct PDF path from publication filename
-        pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
-        if not os.path.exists(pdf_path):
-            return jsonify({'success': False, 'error': 'PDF file not found'})
-        
-        print(f"Starting enhanced automatic detection for page {page_id}")
-        
-        # PRIORITY 1-3: Use enhanced PDFMetadataAdDetector with all improvements and filename intelligence
-        detections = PDFMetadataAdDetector.detect_ads_from_pdf_metadata(
-            pdf_path, page.page_number, publication.publication_type, publication.original_filename
-        )
+
+        print(f"Starting HYBRID logo recognition for page {page_id}")
+
+        # Initialize hybrid detection pipeline
+        hybrid_pipeline = HybridDetectionPipeline()
+
+        # Run logo recognition detection on this specific page
+        recognition_engine = LogoRecognitionDetectionEngine()
+        page_result = recognition_engine.detect_logos_on_page(page_id, confidence_threshold=0.7)
+
+        if page_result.get('success'):
+            detections_created = page_result.get('detections_created', 0)
+            business_names = page_result.get('business_names', [])
+
+            print(f"Hybrid detection found {detections_created} logo-based ads on page {page.page_number}")
+
+            # Get detection suggestions for additional manual review
+            suggestions_result = hybrid_pipeline.get_detection_suggestions(page_id, threshold=0.6)
+            suggestions = suggestions_result.get('suggestions', []) if suggestions_result.get('success') else []
+
+            return jsonify({
+                'success': True,
+                'detections': detections_created,
+                'business_names': business_names,
+                'suggestions': suggestions,
+                'message': f'Logo recognition complete: {detections_created} business ads detected'
+            })
+        else:
+            error_msg = page_result.get('error', 'Logo recognition failed')
+            print(f"Logo recognition failed: {error_msg}")
+
+            # Still provide suggestions for manual detection
+            suggestions_result = hybrid_pipeline.get_detection_suggestions(page_id, threshold=0.5)
+            suggestions = suggestions_result.get('suggestions', []) if suggestions_result.get('success') else []
+
+            return jsonify({
+                'success': True,
+                'detections': 0,
+                'suggestions': suggestions,
+                'message': 'No logo-based ads detected - use manual detection with suggestions'
+            })
+
+    except Exception as e:
+        print(f"Error in hybrid auto detection: {e}")
+        import traceback
+        traceback.print_exc()
+        return jsonify({'success': False, 'error': str(e)})
         
         if not detections:
             return jsonify({

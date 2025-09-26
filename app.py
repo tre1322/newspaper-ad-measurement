@@ -4,6 +4,7 @@ import fitz  # PyMuPDF
 import cv2
 import numpy as np
 import math
+from pdf_structure_analyzer import PDFStructureAdDetector
 
 # Google Vision AI setup - SECURE VERSION
 # Load environment variables first
@@ -1412,154 +1413,41 @@ class PDFMetadataAdDetector:
     @staticmethod
     def detect_ads_from_pdf_metadata(pdf_path, page_number, publication_type='broadsheet', original_filename=None):
         """
-        Detect ads using PDF structural analysis focusing on bordered rectangles.
-        Enhanced with filename intelligence to improve accuracy.
-        
+        NEW: Enhanced PDF structure analysis for ad detection.
+        Replaces broken sliding window approach with precise PDF metadata analysis.
+
         Args:
             pdf_path (str): Path to the PDF file
             page_number (int): Page number to analyze (1-based)
             publication_type (str): Type of publication for context
-            original_filename (str, optional): Original filename to extract size hints
-            
+            original_filename (str, optional): Original filename for context
+
         Returns:
             list: Detected ad regions as dicts with x, y, width, height, confidence
         """
-        try:
-            if not os.path.exists(pdf_path):
-                print(f"PDF file not found: {pdf_path}")
-                return []
-                
-            doc = fitz.open(pdf_path)
-            if page_number < 1 or page_number > len(doc):
-                print(f"Invalid page number {page_number} for PDF with {len(doc)} pages")
-                return []
-                
-            page = doc[page_number - 1]  # fitz uses 0-based indexing
-            page_rect = page.rect
-            
-            detected_ads = []
-            
-            # Get all page elements for structural analysis
-            drawings = page.get_drawings()
-            
-            # Reduced logging
-            # pass
-            
-            # PRIORITY 1: Analyze bordered rectangles first (highest priority)
-            bordered_candidates = []
-            simple_drawing_candidates = []
-            
-            for draw_index, drawing in enumerate(drawings):
-                try:
-                    # Get drawing items count and border information
-                    items = drawing.get('items', [])
-                    items_count = len(items)
-                    
-                    # Check if this drawing has a border using proper path analysis
-                    has_border = PDFMetadataAdDetector._detect_rectangular_border(drawing)
-                    
-                    draw_rect = drawing.get('rect', None)
-                    if draw_rect:
-                        element_id = f"drawing_{draw_index}"
-                        # Reduced logging to prevent rate limit
-                        # pass
-                        
-                        # Prioritize simple bordered rectangles
-                        if has_border and 1 <= items_count <= 3:
-                            ad_candidate = PDFMetadataAdDetector._analyze_drawing_element(
-                                drawing, draw_rect, page_rect, publication_type, element_id, True
-                            )
-                            if ad_candidate:
-                                bordered_candidates.append(ad_candidate)
-                        elif not has_border and items_count >= 4:
-                            # Ignore complex drawings without borders completely
-                            continue
-                        else:
-                            # Simple drawings without borders - lower priority
-                            ad_candidate = PDFMetadataAdDetector._analyze_drawing_element(
-                                drawing, draw_rect, page_rect, publication_type, element_id, False
-                            )
-                            if ad_candidate:
-                                simple_drawing_candidates.append(ad_candidate)
-                                
-                except Exception as e:
-                    print(f"Error analyzing drawing {draw_index}: {e}")
-                    continue
-            
-            # Add bordered candidates first (highest confidence)
-            detected_ads.extend(bordered_candidates)
-            # Add simple drawing candidates only if we don't have many bordered ones
-            if len(bordered_candidates) < 10:
-                detected_ads.extend(simple_drawing_candidates[:5])  # Limit simple drawings
-            
-            # Merge overlapping regions and filter by confidence
-            filtered_ads = PDFMetadataAdDetector._merge_and_filter_detections(detected_ads)
-            
-            # Apply size-restricted filtering: Only detect standard newspaper ad sizes
-            filename_hints = PDFMetadataAdDetector.extract_size_hints_from_filename(original_filename)
-            
-            # Calculate pixels per inch for this page
-            if publication_type == 'tabloid':
-                standard_width_inches = 11  # Standard tabloid width
-                page_width_pixels = page_rect.width
-                pixels_per_inch = page_width_pixels / standard_width_inches
-            else:  # broadsheet
-                standard_width_inches = 13.5  # Standard broadsheet width  
-                page_width_pixels = page_rect.width
-                pixels_per_inch = page_width_pixels / standard_width_inches
-            
-            if filename_hints['has_size_hint']:
-                print(f"🎯 Filename hints: {filename_hints['expected_width_inches']}x{filename_hints['expected_height_inches']} inches")
-                print(f"   Target size: {filename_hints['expected_width_inches'] * pixels_per_inch:.0f}x{filename_hints['expected_height_inches'] * pixels_per_inch:.0f} pixels (PPI: {pixels_per_inch:.1f})")
-            else:
-                print(f"📐 Size-restricted mode: Only detecting standard newspaper ad sizes (PPI: {pixels_per_inch:.1f})")
-            
-            # Apply size-restricted filtering to all detections
-            size_filtered_ads = []
-            matched_count = 0
-            rejected_count = 0
-            
-            for detection in filtered_ads:
-                width_px = detection['width']
-                height_px = detection['height']
-                original_confidence = detection.get('confidence', 0.5)
-                
-                # Check if detection matches any standard ad size
-                is_standard_size, size_name, confidence_multiplier = PDFMetadataAdDetector.matches_standard_ad_size(
-                    width_px, height_px, pixels_per_inch, filename_hints
-                )
-                
-                if is_standard_size:
-                    # Apply confidence adjustment based on how well it matches standard sizes
-                    new_confidence = min(original_confidence * confidence_multiplier, 0.95)
-                    
-                    detection['confidence'] = new_confidence
-                    detection['standard_size'] = size_name
-                    detection['size_match'] = True
-                    
-                    size_filtered_ads.append(detection)
-                    matched_count += 1
-                    
-                    if filename_hints.get('has_size_hint') and confidence_multiplier > 1.0:
-                        print(f"🎯 Perfect match: {size_name} inch ad (confidence: {original_confidence:.2f} -> {new_confidence:.2f})")
-                    else:
-                        print(f"✅ Standard size: {size_name} inch ad (confidence: {original_confidence:.2f} -> {new_confidence:.2f})")
-                else:
-                    # Reject detections that don't match standard ad sizes
-                    rejected_count += 1
-                    print(f"❌ Rejected non-standard size: {width_px:.0f}x{height_px:.0f}px ({width_px/pixels_per_inch:.1f}x{height_px/pixels_per_inch:.1f}in)")
-            
-            print(f"📊 Size filtering results: {matched_count} standard ads detected, {rejected_count} non-standard rejected")
-            filtered_ads = size_filtered_ads
-            
-            doc.close()
-            return filtered_ads
-            
-        except Exception as e:
-            print(f"Error in PDF metadata ad detection: {e}")
-            import traceback
-            traceback.print_exc()
-            return []
+        print("Using NEW PDF structure analysis (replacing old rectangular detection)")
+
+        # Use the new comprehensive PDF structure analyzer
+        detected_ads = PDFStructureAdDetector.detect_ads_from_pdf_structure(
+            pdf_path, page_number, publication_type
+        )
+
+        # Convert format to match expected interface
+        formatted_ads = []
+        for ad in detected_ads:
+            formatted_ads.append({
+                'x': ad['x'],
+                'y': ad['y'],
+                'width': ad['width'],
+                'height': ad['height'],
+                'confidence': ad['confidence'],
+                'ad_type': ad.get('type', 'detected_ad'),
+                'classification': ad.get('classification', 'pdf_structure'),
+                'source_elements': ad.get('source_elements', [])
+            })
+
+        print(f"New PDF structure analysis complete: {len(formatted_ads)} ads detected")
+        return formatted_ads
     
     @staticmethod
     def _analyze_image_element(img_rect, page_rect, publication_type, element_id):
@@ -4384,18 +4272,32 @@ class AdLearningEngine:
                     print(f"PDF metadata detection failed for page {page.page_number}: {pdf_error}")
                     pdf_detected_boxes = []
                 
-                # SECONDARY: Try Google Vision AI if PDF detection finds nothing
+                # SECONDARY: Enhanced PDF structure analysis if primary PDF detection finds nothing
                 vision_detected_boxes = []
-                if len(pdf_detected_boxes) == 0 and is_vision_api_available():
+                if len(pdf_detected_boxes) == 0:
                     try:
-                        print(f"Falling back to Google Vision AI detection on page {page.page_number}")
-                        vision_detected_boxes = GoogleVisionAdDetector.detect_ads(
-                            image_path, publication.publication_type
+                        print(f"Primary PDF analysis found nothing, trying enhanced structure analysis on page {page.page_number}")
+                        # Use the new comprehensive PDF structure analyzer as fallback
+                        enhanced_detected = PDFStructureAdDetector.detect_ads_from_pdf_structure(
+                            pdf_path, page.page_number, publication.publication_type
                         )
-                        print(f"Google Vision AI found {len(vision_detected_boxes)} ads on page {page.page_number}")
-                    except Exception as vision_error:
-                        error_type = handle_vision_api_error(vision_error, f"page {page.page_number} detection")
-                        print(f"Google Vision AI failed for page {page.page_number}: {vision_error}")
+
+                        # Convert to expected format
+                        for ad in enhanced_detected:
+                            vision_detected_boxes.append({
+                                'x': int(ad['x']),
+                                'y': int(ad['y']),
+                                'width': int(ad['width']),
+                                'height': int(ad['height']),
+                                'confidence': ad['confidence'],
+                                'ad_type': ad.get('type', 'structure_detected'),
+                                'source': 'pdf_structure_enhanced'
+                            })
+
+                        print(f"Enhanced PDF structure analysis found {len(vision_detected_boxes)} ads on page {page.page_number}")
+
+                    except Exception as structure_error:
+                        print(f"Enhanced PDF structure analysis failed for page {page.page_number}: {structure_error}")
                         vision_detected_boxes = []
                 
                 # TERTIARY FALLBACK: Use existing detection if both PDF and Vision AI fail or find nothing

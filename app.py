@@ -335,44 +335,24 @@ def start_background_processing(pub_id):
                 try:
                     print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                     
-                    # Use NEW Hybrid Logo Recognition + Manual Detection System
+                    # EMERGENCY ROLLBACK: Use PDF detection (was working before)
                     try:
-                        print(f"🤖 Starting HYBRID Logo Recognition + Detection System")
+                        print(f"📄 Starting PDF-based ad detection (ROLLBACK)")
+                        pdf_result = PDFAdDetectionEngine.detect_ads_from_pdf(publication.id)
 
-                        # Initialize the new hybrid detection pipeline
-                        hybrid_pipeline = HybridDetectionPipeline()
-
-                        # Run hybrid detection in auto mode (logo recognition first)
-                        hybrid_result = hybrid_pipeline.detect_ads_hybrid(publication.id, mode='auto')
-
-                        if hybrid_result and hybrid_result.get('success'):
-                            total_detections = hybrid_result.get('total_detections', 0)
-                            logo_detections = hybrid_result.get('logo_detections', 0)
-                            business_logos = hybrid_result.get('business_logos_found', [])
-
-                            print(f"✅ HYBRID DETECTION COMPLETE: {total_detections} ads detected across {hybrid_result.get('pages_processed', 0)} pages")
-
-                            if logo_detections > 0:
-                                print(f"🏢 Logo Recognition: {logo_detections} business ads auto-detected")
-                                print(f"📝 Businesses found: {', '.join(business_logos)}")
-
-                            if total_detections > 0:
-                                print(f"📝 Next: Review the auto-detected ads on the measurement pages to verify accuracy")
-                                print(f"💡 Use hybrid detection interface for manual enhancement if needed")
+                        if pdf_result and pdf_result.get('success'):
+                            print(f"SUCCESS: PDF detection complete: {pdf_result['detections']} ads detected across {pdf_result['pages_processed']} pages")
+                            if pdf_result['detections'] > 0:
+                                print(f"Next: Review the auto-detected ads on the measurement pages to verify accuracy")
                             else:
-                                print(f"ℹ️  No known business logos detected - use manual detection for new/unique ads")
-                                print(f"💡 Manual ads will be learned for future automatic detection")
+                                print(f"No ads detected via PDF analysis - you can manually mark ads as usual")
                         else:
-                            error_msg = hybrid_result.get('error', 'Hybrid detection failed') if hybrid_result else 'No result returned'
-                            print(f"⚠️  Hybrid detection failed: {error_msg}")
-                            print(f"📝 Will fall back to manual detection only")
-
-                    except Exception as hybrid_error:
-                        print(f"⚠️  Hybrid detection failed with error: {hybrid_error}")
-                        print(f"📝 Falling back to manual detection interface")
-                    
-                    # OLD DETECTION SYSTEM REMOVED - Now using Hybrid Logo Recognition System above
-                    print(f"📝 Publication processed successfully - review ads using new hybrid detection interface")
+                            error_msg = pdf_result.get('error', 'PDF analysis failed') if pdf_result else 'No result returned'
+                            print(f"PDF detection failed: {error_msg}")
+                            print(f"Will try alternative detection methods if available")
+                    except Exception as pdf_error:
+                        print(f"PDF detection failed with error: {pdf_error}")
+                        print(f"Will try alternative detection methods if available")
 
                 except Exception as outer_error:
                     print(f"⚠️  Hybrid detection phase failed: {outer_error}")

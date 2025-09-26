@@ -4245,6 +4245,8 @@ class AdLearningEngine:
                 # PRIMARY: Try PDF Metadata detection first
                 pdf_detected_boxes = []
                 pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
+                print(f"DEBUG: PDF path: {pdf_path}")
+                print(f"DEBUG: PDF exists: {os.path.exists(pdf_path)}")
                 print(f"Attempting PDF metadata detection on page {page.page_number}")
                 try:
                     # Get PDF detections in PDF coordinate system with filename intelligence
@@ -4252,53 +4254,30 @@ class AdLearningEngine:
                         pdf_path, page.page_number, publication.publication_type, publication.original_filename
                     )
                     
+                    print(f"DEBUG: Raw PDF detections returned: {len(pdf_detections) if pdf_detections else 0}")
                     if pdf_detections:
                         print(f"PDF metadata found {len(pdf_detections)} ad candidates on page {page.page_number}")
-                        
+
                         # Transform to image coordinate system
                         doc = fitz.open(pdf_path)
                         pdf_page = doc[page.page_number - 1]
                         pdf_page_rect = pdf_page.rect
                         doc.close()
-                        
+
                         pdf_detected_boxes = PDFMetadataAdDetector.transform_pdf_to_image_coordinates(
                             pdf_detections, pdf_page_rect, page.width_pixels, page.height_pixels
                         )
-                        print(f"Transformed {len(pdf_detected_boxes)} PDF detections to image coordinates")
+                        print(f"DEBUG: Transformed to {len(pdf_detected_boxes)} image coordinate boxes")
                     else:
-                        print(f"No ads detected via PDF metadata on page {page.page_number}")
+                        print(f"DEBUG: No ads detected via PDF metadata on page {page.page_number} - this might be the issue!")
                         
                 except Exception as pdf_error:
                     print(f"PDF metadata detection failed for page {page.page_number}: {pdf_error}")
                     pdf_detected_boxes = []
                 
-                # SECONDARY: Enhanced PDF structure analysis if primary PDF detection finds nothing
+                # REMOVED: Redundant secondary analysis (primary method now uses enhanced detection)
                 vision_detected_boxes = []
-                if len(pdf_detected_boxes) == 0:
-                    try:
-                        print(f"Primary PDF analysis found nothing, trying enhanced structure analysis on page {page.page_number}")
-                        # Use the new comprehensive PDF structure analyzer as fallback
-                        enhanced_detected = PDFStructureAdDetector.detect_ads_from_pdf_structure(
-                            pdf_path, page.page_number, publication.publication_type
-                        )
-
-                        # Convert to expected format
-                        for ad in enhanced_detected:
-                            vision_detected_boxes.append({
-                                'x': int(ad['x']),
-                                'y': int(ad['y']),
-                                'width': int(ad['width']),
-                                'height': int(ad['height']),
-                                'confidence': ad['confidence'],
-                                'ad_type': ad.get('type', 'structure_detected'),
-                                'source': 'pdf_structure_enhanced'
-                            })
-
-                        print(f"Enhanced PDF structure analysis found {len(vision_detected_boxes)} ads on page {page.page_number}")
-
-                    except Exception as structure_error:
-                        print(f"Enhanced PDF structure analysis failed for page {page.page_number}: {structure_error}")
-                        vision_detected_boxes = []
+                print(f"Using primary PDF detection results: {len(pdf_detected_boxes)} ads found")
                 
                 # TERTIARY FALLBACK: Use existing detection if both PDF and Vision AI fail or find nothing
                 fallback_detected_boxes = []

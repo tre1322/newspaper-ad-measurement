@@ -398,7 +398,7 @@ class PDFStructureAdDetector:
         # 1. Analyze images for ad characteristics
         for img in structure_data['images']:
             img_score = cls._score_image_as_ad(img, page_rect)
-            if img_score > 30:  # Threshold for image ads
+            if img_score > 20:  # LOWERED threshold for image ads (was 30)
                 potential_ads.append({
                     'x': img['bounds'][0],
                     'y': img['bounds'][1],
@@ -413,7 +413,7 @@ class PDFStructureAdDetector:
         # 2. Analyze text blocks for ad characteristics
         for text in structure_data['text_blocks']:
             text_score = cls._score_text_as_ad(text, page_rect)
-            if text_score > 40:  # Threshold for text ads
+            if text_score > 25:  # LOWERED threshold for text ads (was 40)
                 potential_ads.append({
                     'x': text['bounds'][0],
                     'y': text['bounds'][1],
@@ -476,15 +476,19 @@ class PDFStructureAdDetector:
         """
         base_score = text['business_score'] - text['editorial_score']
 
-        # Typography bonuses
+        # ENHANCED: More generous typography bonuses for clear ad indicators
         if text['has_mixed_fonts']:
-            base_score += 20  # Mixed fonts suggest designed layout
+            base_score += 30  # Mixed fonts are strong ad indicators
 
         if text['has_mixed_sizes']:
-            base_score += 15  # Mixed sizes suggest hierarchical design
+            base_score += 25  # Mixed sizes suggest hierarchical ad design
 
         if 'bold' in text['font_weights']:
-            base_score += 10  # Bold text common in ads
+            base_score += 15  # Bold text very common in ads
+
+        # Additional bonus for designed layouts (multiple typography features)
+        if text['has_mixed_fonts'] and text['has_mixed_sizes']:
+            base_score += 15  # Combo bonus for clearly designed content
 
         # Size analysis - ads have typical size ranges
         area = text['area']
@@ -513,7 +517,7 @@ class PDFStructureAdDetector:
                     img_score = cls._score_image_as_ad(img, page_rect)
                     text_score = cls._score_text_as_ad(text, page_rect)
 
-                    if img_score > 20 and text_score > 20:  # Both elements show ad potential
+                    if img_score > 15 and text_score > 15:  # LOWERED thresholds for grouped elements
                         combined_bounds = cls._combine_bounds(img['bounds'], text['bounds'])
                         combined_confidence = (img_score + text_score + 30) / 100.0  # Grouping bonus
 
@@ -638,28 +642,17 @@ class PDFStructureAdDetector:
             if not overlaps:
                 filtered.append(detection)
 
-        # Apply size validation based on standard newspaper ad sizes
+        # FIXED: More flexible size validation - don't reject ads based on arbitrary size rules
         final_ads = []
-        page_width_inches = 13.5 if publication_type == 'broadsheet' else 11.0
 
+        # Accept ads based on confidence and structural analysis, not rigid size constraints
         for ad in filtered:
-            # Estimate pixels per inch for this page
-            # This is approximate - real implementation would get from PDF metadata
-            estimated_ppi = 72  # Standard PDF resolution
-
-            width_inches = ad['width'] / estimated_ppi
-            height_inches = ad['height'] / estimated_ppi
-
-            # Check if size matches standard ad dimensions
-            is_valid_size = cls._matches_standard_ad_size(width_inches, height_inches)
-
-            if is_valid_size or ad['confidence'] > 0.8:  # High confidence overrides size check
+            # Accept all high-confidence detections (structural analysis is reliable)
+            if ad['confidence'] > 0.5:  # Lowered threshold from 0.8
                 final_ads.append(ad)
-                print(f"Detected {ad['type']}: {ad['width']:.0f}x{ad['height']:.0f}px "
-                      f"({width_inches:.1f}x{height_inches:.1f}in) - confidence: {ad['confidence']:.2f}")
+                print(f"Detected {ad['type']}: {ad['width']:.0f}x{ad['height']:.0f}px - confidence: {ad['confidence']:.2f}")
             else:
-                print(f"Rejected {ad['type']}: {width_inches:.1f}x{height_inches:.1f}in "
-                      f"doesn't match standard sizes")
+                print(f"Rejected {ad['type']}: confidence {ad['confidence']:.2f} too low")
 
         return final_ads
 

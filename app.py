@@ -4,6 +4,7 @@ import fitz  # PyMuPDF
 import cv2
 import numpy as np
 import math
+import json
 from pdf_structure_analyzer import PDFStructureAdDetector
 
 # Google Vision AI setup - SECURE VERSION
@@ -21,7 +22,7 @@ import io as vision_io
 from flask import Flask, render_template, request, jsonify, redirect, url_for, flash, send_file, session
 from flask_sqlalchemy import SQLAlchemy
 from flask_migrate import Migrate
-from datetime import datetime
+from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from functools import wraps
 from werkzeug.utils import secure_filename
@@ -163,7 +164,7 @@ def is_session_valid():
         return False
     
     # Check if session has expired
-    from datetime import datetime
+    from datetime import datetime, timedelta
     if datetime.utcnow().timestamp() - login_time > app.config['PERMANENT_SESSION_LIFETIME'].total_seconds():
         return False
     
@@ -700,6 +701,74 @@ class TrainingData(db.Model):
     # height = db.Column(db.Float)
     # training_source = db.Column(db.String(50), default='user_correction')  # user_correction, automatic, manual
 
+class BusinessLogo(db.Model):
+    """
+    Business logo recognition database for intelligent ad detection
+    Stores learned logo signatures and detection parameters
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    business_name = db.Column(db.String(255), nullable=False)
+    logo_image_path = db.Column(db.String(500))  # Path to stored logo image
+    logo_features = db.Column(db.Text)  # JSON serialized feature descriptors (SIFT/ORB keypoints)
+    color_histogram = db.Column(db.Text)  # JSON serialized color histogram
+    template_signature = db.Column(db.Text)  # JSON serialized template matching signature
+
+    # Typical ad dimensions learned from examples
+    typical_width_pixels = db.Column(db.Float)
+    typical_height_pixels = db.Column(db.Float)
+    typical_width_inches = db.Column(db.Float)
+    typical_height_inches = db.Column(db.Float)
+    width_variance = db.Column(db.Float, default=0.3)  # Allow 30% size variance by default
+    height_variance = db.Column(db.Float, default=0.3)
+
+    # Detection parameters
+    confidence_threshold = db.Column(db.Float, default=0.85)  # Minimum match confidence
+    min_match_points = db.Column(db.Integer, default=10)  # Minimum feature matches required
+
+    # Learning statistics
+    total_examples = db.Column(db.Integer, default=1)  # Number of examples used to train this logo
+    successful_detections = db.Column(db.Integer, default=0)  # Track detection success rate
+    false_positives = db.Column(db.Integer, default=0)  # Track false positive rate
+
+    # Business metadata
+    business_category = db.Column(db.String(100))  # e.g., 'restaurant', 'retail', 'services'
+    typical_ad_types = db.Column(db.String(255))  # JSON list: ['display', 'classified', 'entertainment']
+    first_seen_date = db.Column(db.DateTime, default=datetime.utcnow)
+    last_detected_date = db.Column(db.DateTime)
+
+    # Active learning parameters
+    is_active = db.Column(db.Boolean, default=True)  # Whether to use for detection
+    needs_retraining = db.Column(db.Boolean, default=False)  # Flag for model updates
+    confidence_score = db.Column(db.Float)  # Overall logo recognition confidence
+
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_date = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+class LogoRecognitionResult(db.Model):
+    """
+    Track logo recognition results for continuous learning
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    business_logo_id = db.Column(db.Integer, db.ForeignKey('business_logo.id'), nullable=False)
+    ad_box_id = db.Column(db.Integer, db.ForeignKey('ad_box.id'), nullable=True)  # Linked AdBox if created
+    page_id = db.Column(db.Integer, db.ForeignKey('page.id'), nullable=False)
+
+    # Detection location and confidence
+    x = db.Column(db.Float, nullable=False)
+    y = db.Column(db.Float, nullable=False)
+    width = db.Column(db.Float, nullable=False)
+    height = db.Column(db.Float, nullable=False)
+    detection_confidence = db.Column(db.Float, nullable=False)
+    feature_matches = db.Column(db.Integer)  # Number of matching features found
+
+    # User verification
+    user_verified = db.Column(db.Boolean, default=False)
+    is_correct_detection = db.Column(db.Boolean)  # True/False when user verifies
+    user_feedback = db.Column(db.Text)  # Optional user comments
+
+    detection_date = db.Column(db.DateTime, default=datetime.utcnow)
+    verification_date = db.Column(db.DateTime)
+
 class NegativeTrainingCollector:
     """
     Collects negative training examples from user corrections
@@ -931,6 +1000,2384 @@ class NegativeTrainingCollector:
                 
         except Exception as e:
             print(f"Error in retraining trigger: {e}")
+
+class LogoFeatureExtractor:
+    """
+    Advanced logo feature extraction for business recognition
+    Uses multiple computer vision techniques for robust logo matching
+    """
+
+    def __init__(self):
+        """Initialize feature extractors"""
+        self.sift = cv2.SIFT_create()
+        self.orb = cv2.ORB_create(nfeatures=500)
+
+    def extract_logo_features(self, image_region, business_name=None):
+        """
+        Extract comprehensive features from a logo region
+
+        Args:
+            image_region (numpy.ndarray): Logo image region (BGR format)
+            business_name (str): Optional business name for context
+
+        Returns:
+            dict: Feature dictionary with multiple signature types
+        """
+        try:
+            if len(image_region.shape) == 3:
+                gray = cv2.cvtColor(image_region, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image_region
+
+            features = {
+                'business_name': business_name,
+                'image_dimensions': image_region.shape,
+                'extraction_date': datetime.utcnow().isoformat()
+            }
+
+            # 1. SIFT keypoints and descriptors for distinctive features
+            sift_keypoints, sift_descriptors = self.sift.detectAndCompute(gray, None)
+            if sift_descriptors is not None:
+                features['sift_keypoints'] = len(sift_keypoints)
+                features['sift_descriptors'] = sift_descriptors.tolist()
+                features['sift_quality_score'] = self._calculate_feature_quality(sift_keypoints)
+            else:
+                features['sift_keypoints'] = 0
+                features['sift_descriptors'] = []
+
+            # 2. ORB features for rotation-invariant matching
+            orb_keypoints, orb_descriptors = self.orb.detectAndCompute(gray, None)
+            if orb_descriptors is not None:
+                features['orb_keypoints'] = len(orb_keypoints)
+                features['orb_descriptors'] = orb_descriptors.tolist()
+            else:
+                features['orb_keypoints'] = 0
+                features['orb_descriptors'] = []
+
+            # 3. Color histogram for color-based matching
+            features['color_histogram'] = self._extract_color_histogram(image_region)
+
+            # 4. Template signature for direct template matching
+            features['template_signature'] = self._create_template_signature(gray)
+
+            # 5. Shape descriptors
+            features['shape_features'] = self._extract_shape_features(gray)
+
+            # 6. Text detection (logos often contain text)
+            features['text_features'] = self._detect_text_regions(gray)
+
+            return features
+
+        except Exception as e:
+            print(f"Error extracting logo features: {e}")
+            return {
+                'error': str(e),
+                'business_name': business_name,
+                'extraction_date': datetime.utcnow().isoformat()
+            }
+
+    def _calculate_feature_quality(self, keypoints):
+        """Calculate quality score based on keypoint distribution and strength"""
+        if not keypoints:
+            return 0.0
+
+        # Analyze keypoint responses (strength)
+        responses = [kp.response for kp in keypoints]
+
+        # Spatial distribution
+        points = np.array([[kp.pt[0], kp.pt[1]] for kp in keypoints])
+
+        # Quality metrics
+        avg_response = np.mean(responses) if responses else 0
+        response_variance = np.var(responses) if len(responses) > 1 else 0
+        spatial_spread = np.std(points, axis=0).mean() if len(points) > 1 else 0
+
+        # Combined quality score (0-1)
+        quality = min(1.0, (avg_response * 0.4 + response_variance * 0.3 + spatial_spread * 0.3) / 100)
+        return float(quality)
+
+    def _extract_color_histogram(self, image):
+        """Extract multi-channel color histogram"""
+        try:
+            # Convert to HSV for better color representation
+            hsv = cv2.cvtColor(image, cv2.COLOR_BGR2HSV)
+
+            # Calculate histograms for each channel
+            hist_h = cv2.calcHist([hsv], [0], None, [50], [0, 180])
+            hist_s = cv2.calcHist([hsv], [1], None, [60], [0, 256])
+            hist_v = cv2.calcHist([hsv], [2], None, [60], [0, 256])
+
+            # Normalize histograms
+            hist_h = cv2.normalize(hist_h, hist_h).flatten()
+            hist_s = cv2.normalize(hist_s, hist_s).flatten()
+            hist_v = cv2.normalize(hist_v, hist_v).flatten()
+
+            return {
+                'hue': hist_h.tolist(),
+                'saturation': hist_s.tolist(),
+                'value': hist_v.tolist(),
+                'dominant_colors': self._get_dominant_colors(image)
+            }
+        except Exception as e:
+            print(f"Error extracting color histogram: {e}")
+            return {'hue': [], 'saturation': [], 'value': [], 'dominant_colors': []}
+
+    def _get_dominant_colors(self, image, k=3):
+        """Extract dominant colors using K-means clustering"""
+        try:
+            # Reshape image to be a list of pixels
+            data = image.reshape((-1, 3))
+            data = np.float32(data)
+
+            # Apply K-means clustering
+            criteria = (cv2.TERM_CRITERIA_EPS + cv2.TERM_CRITERIA_MAX_ITER, 20, 1.0)
+            _, labels, centers = cv2.kmeans(data, k, None, criteria, 10, cv2.KMEANS_RANDOM_CENTERS)
+
+            # Convert centers to int and return as list
+            centers = np.uint8(centers)
+            return centers.tolist()
+        except Exception:
+            return []
+
+    def _create_template_signature(self, gray_image):
+        """Create a template signature for direct matching"""
+        try:
+            # Resize to standard template size
+            template_size = (64, 64)
+            template = cv2.resize(gray_image, template_size)
+
+            # Apply Gaussian blur to reduce noise
+            template = cv2.GaussianBlur(template, (3, 3), 0)
+
+            # Normalize to reduce lighting variations
+            template = cv2.normalize(template, None, 0, 255, cv2.NORM_MINMAX)
+
+            return {
+                'template': template.tolist(),
+                'size': template_size,
+                'mean_intensity': float(np.mean(template)),
+                'std_intensity': float(np.std(template))
+            }
+        except Exception as e:
+            print(f"Error creating template signature: {e}")
+            return {'template': [], 'size': [64, 64], 'mean_intensity': 0, 'std_intensity': 0}
+
+    def _extract_shape_features(self, gray_image):
+        """Extract shape-based features from the logo"""
+        try:
+            # Edge detection
+            edges = cv2.Canny(gray_image, 50, 150)
+
+            # Find contours
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            shape_features = {
+                'edge_density': float(np.sum(edges > 0) / edges.size),
+                'contour_count': len(contours),
+                'total_contour_length': 0,
+                'largest_contour_area': 0,
+                'shape_complexity': 0
+            }
+
+            if contours:
+                # Analyze largest contour
+                largest_contour = max(contours, key=cv2.contourArea)
+                shape_features['largest_contour_area'] = float(cv2.contourArea(largest_contour))
+                shape_features['total_contour_length'] = float(sum(cv2.arcLength(c, True) for c in contours))
+
+                # Shape complexity (perimeter^2 / area ratio)
+                if shape_features['largest_contour_area'] > 0:
+                    perimeter = cv2.arcLength(largest_contour, True)
+                    shape_features['shape_complexity'] = float(perimeter * perimeter / shape_features['largest_contour_area'])
+
+            return shape_features
+        except Exception as e:
+            print(f"Error extracting shape features: {e}")
+            return {'edge_density': 0, 'contour_count': 0, 'total_contour_length': 0, 'largest_contour_area': 0, 'shape_complexity': 0}
+
+    def _detect_text_regions(self, gray_image):
+        """Detect text regions within the logo (many logos contain text)"""
+        try:
+            # Use EAST text detector if available, otherwise use simple edge-based detection
+            text_features = {
+                'has_text_regions': False,
+                'text_region_count': 0,
+                'text_area_ratio': 0.0,
+                'horizontal_text_lines': 0,
+                'vertical_text_lines': 0
+            }
+
+            # Simple text detection using morphological operations
+            # Create kernel for text detection
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+
+            # Apply morphological operations to detect text-like structures
+            morph = cv2.morphologyEx(gray_image, cv2.MORPH_CLOSE, kernel)
+
+            # Find connected components that might be text
+            binary_morph = (morph > 128).astype(np.uint8)
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(binary_morph)
+
+            # Analyze components for text-like characteristics
+            text_regions = 0
+            total_text_area = 0
+
+            for i in range(1, num_labels):  # Skip background (label 0)
+                area = stats[i, cv2.CC_STAT_AREA]
+                width = stats[i, cv2.CC_STAT_WIDTH]
+                height = stats[i, cv2.CC_STAT_HEIGHT]
+
+                # Text-like characteristics: reasonable size, aspect ratio
+                if area > 20 and width > 5 and height > 5:
+                    aspect_ratio = width / height
+                    if 0.1 < aspect_ratio < 10:  # Reasonable aspect ratio for text
+                        text_regions += 1
+                        total_text_area += area
+
+            text_features['has_text_regions'] = text_regions > 0
+            text_features['text_region_count'] = text_regions
+            text_features['text_area_ratio'] = float(total_text_area / gray_image.size)
+
+            return text_features
+        except Exception as e:
+            print(f"Error detecting text regions: {e}")
+            return {'has_text_regions': False, 'text_region_count': 0, 'text_area_ratio': 0.0, 'horizontal_text_lines': 0, 'vertical_text_lines': 0}
+
+class LogoMatcher:
+    """
+    Logo matching engine for recognizing stored business logos
+    """
+
+    def __init__(self):
+        """Initialize matching algorithms"""
+        self.sift = cv2.SIFT_create()
+        self.orb = cv2.ORB_create(nfeatures=500)
+
+        # Feature matching
+        FLANN_INDEX_KDTREE = 1
+        index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+        search_params = dict(checks=50)
+        self.flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+        # ORB matcher
+        self.orb_matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+
+    def match_logo(self, query_features, stored_logo_features, confidence_threshold=0.85):
+        """
+        Match query logo features against stored logo features
+
+        Args:
+            query_features (dict): Features extracted from query image
+            stored_logo_features (dict): Features from stored business logo
+            confidence_threshold (float): Minimum confidence for positive match
+
+        Returns:
+            dict: Match result with confidence score and details
+        """
+        try:
+            match_result = {
+                'is_match': False,
+                'confidence': 0.0,
+                'match_details': {},
+                'business_name': stored_logo_features.get('business_name', 'Unknown')
+            }
+
+            # Skip if either feature set has errors
+            if 'error' in query_features or 'error' in stored_logo_features:
+                return match_result
+
+            confidence_scores = []
+
+            # 1. SIFT feature matching
+            sift_confidence = self._match_sift_features(query_features, stored_logo_features)
+            confidence_scores.append(('sift', sift_confidence, 0.4))  # 40% weight
+
+            # 2. ORB feature matching
+            orb_confidence = self._match_orb_features(query_features, stored_logo_features)
+            confidence_scores.append(('orb', orb_confidence, 0.3))   # 30% weight
+
+            # 3. Color histogram matching
+            color_confidence = self._match_color_histograms(query_features, stored_logo_features)
+            confidence_scores.append(('color', color_confidence, 0.2))  # 20% weight
+
+            # 4. Template matching
+            template_confidence = self._match_templates(query_features, stored_logo_features)
+            confidence_scores.append(('template', template_confidence, 0.1))  # 10% weight
+
+            # Calculate weighted confidence
+            total_confidence = sum(score * weight for _, score, weight in confidence_scores)
+
+            match_result['confidence'] = total_confidence
+            match_result['is_match'] = total_confidence >= confidence_threshold
+            match_result['match_details'] = {
+                method: {'score': score, 'weight': weight}
+                for method, score, weight in confidence_scores
+            }
+
+            return match_result
+
+        except Exception as e:
+            print(f"Error matching logo: {e}")
+            return {
+                'is_match': False,
+                'confidence': 0.0,
+                'match_details': {'error': str(e)},
+                'business_name': stored_logo_features.get('business_name', 'Unknown')
+            }
+
+    def _match_sift_features(self, query_features, stored_features):
+        """Match SIFT features between query and stored logo"""
+        try:
+            query_desc = query_features.get('sift_descriptors', [])
+            stored_desc = stored_features.get('sift_descriptors', [])
+
+            if not query_desc or not stored_desc:
+                return 0.0
+
+            query_desc = np.array(query_desc, dtype=np.float32)
+            stored_desc = np.array(stored_desc, dtype=np.float32)
+
+            # Use FLANN matcher for SIFT features
+            matches = self.flann.knnMatch(query_desc, stored_desc, k=2)
+
+            # Apply Lowe's ratio test
+            good_matches = []
+            for match_pair in matches:
+                if len(match_pair) == 2:
+                    m, n = match_pair
+                    if m.distance < 0.7 * n.distance:
+                        good_matches.append(m)
+
+            # Calculate confidence based on good matches
+            match_ratio = len(good_matches) / min(len(query_desc), len(stored_desc))
+            return min(1.0, match_ratio * 2)  # Scale to 0-1 range
+
+        except Exception as e:
+            print(f"Error matching SIFT features: {e}")
+            return 0.0
+
+    def _match_orb_features(self, query_features, stored_features):
+        """Match ORB features between query and stored logo"""
+        try:
+            query_desc = query_features.get('orb_descriptors', [])
+            stored_desc = stored_features.get('orb_descriptors', [])
+
+            if not query_desc or not stored_desc:
+                return 0.0
+
+            query_desc = np.array(query_desc, dtype=np.uint8)
+            stored_desc = np.array(stored_desc, dtype=np.uint8)
+
+            # Use BF matcher for ORB features
+            matches = self.orb_matcher.match(query_desc, stored_desc)
+
+            # Sort matches by distance
+            matches = sorted(matches, key=lambda x: x.distance)
+
+            # Calculate confidence based on match quality
+            if matches:
+                good_matches = [m for m in matches if m.distance < 50]  # ORB distance threshold
+                match_ratio = len(good_matches) / min(len(query_desc), len(stored_desc))
+                return min(1.0, match_ratio * 2)
+
+            return 0.0
+
+        except Exception as e:
+            print(f"Error matching ORB features: {e}")
+            return 0.0
+
+    def _match_color_histograms(self, query_features, stored_features):
+        """Match color histograms between query and stored logo"""
+        try:
+            query_hist = query_features.get('color_histogram', {})
+            stored_hist = stored_features.get('color_histogram', {})
+
+            if not query_hist or not stored_hist:
+                return 0.0
+
+            # Compare each color channel
+            correlations = []
+
+            for channel in ['hue', 'saturation', 'value']:
+                query_ch = query_hist.get(channel, [])
+                stored_ch = stored_hist.get(channel, [])
+
+                if query_ch and stored_ch:
+                    query_ch = np.array(query_ch)
+                    stored_ch = np.array(stored_ch)
+
+                    # Use correlation coefficient
+                    correlation = cv2.compareHist(query_ch, stored_ch, cv2.HISTCMP_CORREL)
+                    correlations.append(max(0, correlation))  # Ensure non-negative
+
+            # Return average correlation
+            return np.mean(correlations) if correlations else 0.0
+
+        except Exception as e:
+            print(f"Error matching color histograms: {e}")
+            return 0.0
+
+    def _match_templates(self, query_features, stored_features):
+        """Match template signatures between query and stored logo"""
+        try:
+            query_template = query_features.get('template_signature', {}).get('template', [])
+            stored_template = stored_features.get('template_signature', {}).get('template', [])
+
+            if not query_template or not stored_template:
+                return 0.0
+
+            query_template = np.array(query_template, dtype=np.uint8)
+            stored_template = np.array(stored_template, dtype=np.uint8)
+
+            # Perform template matching
+            result = cv2.matchTemplate(query_template, stored_template, cv2.TM_CCOEFF_NORMED)
+            _, max_val, _, _ = cv2.minMaxLoc(result)
+
+            return max(0.0, max_val)  # Ensure non-negative
+
+        except Exception as e:
+            print(f"Error matching templates: {e}")
+            return 0.0
+
+class LogoLearningWorkflow:
+    """
+    Intelligent logo learning system for building business recognition database
+    Learns from user manual ad placement to build automated detection
+    """
+
+    def __init__(self):
+        """Initialize the logo learning workflow"""
+        self.feature_extractor = LogoFeatureExtractor()
+        self.logo_matcher = LogoMatcher()
+
+    def analyze_manual_ad_for_logo_learning(self, page_id, ad_box_coordinates, business_name=None):
+        """
+        Analyze a manually placed ad to extract and learn logo features
+
+        Args:
+            page_id (int): Database ID of the page
+            ad_box_coordinates (dict): Ad box coordinates {'x', 'y', 'width', 'height'}
+            business_name (str): Optional business name provided by user
+
+        Returns:
+            dict: Analysis result with learning opportunities
+        """
+        try:
+            print(f"Analyzing manual ad for logo learning on page {page_id}")
+
+            # Get page information
+            page = Page.query.get(page_id)
+            if not page:
+                return {'success': False, 'error': 'Page not found'}
+
+            publication = Publication.query.get(page.publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
+
+            # Load page image
+            image_filename = f"{publication.filename}_page_{page.page_number}.png"
+            image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+
+            if not os.path.exists(image_path):
+                return {'success': False, 'error': 'Page image not found'}
+
+            # Extract ad region from image
+            page_image = cv2.imread(image_path)
+            ad_region = self._extract_ad_region(page_image, ad_box_coordinates)
+
+            if ad_region is None:
+                return {'success': False, 'error': 'Could not extract ad region'}
+
+            # Detect potential logos within the ad
+            logo_candidates = self._detect_logo_candidates(ad_region)
+
+            if not logo_candidates:
+                return {
+                    'success': True,
+                    'logo_found': False,
+                    'message': 'No distinctive logo detected in this ad',
+                    'learning_opportunity': False
+                }
+
+            # Extract features from the best logo candidate
+            best_logo = logo_candidates[0]  # Take the most promising candidate
+            logo_features = self.feature_extractor.extract_logo_features(
+                best_logo['region'], business_name
+            )
+
+            # Check if this logo already exists in database
+            existing_match = self._find_existing_logo_match(logo_features)
+
+            result = {
+                'success': True,
+                'logo_found': True,
+                'logo_candidates': len(logo_candidates),
+                'best_logo_confidence': best_logo['confidence'],
+                'features_extracted': True,
+                'learning_opportunity': True
+            }
+
+            if existing_match:
+                result.update({
+                    'existing_logo_found': True,
+                    'existing_business_name': existing_match['business_name'],
+                    'match_confidence': existing_match['confidence'],
+                    'recommendation': 'update_existing_logo'
+                })
+            else:
+                result.update({
+                    'existing_logo_found': False,
+                    'recommendation': 'create_new_logo_entry',
+                    'suggested_business_name': business_name or 'Unknown Business'
+                })
+
+            # Store temporary learning data for user confirmation
+            temp_learning_data = {
+                'page_id': page_id,
+                'ad_coordinates': ad_box_coordinates,
+                'logo_region': best_logo,
+                'logo_features': logo_features,
+                'timestamp': datetime.utcnow().isoformat()
+            }
+
+            # Store in session or temporary location for user confirmation
+            session_key = f"logo_learning_{page_id}_{int(datetime.utcnow().timestamp())}"
+            # Note: In production, store this in Redis or session storage
+            # For now, return in result for immediate processing
+
+            result['temp_learning_data'] = temp_learning_data
+            result['session_key'] = session_key
+
+            return result
+
+        except Exception as e:
+            print(f"Error in logo learning analysis: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def confirm_logo_learning(self, temp_learning_data, business_name, user_confirmation=True):
+        """
+        User confirms logo learning - create or update logo database entry
+
+        Args:
+            temp_learning_data (dict): Temporary learning data from analysis
+            business_name (str): Confirmed business name
+            user_confirmation (bool): Whether user confirmed the learning
+
+        Returns:
+            dict: Learning result
+        """
+        try:
+            if not user_confirmation:
+                return {
+                    'success': True,
+                    'action': 'learning_cancelled',
+                    'message': 'Logo learning cancelled by user'
+                }
+
+            logo_features = temp_learning_data['logo_features']
+            logo_region = temp_learning_data['logo_region']
+
+            # Save logo image to filesystem
+            logo_image_path = self._save_logo_image(
+                logo_region['region'],
+                business_name,
+                temp_learning_data['page_id']
+            )
+
+            # Check for existing logo again (in case of concurrent modifications)
+            existing_logo = self._find_existing_business_logo(business_name)
+
+            if existing_logo:
+                # Update existing logo with new example
+                result = self._update_existing_logo(existing_logo, logo_features, logo_image_path, temp_learning_data)
+            else:
+                # Create new logo entry
+                result = self._create_new_logo_entry(business_name, logo_features, logo_image_path, temp_learning_data)
+
+            return result
+
+        except Exception as e:
+            print(f"Error confirming logo learning: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def _extract_ad_region(self, page_image, coordinates):
+        """Extract ad region from page image"""
+        try:
+            x = int(coordinates['x'])
+            y = int(coordinates['y'])
+            width = int(coordinates['width'])
+            height = int(coordinates['height'])
+
+            # Ensure coordinates are within image bounds
+            h, w = page_image.shape[:2]
+            x = max(0, min(x, w))
+            y = max(0, min(y, h))
+            width = min(width, w - x)
+            height = min(height, h - y)
+
+            if width <= 0 or height <= 0:
+                return None
+
+            ad_region = page_image[y:y+height, x:x+width]
+            return ad_region
+
+        except Exception as e:
+            print(f"Error extracting ad region: {e}")
+            return None
+
+    def _detect_logo_candidates(self, ad_region):
+        """
+        Detect potential logo regions within an ad using various heuristics
+        """
+        try:
+            gray = cv2.cvtColor(ad_region, cv2.COLOR_BGR2GRAY)
+            h, w = gray.shape
+
+            logo_candidates = []
+
+            # Method 1: Corner regions (logos often in corners)
+            corner_regions = [
+                {'region': ad_region[0:h//3, 0:w//3], 'location': 'top_left', 'confidence': 0.8},
+                {'region': ad_region[0:h//3, 2*w//3:w], 'location': 'top_right', 'confidence': 0.8},
+                {'region': ad_region[2*h//3:h, 0:w//3], 'location': 'bottom_left', 'confidence': 0.7},
+                {'region': ad_region[2*h//3:h, 2*w//3:w], 'location': 'bottom_right', 'confidence': 0.7}
+            ]
+
+            # Method 2: High contrast regions (logos are often distinctive)
+            edge_density_threshold = 0.1
+            edges = cv2.Canny(gray, 50, 150)
+            edge_density = np.sum(edges > 0) / edges.size
+
+            if edge_density > edge_density_threshold:
+                # Find regions with high edge density
+                kernel = np.ones((20, 20), np.uint8)
+                edge_regions = cv2.dilate(edges, kernel, iterations=1)
+
+                contours, _ = cv2.findContours(edge_regions, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                for contour in contours:
+                    area = cv2.contourArea(contour)
+                    if area > 500:  # Minimum logo size
+                        x, y, cw, ch = cv2.boundingRect(contour)
+
+                        # Extract region with some padding
+                        padding = 10
+                        x = max(0, x - padding)
+                        y = max(0, y - padding)
+                        cw = min(w - x, cw + 2*padding)
+                        ch = min(h - y, ch + 2*padding)
+
+                        if cw > 20 and ch > 20:  # Minimum dimensions
+                            region = ad_region[y:y+ch, x:x+cw]
+                            logo_candidates.append({
+                                'region': region,
+                                'location': f'edge_detected_{len(logo_candidates)}',
+                                'confidence': 0.9
+                            })
+
+            # Add corner regions to candidates
+            for corner in corner_regions:
+                if corner['region'].size > 0 and corner['region'].shape[0] > 10 and corner['region'].shape[1] > 10:
+                    logo_candidates.append(corner)
+
+            # Method 3: Color-based detection (logos often have distinct colors)
+            # Find regions with limited color palette (typical of logos)
+            color_candidates = self._find_distinctive_color_regions(ad_region)
+            logo_candidates.extend(color_candidates)
+
+            # Score and sort candidates
+            scored_candidates = []
+            for candidate in logo_candidates:
+                score = self._score_logo_candidate(candidate['region'])
+                candidate['confidence'] *= score
+                scored_candidates.append(candidate)
+
+            # Sort by confidence and return top candidates
+            scored_candidates.sort(key=lambda x: x['confidence'], reverse=True)
+
+            return scored_candidates[:3]  # Return top 3 candidates
+
+        except Exception as e:
+            print(f"Error detecting logo candidates: {e}")
+            return []
+
+    def _find_distinctive_color_regions(self, ad_region):
+        """Find regions with distinctive color patterns typical of logos"""
+        try:
+            candidates = []
+
+            # Convert to HSV for better color analysis
+            hsv = cv2.cvtColor(ad_region, cv2.COLOR_BGR2HSV)
+            h, w = hsv.shape[:2]
+
+            # Look for regions with strong color saturation (logos often colorful)
+            saturation = hsv[:, :, 1]
+            high_sat_mask = saturation > 100
+
+            if np.sum(high_sat_mask) > 0:
+                # Find connected components of high saturation
+                kernel = np.ones((5, 5), np.uint8)
+                high_sat_dilated = cv2.dilate(high_sat_mask.astype(np.uint8), kernel, iterations=2)
+
+                contours, _ = cv2.findContours(high_sat_dilated, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                for contour in contours:
+                    area = cv2.contourArea(contour)
+                    if 300 < area < (h * w * 0.3):  # Reasonable size range
+                        x, y, cw, ch = cv2.boundingRect(contour)
+
+                        # Add padding
+                        padding = 5
+                        x = max(0, x - padding)
+                        y = max(0, y - padding)
+                        cw = min(w - x, cw + 2*padding)
+                        ch = min(h - y, ch + 2*padding)
+
+                        if cw > 15 and ch > 15:
+                            region = ad_region[y:y+ch, x:x+cw]
+                            candidates.append({
+                                'region': region,
+                                'location': f'color_distinctive_{len(candidates)}',
+                                'confidence': 0.75
+                            })
+
+            return candidates
+
+        except Exception as e:
+            print(f"Error finding color regions: {e}")
+            return []
+
+    def _score_logo_candidate(self, logo_region):
+        """Score a logo candidate based on visual characteristics"""
+        try:
+            if logo_region.size == 0 or logo_region.shape[0] < 10 or logo_region.shape[1] < 10:
+                return 0.0
+
+            gray = cv2.cvtColor(logo_region, cv2.COLOR_BGR2GRAY) if len(logo_region.shape) == 3 else logo_region
+
+            score = 0.0
+
+            # 1. Edge density (logos have clear edges)
+            edges = cv2.Canny(gray, 50, 150)
+            edge_density = np.sum(edges > 0) / edges.size
+            score += min(1.0, edge_density * 5) * 0.3
+
+            # 2. Contrast (logos have good contrast)
+            contrast = np.std(gray) / 255.0
+            score += min(1.0, contrast * 2) * 0.3
+
+            # 3. Size appropriateness (not too small, not too large)
+            h, w = gray.shape
+            area = h * w
+            size_score = 1.0
+            if area < 400:  # Too small
+                size_score = area / 400.0
+            elif area > 10000:  # Too large
+                size_score = 10000.0 / area
+            score += size_score * 0.2
+
+            # 4. Aspect ratio (logos usually have reasonable aspect ratios)
+            aspect_ratio = w / h
+            if 0.3 <= aspect_ratio <= 3.0:
+                score += 0.2
+            else:
+                score += 0.1
+
+            return min(1.0, score)
+
+        except Exception as e:
+            print(f"Error scoring logo candidate: {e}")
+            return 0.0
+
+    def _find_existing_logo_match(self, logo_features):
+        """Find existing logo that matches the extracted features"""
+        try:
+            # Get all active business logos
+            existing_logos = BusinessLogo.query.filter_by(is_active=True).all()
+
+            best_match = None
+            best_confidence = 0.0
+
+            for stored_logo in existing_logos:
+                # Parse stored features
+                try:
+                    stored_features = json.loads(stored_logo.logo_features or '{}')
+                except:
+                    continue
+
+                # Use logo matcher to compare features
+                match_result = self.logo_matcher.match_logo(logo_features, stored_features)
+
+                if match_result['is_match'] and match_result['confidence'] > best_confidence:
+                    best_confidence = match_result['confidence']
+                    best_match = {
+                        'logo_id': stored_logo.id,
+                        'business_name': stored_logo.business_name,
+                        'confidence': match_result['confidence'],
+                        'match_details': match_result['match_details']
+                    }
+
+            return best_match
+
+        except Exception as e:
+            print(f"Error finding existing logo match: {e}")
+            return None
+
+    def _find_existing_business_logo(self, business_name):
+        """Find existing logo by business name"""
+        try:
+            return BusinessLogo.query.filter(
+                BusinessLogo.business_name.ilike(f'%{business_name}%'),
+                BusinessLogo.is_active == True
+            ).first()
+        except Exception as e:
+            print(f"Error finding existing business logo: {e}")
+            return None
+
+    def _save_logo_image(self, logo_region, business_name, page_id):
+        """Save logo image to filesystem"""
+        try:
+            # Create logos directory if it doesn't exist
+            logos_dir = os.path.join('static', 'uploads', 'logos')
+            os.makedirs(logos_dir, exist_ok=True)
+
+            # Generate unique filename
+            safe_business_name = "".join(c for c in business_name if c.isalnum() or c in (' ', '-', '_')).rstrip()
+            safe_business_name = safe_business_name.replace(' ', '_')
+
+            timestamp = int(datetime.utcnow().timestamp())
+            filename = f"{safe_business_name}_{page_id}_{timestamp}.png"
+            file_path = os.path.join(logos_dir, filename)
+
+            # Save image
+            cv2.imwrite(file_path, logo_region)
+
+            return file_path
+
+        except Exception as e:
+            print(f"Error saving logo image: {e}")
+            return None
+
+    def _create_new_logo_entry(self, business_name, logo_features, logo_image_path, temp_data):
+        """Create new business logo database entry"""
+        try:
+            # Calculate typical dimensions from the ad
+            ad_coords = temp_data['ad_coordinates']
+            logo_region = temp_data['logo_region']
+
+            new_logo = BusinessLogo(
+                business_name=business_name,
+                logo_image_path=logo_image_path,
+                logo_features=json.dumps(logo_features),
+                color_histogram=json.dumps(logo_features.get('color_histogram', {})),
+                template_signature=json.dumps(logo_features.get('template_signature', {})),
+
+                # Set typical dimensions based on this example
+                typical_width_pixels=float(ad_coords['width']),
+                typical_height_pixels=float(ad_coords['height']),
+
+                # Business metadata
+                first_seen_date=datetime.utcnow(),
+                total_examples=1,
+                is_active=True,
+                confidence_score=logo_region['confidence']
+            )
+
+            db.session.add(new_logo)
+            db.session.commit()
+
+            return {
+                'success': True,
+                'action': 'created_new_logo',
+                'logo_id': new_logo.id,
+                'business_name': business_name,
+                'message': f'Created new logo entry for {business_name}'
+            }
+
+        except Exception as e:
+            print(f"Error creating new logo entry: {e}")
+            db.session.rollback()
+            return {'success': False, 'error': str(e)}
+
+    def _update_existing_logo(self, existing_logo, new_features, logo_image_path, temp_data):
+        """Update existing logo with new example"""
+        try:
+            # Merge features with existing ones (simple approach: update if better quality)
+            current_features = json.loads(existing_logo.logo_features or '{}')
+
+            # Update if new features have better quality
+            new_quality = new_features.get('sift_quality_score', 0)
+            current_quality = current_features.get('sift_quality_score', 0)
+
+            if new_quality > current_quality:
+                existing_logo.logo_features = json.dumps(new_features)
+                existing_logo.logo_image_path = logo_image_path
+
+            # Update statistics
+            existing_logo.total_examples += 1
+            existing_logo.last_detected_date = datetime.utcnow()
+            existing_logo.updated_date = datetime.utcnow()
+
+            # Update typical dimensions (weighted average)
+            ad_coords = temp_data['ad_coordinates']
+            weight = 1.0 / existing_logo.total_examples
+
+            existing_logo.typical_width_pixels = (
+                existing_logo.typical_width_pixels * (1 - weight) +
+                ad_coords['width'] * weight
+            )
+            existing_logo.typical_height_pixels = (
+                existing_logo.typical_height_pixels * (1 - weight) +
+                ad_coords['height'] * weight
+            )
+
+            db.session.commit()
+
+            return {
+                'success': True,
+                'action': 'updated_existing_logo',
+                'logo_id': existing_logo.id,
+                'business_name': existing_logo.business_name,
+                'total_examples': existing_logo.total_examples,
+                'message': f'Updated logo for {existing_logo.business_name} (now {existing_logo.total_examples} examples)'
+            }
+
+        except Exception as e:
+            print(f"Error updating existing logo: {e}")
+            db.session.rollback()
+            return {'success': False, 'error': str(e)}
+
+    def learn_logo_from_manual_ad(self, ad_box, business_name, features):
+        """
+        Learn logo from a manual ad placement
+
+        Args:
+            ad_box: AdBox database object
+            business_name: Name of the business
+            features: Extracted logo features
+
+        Returns:
+            dict: Learning result
+        """
+        try:
+            # Convert AdBox to coordinates format
+            ad_coordinates = {
+                'x': ad_box.x,
+                'y': ad_box.y,
+                'width': ad_box.width,
+                'height': ad_box.height
+            }
+
+            # Use existing analysis method
+            return self.analyze_manual_ad_for_logo_learning(
+                ad_box.page_id, ad_coordinates, business_name
+            )
+
+        except Exception as e:
+            print(f"Error learning logo from manual ad: {e}")
+            return {'success': False, 'error': str(e)}
+
+
+class LogoRecognitionDetectionEngine:
+    """
+    Automated logo recognition and ad detection engine
+    Scans pages for learned business logos and creates ad boxes automatically
+    """
+
+    def __init__(self):
+        """Initialize the logo recognition detection engine"""
+        self.feature_extractor = LogoFeatureExtractor()
+        self.logo_matcher = LogoMatcher()
+        self.logo_learning = LogoLearningWorkflow()
+
+    def detect_ads_from_publication(self, publication_id, confidence_threshold=0.85):
+        """
+        Run logo recognition on all pages of a publication
+
+        Args:
+            publication_id: ID of publication to process
+            confidence_threshold: Minimum confidence for detections
+
+        Returns:
+            dict: Detection results and statistics
+        """
+        try:
+            print(f"Starting logo recognition on publication {publication_id}")
+
+            publication = Publication.query.get(publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
+
+            pages = Page.query.filter_by(publication_id=publication_id).all()
+            if not pages:
+                return {'success': False, 'error': 'No pages found'}
+
+            total_detections = 0
+            business_names = set()
+            page_results = []
+
+            for page in pages:
+                page_result = self.detect_logos_on_page(page.id, confidence_threshold)
+                if page_result.get('success'):
+                    detections = page_result.get('detections_created', 0)
+                    total_detections += detections
+                    business_names.update(page_result.get('business_names', []))
+
+                page_results.append({
+                    'page_id': page.id,
+                    'page_number': page.page_number,
+                    'detections': page_result.get('detections_created', 0),
+                    'success': page_result.get('success', False)
+                })
+
+            return {
+                'success': True,
+                'publication_id': publication_id,
+                'detections': total_detections,
+                'business_names': list(business_names),
+                'pages_processed': len(pages),
+                'page_results': page_results
+            }
+
+        except Exception as e:
+            print(f"Error in publication logo recognition: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def detect_logos_on_page(self, page_id, confidence_threshold=0.85, create_ad_boxes=True):
+        """
+        Scan a page for known business logos and create ad boxes
+
+        Args:
+            page_id (int): Database ID of the page to scan
+            confidence_threshold (float): Minimum confidence for logo detection
+            create_ad_boxes (bool): Whether to create AdBox entries for detections
+
+        Returns:
+            dict: Detection results with found logos and created ad boxes
+        """
+        try:
+            print(f"Starting logo recognition on page {page_id}")
+
+            # Get page and publication information
+            page = Page.query.get(page_id)
+            if not page:
+                return {'success': False, 'error': 'Page not found'}
+
+            publication = Publication.query.get(page.publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
+
+            # Load page image
+            image_filename = f"{publication.filename}_page_{page.page_number}.png"
+            image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+
+            if not os.path.exists(image_path):
+                return {'success': False, 'error': 'Page image not found'}
+
+            page_image = cv2.imread(image_path)
+            if page_image is None:
+                return {'success': False, 'error': 'Failed to load page image'}
+
+            # Get all active business logos from database
+            business_logos = BusinessLogo.query.filter_by(is_active=True).all()
+
+            if not business_logos:
+                return {
+                    'success': True,
+                    'message': 'No business logos to search for',
+                    'logos_detected': 0,
+                    'ad_boxes_created': 0
+                }
+
+            print(f"Searching for {len(business_logos)} known business logos")
+
+            # Results tracking
+            detection_results = {
+                'logos_detected': 0,
+                'ad_boxes_created': 0,
+                'detections': [],
+                'errors': []
+            }
+
+            # Process each known logo
+            for business_logo in business_logos:
+                try:
+                    logo_detections = self._search_logo_on_page(
+                        page_image, business_logo, confidence_threshold
+                    )
+
+                    for detection in logo_detections:
+                        # Record detection
+                        detection_results['logos_detected'] += 1
+                        detection_results['detections'].append({
+                            'business_name': business_logo.business_name,
+                            'logo_id': business_logo.id,
+                            'location': detection['location'],
+                            'confidence': detection['confidence'],
+                            'bounding_box': detection['bounding_box']
+                        })
+
+                        # Create ad box if requested
+                        if create_ad_boxes:
+                            ad_box_result = self._create_ad_box_from_logo_detection(
+                                page, business_logo, detection
+                            )
+
+                            if ad_box_result['success']:
+                                detection_results['ad_boxes_created'] += 1
+
+                                # Record successful detection in LogoRecognitionResult
+                                self._record_logo_detection_result(
+                                    business_logo.id, page.id, detection, ad_box_result['ad_box_id']
+                                )
+                            else:
+                                detection_results['errors'].append(
+                                    f"Failed to create ad box for {business_logo.business_name}: {ad_box_result['error']}"
+                                )
+
+                except Exception as logo_error:
+                    detection_results['errors'].append(
+                        f"Error processing logo {business_logo.business_name}: {str(logo_error)}"
+                    )
+                    print(f"Error processing logo {business_logo.business_name}: {logo_error}")
+
+            # Update logo statistics
+            self._update_logo_detection_statistics(detection_results)
+
+            result = {
+                'success': True,
+                'page_id': page_id,
+                'logos_searched': len(business_logos),
+                'logos_detected': detection_results['logos_detected'],
+                'ad_boxes_created': detection_results['ad_boxes_created'],
+                'detections': detection_results['detections'],
+                'errors': detection_results['errors']
+            }
+
+            print(f"Logo recognition complete: {result['logos_detected']} logos found, {result['ad_boxes_created']} ad boxes created")
+            return result
+
+        except Exception as e:
+            print(f"Error in logo recognition detection: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def _search_logo_on_page(self, page_image, business_logo, confidence_threshold):
+        """
+        Search for a specific business logo on a page using multiple methods
+
+        Args:
+            page_image (numpy.ndarray): Page image
+            business_logo (BusinessLogo): Business logo database entry
+            confidence_threshold (float): Minimum confidence threshold
+
+        Returns:
+            list: List of logo detections with location and confidence
+        """
+        try:
+            detections = []
+
+            # Parse stored logo features
+            try:
+                stored_features = json.loads(business_logo.logo_features or '{}')
+            except:
+                print(f"Invalid stored features for {business_logo.business_name}")
+                return []
+
+            # Method 1: Template matching using stored template
+            template_detections = self._template_match_logo(page_image, business_logo, stored_features)
+            detections.extend(template_detections)
+
+            # Method 2: Feature-based matching (SIFT/ORB)
+            feature_detections = self._feature_match_logo(page_image, business_logo, stored_features)
+            detections.extend(feature_detections)
+
+            # Method 3: Color-based detection
+            color_detections = self._color_match_logo(page_image, business_logo, stored_features)
+            detections.extend(color_detections)
+
+            # Filter by confidence threshold and remove duplicates
+            valid_detections = []
+            for detection in detections:
+                if detection['confidence'] >= confidence_threshold:
+                    # Check for duplicates (overlapping regions)
+                    is_duplicate = False
+                    for existing in valid_detections:
+                        if self._calculate_overlap(detection['bounding_box'], existing['bounding_box']) > 0.5:
+                            # Keep the higher confidence detection
+                            if detection['confidence'] > existing['confidence']:
+                                valid_detections.remove(existing)
+                                valid_detections.append(detection)
+                            is_duplicate = True
+                            break
+
+                    if not is_duplicate:
+                        valid_detections.append(detection)
+
+            return valid_detections
+
+        except Exception as e:
+            print(f"Error searching for logo {business_logo.business_name}: {e}")
+            return []
+
+    def _template_match_logo(self, page_image, business_logo, stored_features):
+        """Perform template matching for logo detection"""
+        try:
+            detections = []
+
+            template_data = stored_features.get('template_signature', {})
+            if not template_data.get('template'):
+                return detections
+
+            # Convert template back to numpy array
+            template = np.array(template_data['template'], dtype=np.uint8)
+
+            if template.size == 0:
+                return detections
+
+            # Convert page to grayscale
+            gray_page = cv2.cvtColor(page_image, cv2.COLOR_BGR2GRAY)
+
+            # Perform template matching at multiple scales
+            scales = [0.5, 0.7, 1.0, 1.3, 1.5]  # Multiple scales to handle size variations
+
+            for scale in scales:
+                # Resize template
+                scaled_template = cv2.resize(template, None, fx=scale, fy=scale)
+
+                if scaled_template.shape[0] > gray_page.shape[0] or scaled_template.shape[1] > gray_page.shape[1]:
+                    continue
+
+                # Perform matching
+                result = cv2.matchTemplate(gray_page, scaled_template, cv2.TM_CCOEFF_NORMED)
+
+                # Find matches above threshold
+                locations = np.where(result >= business_logo.confidence_threshold * 0.8)  # Slightly lower threshold
+
+                for pt in zip(*locations[::-1]):  # Switch x and y
+                    confidence = float(result[pt[1], pt[0]])
+
+                    detections.append({
+                        'method': 'template_matching',
+                        'location': pt,
+                        'confidence': confidence,
+                        'scale': scale,
+                        'bounding_box': {
+                            'x': pt[0],
+                            'y': pt[1],
+                            'width': scaled_template.shape[1],
+                            'height': scaled_template.shape[0]
+                        }
+                    })
+
+            return detections
+
+        except Exception as e:
+            print(f"Error in template matching: {e}")
+            return []
+
+    def _feature_match_logo(self, page_image, business_logo, stored_features):
+        """Perform feature-based matching using SIFT/ORB"""
+        try:
+            detections = []
+
+            # Check if we have stored SIFT descriptors
+            stored_sift = stored_features.get('sift_descriptors', [])
+            if not stored_sift:
+                return detections
+
+            stored_sift = np.array(stored_sift, dtype=np.float32)
+
+            # Extract SIFT features from the page
+            gray_page = cv2.cvtColor(page_image, cv2.COLOR_BGR2GRAY)
+            sift = cv2.SIFT_create()
+            page_keypoints, page_descriptors = sift.detectAndCompute(gray_page, None)
+
+            if page_descriptors is None or len(page_descriptors) == 0:
+                return detections
+
+            # Match features
+            FLANN_INDEX_KDTREE = 1
+            index_params = dict(algorithm=FLANN_INDEX_KDTREE, trees=5)
+            search_params = dict(checks=50)
+            flann = cv2.FlannBasedMatcher(index_params, search_params)
+
+            matches = flann.knnMatch(stored_sift, page_descriptors, k=2)
+
+            # Apply Lowe's ratio test
+            good_matches = []
+            for match_pair in matches:
+                if len(match_pair) == 2:
+                    m, n = match_pair
+                    if m.distance < 0.7 * n.distance:
+                        good_matches.append(m)
+
+            # Need minimum number of matches
+            if len(good_matches) >= business_logo.min_match_points:
+                # Calculate confidence based on match quality
+                confidence = min(1.0, len(good_matches) / max(10, business_logo.min_match_points))
+
+                # Find the center of matched keypoints
+                if good_matches:
+                    matched_points = [page_keypoints[m.trainIdx].pt for m in good_matches]
+                    center_x = np.mean([pt[0] for pt in matched_points])
+                    center_y = np.mean([pt[1] for pt in matched_points])
+
+                    # Estimate bounding box size based on typical logo dimensions
+                    est_width = business_logo.typical_width_pixels or 100
+                    est_height = business_logo.typical_height_pixels or 100
+
+                    detections.append({
+                        'method': 'feature_matching',
+                        'location': (int(center_x - est_width/2), int(center_y - est_height/2)),
+                        'confidence': confidence,
+                        'feature_matches': len(good_matches),
+                        'bounding_box': {
+                            'x': int(center_x - est_width/2),
+                            'y': int(center_y - est_height/2),
+                            'width': int(est_width),
+                            'height': int(est_height)
+                        }
+                    })
+
+            return detections
+
+        except Exception as e:
+            print(f"Error in feature matching: {e}")
+            return []
+
+    def _color_match_logo(self, page_image, business_logo, stored_features):
+        """Perform color-based logo detection"""
+        try:
+            detections = []
+
+            # Get stored color histogram
+            stored_histogram = stored_features.get('color_histogram', {})
+            if not stored_histogram:
+                return detections
+
+            # Convert page to HSV
+            page_hsv = cv2.cvtColor(page_image, cv2.COLOR_BGR2HSV)
+
+            # Sliding window approach for color matching
+            window_sizes = [(100, 100), (150, 150), (200, 200)]  # Different window sizes
+
+            for window_w, window_h in window_sizes:
+                # Slide window across image with step size
+                step_size = 50
+
+                for y in range(0, page_image.shape[0] - window_h, step_size):
+                    for x in range(0, page_image.shape[1] - window_w, step_size):
+                        # Extract window
+                        window = page_hsv[y:y+window_h, x:x+window_w]
+
+                        # Calculate color histogram for window
+                        window_hist = self._calculate_window_histogram(window)
+
+                        # Compare with stored histogram
+                        similarity = self._compare_color_histograms(window_hist, stored_histogram)
+
+                        # If similarity is high enough, consider it a detection
+                        if similarity >= 0.7:  # Color similarity threshold
+                            detections.append({
+                                'method': 'color_matching',
+                                'location': (x, y),
+                                'confidence': similarity,
+                                'window_size': (window_w, window_h),
+                                'bounding_box': {
+                                    'x': x,
+                                    'y': y,
+                                    'width': window_w,
+                                    'height': window_h
+                                }
+                            })
+
+            return detections
+
+        except Exception as e:
+            print(f"Error in color matching: {e}")
+            return []
+
+    def _calculate_window_histogram(self, window_hsv):
+        """Calculate color histogram for a window"""
+        try:
+            hist_h = cv2.calcHist([window_hsv], [0], None, [50], [0, 180])
+            hist_s = cv2.calcHist([window_hsv], [1], None, [60], [0, 256])
+            hist_v = cv2.calcHist([window_hsv], [2], None, [60], [0, 256])
+
+            hist_h = cv2.normalize(hist_h, hist_h).flatten()
+            hist_s = cv2.normalize(hist_s, hist_s).flatten()
+            hist_v = cv2.normalize(hist_v, hist_v).flatten()
+
+            return {
+                'hue': hist_h.tolist(),
+                'saturation': hist_s.tolist(),
+                'value': hist_v.tolist()
+            }
+        except:
+            return {'hue': [], 'saturation': [], 'value': []}
+
+    def _compare_color_histograms(self, hist1, hist2):
+        """Compare two color histograms"""
+        try:
+            correlations = []
+
+            for channel in ['hue', 'saturation', 'value']:
+                h1 = hist1.get(channel, [])
+                h2 = hist2.get(channel, [])
+
+                if h1 and h2:
+                    h1 = np.array(h1)
+                    h2 = np.array(h2)
+                    correlation = cv2.compareHist(h1, h2, cv2.HISTCMP_CORREL)
+                    correlations.append(max(0, correlation))
+
+            return np.mean(correlations) if correlations else 0.0
+
+        except:
+            return 0.0
+
+    def _calculate_overlap(self, box1, box2):
+        """Calculate overlap ratio between two bounding boxes"""
+        try:
+            # Calculate intersection
+            x1 = max(box1['x'], box2['x'])
+            y1 = max(box1['y'], box2['y'])
+            x2 = min(box1['x'] + box1['width'], box2['x'] + box2['width'])
+            y2 = min(box1['y'] + box1['height'], box2['y'] + box2['height'])
+
+            if x2 <= x1 or y2 <= y1:
+                return 0.0
+
+            intersection = (x2 - x1) * (y2 - y1)
+            area1 = box1['width'] * box1['height']
+            area2 = box2['width'] * box2['height']
+            union = area1 + area2 - intersection
+
+            return intersection / union if union > 0 else 0.0
+
+        except:
+            return 0.0
+
+    def _create_ad_box_from_logo_detection(self, page, business_logo, detection):
+        """Create an AdBox entry from a logo detection"""
+        try:
+            bbox = detection['bounding_box']
+
+            # Get publication configuration for measurements
+            publication = Publication.query.get(page.publication_id)
+            config = PUBLICATION_CONFIGS.get(publication.publication_type, PUBLICATION_CONFIGS['broadsheet'])
+
+            # Calculate measurements
+            calculator = MeasurementCalculator()
+
+            # Get DPI from page calibration or use default
+            dpi = getattr(page, 'pixels_per_inch', 150) or 150  # Default to 150 DPI
+
+            width_inches = bbox['width'] / dpi
+            height_inches = bbox['height'] / dpi
+            column_inches = width_inches * height_inches
+
+            # Round measurements
+            width_rounded = round(width_inches * 16) / 16
+            height_rounded = round(height_inches * 16) / 16
+
+            # Create AdBox
+            ad_box = AdBox(
+                page_id=page.id,
+                x=float(bbox['x']),
+                y=float(bbox['y']),
+                width=float(bbox['width']),
+                height=float(bbox['height']),
+                width_inches_raw=width_inches,
+                height_inches_raw=height_inches,
+                width_inches_rounded=width_rounded,
+                height_inches_rounded=height_rounded,
+                column_inches=column_inches,
+                ad_type='logo_detected',
+                is_ad=True,
+                detected_automatically=True,
+                confidence_score=detection['confidence'],
+                user_verified=False
+            )
+
+            db.session.add(ad_box)
+            db.session.commit()
+
+            # Update business logo statistics
+            business_logo.successful_detections += 1
+            business_logo.last_detected_date = datetime.utcnow()
+            db.session.commit()
+
+            return {
+                'success': True,
+                'ad_box_id': ad_box.id,
+                'business_name': business_logo.business_name,
+                'confidence': detection['confidence']
+            }
+
+        except Exception as e:
+            print(f"Error creating ad box from logo detection: {e}")
+            db.session.rollback()
+            return {'success': False, 'error': str(e)}
+
+    def _record_logo_detection_result(self, business_logo_id, page_id, detection, ad_box_id):
+        """Record logo detection result for learning and statistics"""
+        try:
+            bbox = detection['bounding_box']
+
+            detection_result = LogoRecognitionResult(
+                business_logo_id=business_logo_id,
+                ad_box_id=ad_box_id,
+                page_id=page_id,
+                x=float(bbox['x']),
+                y=float(bbox['y']),
+                width=float(bbox['width']),
+                height=float(bbox['height']),
+                detection_confidence=detection['confidence'],
+                feature_matches=detection.get('feature_matches', 0)
+            )
+
+            db.session.add(detection_result)
+            db.session.commit()
+
+        except Exception as e:
+            print(f"Error recording logo detection result: {e}")
+
+    def _update_logo_detection_statistics(self, detection_results):
+        """Update overall logo detection statistics"""
+        try:
+            # Update statistics for logos that were successfully detected
+            for detection in detection_results['detections']:
+                business_logo = BusinessLogo.query.get(detection['logo_id'])
+                if business_logo:
+                    business_logo.successful_detections += 1
+                    business_logo.last_detected_date = datetime.utcnow()
+
+            db.session.commit()
+
+        except Exception as e:
+            print(f"Error updating logo detection statistics: {e}")
+
+
+class SmartManualDetection:
+    """Smart manual detection system with intelligent boundary expansion"""
+
+    def __init__(self):
+        self.logo_feature_extractor = LogoFeatureExtractor()
+        self.logo_learning_workflow = LogoLearningWorkflow()
+
+    def detect_ad_boundaries_from_click(self, page_image, click_x, click_y, page_id,
+                                       expand_tolerance=30, min_area=100):
+        """
+        Intelligent boundary detection around clicked area
+
+        Args:
+            page_image: OpenCV image of the page
+            click_x, click_y: Pixel coordinates of user click
+            page_id: Database page ID
+            expand_tolerance: Pixels to expand search for boundaries
+            min_area: Minimum area for a valid ad detection
+
+        Returns:
+            dict: Detected ad boundaries and metadata
+        """
+        try:
+            print(f"Smart boundary detection at click ({click_x}, {click_y})")
+
+            # Convert to grayscale for analysis
+            gray = cv2.cvtColor(page_image, cv2.COLOR_BGR2GRAY)
+
+            # Method 1: Edge-based boundary detection
+            edge_boundaries = self._detect_edge_boundaries(gray, click_x, click_y, expand_tolerance)
+
+            # Method 2: Connected component analysis
+            component_boundaries = self._detect_component_boundaries(gray, click_x, click_y, expand_tolerance)
+
+            # Method 3: Text block analysis
+            text_boundaries = self._detect_text_block_boundaries(page_image, click_x, click_y, expand_tolerance)
+
+            # Method 4: Color region analysis
+            color_boundaries = self._detect_color_region_boundaries(page_image, click_x, click_y, expand_tolerance)
+
+            # Combine and score all boundary candidates
+            boundary_candidates = []
+            boundary_candidates.extend(edge_boundaries)
+            boundary_candidates.extend(component_boundaries)
+            boundary_candidates.extend(text_boundaries)
+            boundary_candidates.extend(color_boundaries)
+
+            # Score and select best boundary
+            best_boundary = self._select_best_boundary(boundary_candidates, click_x, click_y, min_area)
+
+            if best_boundary:
+                # Extract features for potential logo learning
+                ad_features = self._extract_ad_features(page_image, best_boundary)
+
+                return {
+                    'success': True,
+                    'boundary': best_boundary,
+                    'confidence': best_boundary.get('confidence', 0.7),
+                    'detection_method': best_boundary.get('method', 'smart_manual'),
+                    'features': ad_features,
+                    'area': best_boundary['width'] * best_boundary['height']
+                }
+            else:
+                # Fallback: create basic boundary around click
+                fallback_boundary = self._create_fallback_boundary(click_x, click_y, page_image.shape)
+                return {
+                    'success': True,
+                    'boundary': fallback_boundary,
+                    'confidence': 0.3,
+                    'detection_method': 'manual_fallback',
+                    'features': None,
+                    'area': fallback_boundary['width'] * fallback_boundary['height']
+                }
+
+        except Exception as e:
+            print(f"Error in smart boundary detection: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def _detect_edge_boundaries(self, gray_image, click_x, click_y, tolerance):
+        """Detect ad boundaries using edge detection"""
+        try:
+            boundaries = []
+
+            # Apply edge detection
+            edges = cv2.Canny(gray_image, 50, 150)
+
+            # Find contours
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for contour in contours:
+                # Get bounding rectangle
+                x, y, w, h = cv2.boundingRect(contour)
+
+                # Check if click point is inside or near this contour
+                if (x - tolerance <= click_x <= x + w + tolerance and
+                    y - tolerance <= click_y <= y + h + tolerance):
+
+                    # Score based on contour properties
+                    area = cv2.contourArea(contour)
+                    perimeter = cv2.arcLength(contour, True)
+                    rectangularity = area / (w * h) if w * h > 0 else 0
+
+                    confidence = min(0.9, rectangularity * 0.7 + (area / 10000) * 0.3)
+
+                    boundaries.append({
+                        'x': x,
+                        'y': y,
+                        'width': w,
+                        'height': h,
+                        'confidence': confidence,
+                        'method': 'edge_detection',
+                        'area': area,
+                        'rectangularity': rectangularity
+                    })
+
+            return sorted(boundaries, key=lambda b: b['confidence'], reverse=True)[:3]
+
+        except Exception as e:
+            print(f"Error in edge boundary detection: {e}")
+            return []
+
+    def _detect_component_boundaries(self, gray_image, click_x, click_y, tolerance):
+        """Detect boundaries using connected component analysis"""
+        try:
+            boundaries = []
+
+            # Threshold image
+            _, thresh = cv2.threshold(gray_image, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+
+            # Ensure proper data type for connected components
+            thresh = thresh.astype(np.uint8)
+
+            # Find connected components
+            num_labels, labels, stats, centroids = cv2.connectedComponentsWithStats(thresh, connectivity=8)
+
+            for i in range(1, num_labels):  # Skip background (label 0)
+                x, y, w, h, area = stats[i]
+
+                # Check if click point is near this component
+                if (x - tolerance <= click_x <= x + w + tolerance and
+                    y - tolerance <= click_y <= y + h + tolerance):
+
+                    # Score based on component properties
+                    aspect_ratio = w / h if h > 0 else 1
+                    aspect_score = 1.0 - abs(aspect_ratio - 1.5) / 1.5  # Prefer moderate aspect ratios
+                    area_score = min(1.0, area / 50000)  # Prefer larger areas
+
+                    confidence = (aspect_score * 0.4 + area_score * 0.6) * 0.8
+
+                    boundaries.append({
+                        'x': x,
+                        'y': y,
+                        'width': w,
+                        'height': h,
+                        'confidence': confidence,
+                        'method': 'connected_components',
+                        'area': area,
+                        'aspect_ratio': aspect_ratio
+                    })
+
+            return sorted(boundaries, key=lambda b: b['confidence'], reverse=True)[:3]
+
+        except Exception as e:
+            print(f"Error in component boundary detection: {e}")
+            return []
+
+    def _detect_text_block_boundaries(self, page_image, click_x, click_y, tolerance):
+        """Detect boundaries based on text block analysis"""
+        try:
+            boundaries = []
+
+            # Convert to grayscale
+            gray = cv2.cvtColor(page_image, cv2.COLOR_BGR2GRAY)
+
+            # Use morphological operations to find text blocks
+            kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (20, 5))
+            morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+
+            # Find contours
+            contours, _ = cv2.findContours(morph, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            for contour in contours:
+                x, y, w, h = cv2.boundingRect(contour)
+
+                # Check if click point is inside or near text block
+                if (x - tolerance <= click_x <= x + w + tolerance and
+                    y - tolerance <= click_y <= y + h + tolerance):
+
+                    # Score based on text-like properties
+                    aspect_ratio = w / h if h > 0 else 1
+                    area = w * h
+
+                    # Text blocks typically have certain aspect ratios
+                    text_score = 0.8 if 2 < aspect_ratio < 8 else 0.4
+                    area_score = min(1.0, area / 30000)
+
+                    confidence = (text_score * 0.6 + area_score * 0.4) * 0.7
+
+                    boundaries.append({
+                        'x': x,
+                        'y': y,
+                        'width': w,
+                        'height': h,
+                        'confidence': confidence,
+                        'method': 'text_blocks',
+                        'area': area,
+                        'aspect_ratio': aspect_ratio
+                    })
+
+            return sorted(boundaries, key=lambda b: b['confidence'], reverse=True)[:3]
+
+        except Exception as e:
+            print(f"Error in text block boundary detection: {e}")
+            return []
+
+    def _detect_color_region_boundaries(self, page_image, click_x, click_y, tolerance):
+        """Detect boundaries based on color region analysis"""
+        try:
+            boundaries = []
+
+            # Get color at click point
+            if (0 <= click_y < page_image.shape[0] and 0 <= click_x < page_image.shape[1]):
+                click_color = page_image[click_y, click_x]
+
+                # Convert to HSV for better color segmentation
+                hsv = cv2.cvtColor(page_image, cv2.COLOR_BGR2HSV)
+                click_hsv = cv2.cvtColor(np.uint8([[click_color]]), cv2.COLOR_BGR2HSV)[0][0]
+
+                # Create color mask around clicked color
+                lower_bound = np.array([max(0, click_hsv[0] - 20), 50, 50])
+                upper_bound = np.array([min(179, click_hsv[0] + 20), 255, 255])
+
+                mask = cv2.inRange(hsv, lower_bound, upper_bound)
+
+                # Find contours in color mask
+                contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+                for contour in contours:
+                    x, y, w, h = cv2.boundingRect(contour)
+
+                    # Check if click point is inside this color region
+                    if (x <= click_x <= x + w and y <= click_y <= y + h):
+
+                        area = cv2.contourArea(contour)
+                        rectangularity = area / (w * h) if w * h > 0 else 0
+
+                        confidence = rectangularity * 0.6
+
+                        boundaries.append({
+                            'x': x,
+                            'y': y,
+                            'width': w,
+                            'height': h,
+                            'confidence': confidence,
+                            'method': 'color_regions',
+                            'area': area,
+                            'rectangularity': rectangularity
+                        })
+
+            return sorted(boundaries, key=lambda b: b['confidence'], reverse=True)[:2]
+
+        except Exception as e:
+            print(f"Error in color region boundary detection: {e}")
+            return []
+
+    def _select_best_boundary(self, candidates, click_x, click_y, min_area):
+        """Select the best boundary from all candidates"""
+        try:
+            if not candidates:
+                return None
+
+            # Score each candidate
+            for candidate in candidates:
+                # Base score from confidence
+                score = candidate['confidence']
+
+                # Bonus for larger areas (up to a point)
+                area_bonus = min(0.3, candidate['area'] / 100000)
+                score += area_bonus
+
+                # Bonus for reasonable aspect ratios
+                aspect_ratio = candidate['width'] / candidate['height'] if candidate['height'] > 0 else 1
+                if 0.3 <= aspect_ratio <= 5.0:  # Reasonable ad proportions
+                    score += 0.1
+
+                # Penalty for very small areas
+                if candidate['area'] < min_area:
+                    score *= 0.5
+
+                # Bonus for click being more centered in boundary
+                center_x = candidate['x'] + candidate['width'] / 2
+                center_y = candidate['y'] + candidate['height'] / 2
+                distance_from_center = ((click_x - center_x) ** 2 + (click_y - center_y) ** 2) ** 0.5
+                max_distance = (candidate['width'] ** 2 + candidate['height'] ** 2) ** 0.5 / 2
+                centrality_bonus = 0.15 * (1 - min(1, distance_from_center / max_distance))
+                score += centrality_bonus
+
+                candidate['final_score'] = score
+
+            # Return best candidate
+            best = max(candidates, key=lambda c: c['final_score'])
+            return best if best['final_score'] > 0.3 else None
+
+        except Exception as e:
+            print(f"Error selecting best boundary: {e}")
+            return None
+
+    def _create_fallback_boundary(self, click_x, click_y, image_shape):
+        """Create a fallback boundary around click point"""
+        try:
+            # Default ad size (reasonable assumption)
+            default_width = 200
+            default_height = 150
+
+            # Center on click point
+            x = max(0, click_x - default_width // 2)
+            y = max(0, click_y - default_height // 2)
+
+            # Ensure within image bounds
+            max_x = image_shape[1] - default_width
+            max_y = image_shape[0] - default_height
+
+            x = min(x, max_x) if max_x > 0 else 0
+            y = min(y, max_y) if max_y > 0 else 0
+
+            # Adjust width/height if near edges
+            width = min(default_width, image_shape[1] - x)
+            height = min(default_height, image_shape[0] - y)
+
+            return {
+                'x': x,
+                'y': y,
+                'width': width,
+                'height': height,
+                'method': 'fallback'
+            }
+
+        except Exception as e:
+            print(f"Error creating fallback boundary: {e}")
+            return {'x': 0, 'y': 0, 'width': 100, 'height': 100, 'method': 'fallback'}
+
+    def _extract_ad_features(self, page_image, boundary):
+        """Extract features from detected ad for potential logo learning"""
+        try:
+            x, y, w, h = boundary['x'], boundary['y'], boundary['width'], boundary['height']
+
+            # Extract ad region
+            ad_region = page_image[y:y+h, x:x+w]
+
+            if ad_region.size == 0:
+                return None
+
+            # Use logo feature extractor to get features
+            features = self.logo_feature_extractor.extract_logo_features(ad_region)
+
+            return features
+
+        except Exception as e:
+            print(f"Error extracting ad features: {e}")
+            return None
+
+    def create_manual_ad_with_learning(self, page_id, boundary, business_name=None, learn_logo=False):
+        """Create manual ad and optionally learn logo for future detection"""
+        try:
+            page = Page.query.get(page_id)
+            if not page:
+                return {'success': False, 'error': 'Page not found'}
+
+            # Get publication configuration for measurements
+            publication = Publication.query.get(page.publication_id)
+            config = PUBLICATION_CONFIGS.get(publication.publication_type, PUBLICATION_CONFIGS['broadsheet'])
+
+            # Calculate measurements
+            dpi = getattr(page, 'pixels_per_inch', 150) or 150
+            width_inches = boundary['width'] / dpi
+            height_inches = boundary['height'] / dpi
+            column_inches = width_inches * height_inches
+
+            # Round measurements
+            width_rounded = round(width_inches * 16) / 16
+            height_rounded = round(height_inches * 16) / 16
+
+            # Create AdBox
+            ad_box = AdBox(
+                page_id=page.id,
+                x=float(boundary['x']),
+                y=float(boundary['y']),
+                width=float(boundary['width']),
+                height=float(boundary['height']),
+                width_inches_raw=width_inches,
+                height_inches_raw=height_inches,
+                width_inches_rounded=width_rounded,
+                height_inches_rounded=height_rounded,
+                column_inches=column_inches,
+                ad_type='manual_smart',
+                is_ad=True,
+                detected_automatically=False,
+                confidence_score=boundary.get('confidence', 0.7),
+                user_verified=True
+            )
+
+            db.session.add(ad_box)
+            db.session.commit()
+
+            # If learning is enabled and business name provided
+            if learn_logo and business_name and boundary.get('features'):
+                try:
+                    # Learn logo from this manual placement
+                    learning_result = self.logo_learning_workflow.learn_logo_from_manual_ad(
+                        ad_box, business_name, boundary['features']
+                    )
+
+                    return {
+                        'success': True,
+                        'ad_box_id': ad_box.id,
+                        'learning_result': learning_result,
+                        'message': f'Manual ad created and logo learned for {business_name}'
+                    }
+                except Exception as e:
+                    print(f"Logo learning failed: {e}")
+                    return {
+                        'success': True,
+                        'ad_box_id': ad_box.id,
+                        'learning_result': {'success': False, 'error': str(e)},
+                        'message': 'Manual ad created but logo learning failed'
+                    }
+            else:
+                return {
+                    'success': True,
+                    'ad_box_id': ad_box.id,
+                    'message': 'Manual ad created successfully'
+                }
+
+        except Exception as e:
+            print(f"Error creating manual ad: {e}")
+            db.session.rollback()
+            return {'success': False, 'error': str(e)}
+
+
+class HybridDetectionPipeline:
+    """Hybrid detection system combining logo recognition with manual detection capabilities"""
+
+    def __init__(self):
+        self.logo_recognition_engine = LogoRecognitionDetectionEngine()
+        self.smart_manual_detection = SmartManualDetection()
+        self.logo_learning_workflow = LogoLearningWorkflow()
+
+    def detect_ads_hybrid(self, publication_id, mode='auto', page_numbers=None):
+        """
+        Run hybrid detection combining automated logo recognition with optional manual enhancement
+
+        Args:
+            publication_id: ID of publication to process
+            mode: Detection mode ('auto', 'manual', 'hybrid')
+            page_numbers: Specific pages to process (None for all)
+
+        Returns:
+            dict: Detection results and statistics
+        """
+        try:
+            print(f"Starting hybrid detection for publication {publication_id} in mode: {mode}")
+
+            publication = Publication.query.get(publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
+
+            # Get pages to process
+            if page_numbers:
+                pages = Page.query.filter(
+                    Page.publication_id == publication_id,
+                    Page.page_number.in_(page_numbers)
+                ).all()
+            else:
+                pages = Page.query.filter_by(publication_id=publication_id).all()
+
+            if not pages:
+                return {'success': False, 'error': 'No pages found'}
+
+            results = {
+                'success': True,
+                'publication_id': publication_id,
+                'mode': mode,
+                'pages_processed': len(pages),
+                'total_detections': 0,
+                'logo_detections': 0,
+                'manual_detections': 0,
+                'page_results': [],
+                'business_logos_found': set(),
+                'detection_statistics': {}
+            }
+
+            # Phase 1: Automated logo recognition (if enabled)
+            if mode in ['auto', 'hybrid']:
+                print("Phase 1: Running automated logo recognition...")
+
+                logo_results = self.logo_recognition_engine.detect_ads_from_publication(publication_id)
+
+                if logo_results.get('success'):
+                    results['logo_detections'] = logo_results.get('detections', 0)
+                    results['total_detections'] += results['logo_detections']
+                    results['business_logos_found'].update(logo_results.get('business_names', []))
+
+                    print(f"Logo recognition found {results['logo_detections']} ads")
+                else:
+                    print(f"Logo recognition failed: {logo_results.get('error', 'Unknown error')}")
+
+            # Phase 2: Manual detection enhancement (for hybrid mode)
+            if mode in ['manual', 'hybrid']:
+                print("Phase 2: Preparing manual detection enhancement...")
+
+                # For each page, provide tools for manual enhancement
+                for page in pages:
+                    page_result = self._prepare_page_for_manual_detection(page, mode)
+                    results['page_results'].append(page_result)
+
+            # Phase 3: Update learning system
+            if results['total_detections'] > 0:
+                self._update_hybrid_learning_statistics(publication_id, results)
+
+            # Convert set to list for JSON serialization
+            results['business_logos_found'] = list(results['business_logos_found'])
+
+            print(f"Hybrid detection complete: {results['total_detections']} total ads detected")
+            return results
+
+        except Exception as e:
+            print(f"Error in hybrid detection: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def _prepare_page_for_manual_detection(self, page, mode):
+        """Prepare page data for manual detection interface"""
+        try:
+            # Get existing AdBoxes on this page
+            existing_ads = AdBox.query.filter_by(page_id=page.id).all()
+
+            # Load page image
+            publication = Publication.query.get(page.publication_id)
+            image_filename = f"{publication.filename}_page_{page.page_number}.png"
+            image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+
+            page_data = {
+                'page_id': page.id,
+                'page_number': page.page_number,
+                'image_path': image_path,
+                'image_exists': os.path.exists(image_path),
+                'existing_ads': len(existing_ads),
+                'width': page.width_pixels,
+                'height': page.height_pixels,
+                'mode': mode
+            }
+
+            # Add existing ad details
+            page_data['ad_details'] = []
+            for ad in existing_ads:
+                page_data['ad_details'].append({
+                    'id': ad.id,
+                    'x': ad.x,
+                    'y': ad.y,
+                    'width': ad.width,
+                    'height': ad.height,
+                    'ad_type': ad.ad_type,
+                    'confidence': ad.confidence_score,
+                    'auto_detected': ad.detected_automatically
+                })
+
+            return page_data
+
+        except Exception as e:
+            print(f"Error preparing page for manual detection: {e}")
+            return {'page_id': page.id, 'error': str(e)}
+
+    def process_manual_click(self, page_id, click_x, click_y, business_name=None, learn_logo=False):
+        """
+        Process a manual click for ad detection with smart boundary detection
+
+        Args:
+            page_id: Database page ID
+            click_x, click_y: Click coordinates
+            business_name: Optional business name for logo learning
+            learn_logo: Whether to learn logo from this detection
+
+        Returns:
+            dict: Detection result and created ad box
+        """
+        try:
+            print(f"Processing manual click at ({click_x}, {click_y}) on page {page_id}")
+
+            page = Page.query.get(page_id)
+            if not page:
+                return {'success': False, 'error': 'Page not found'}
+
+            # Load page image
+            publication = Publication.query.get(page.publication_id)
+            image_filename = f"{publication.filename}_page_{page.page_number}.png"
+            image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+
+            if not os.path.exists(image_path):
+                return {'success': False, 'error': 'Page image not found'}
+
+            # Load image
+            page_image = cv2.imread(image_path)
+            if page_image is None:
+                return {'success': False, 'error': 'Could not load page image'}
+
+            # Use smart manual detection to find ad boundaries
+            boundary_result = self.smart_manual_detection.detect_ad_boundaries_from_click(
+                page_image, click_x, click_y, page_id
+            )
+
+            if not boundary_result.get('success'):
+                return boundary_result
+
+            # Create manual ad with optional logo learning
+            ad_creation_result = self.smart_manual_detection.create_manual_ad_with_learning(
+                page_id, boundary_result['boundary'], business_name, learn_logo
+            )
+
+            if ad_creation_result.get('success'):
+                # Combine results
+                final_result = {
+                    'success': True,
+                    'ad_box_id': ad_creation_result['ad_box_id'],
+                    'boundary': boundary_result['boundary'],
+                    'detection_method': boundary_result['detection_method'],
+                    'confidence': boundary_result['confidence'],
+                    'area': boundary_result['area'],
+                    'business_name': business_name,
+                    'logo_learned': learn_logo and ad_creation_result.get('learning_result', {}).get('success', False),
+                    'message': ad_creation_result['message']
+                }
+
+                if learn_logo:
+                    final_result['learning_result'] = ad_creation_result.get('learning_result', {})
+
+                print(f"Manual detection successful: AdBox {ad_creation_result['ad_box_id']} created")
+                return final_result
+            else:
+                return ad_creation_result
+
+        except Exception as e:
+            print(f"Error processing manual click: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def get_detection_suggestions(self, page_id, threshold=0.6):
+        """
+        Get automated suggestions for manual detection on a page
+
+        Args:
+            page_id: Database page ID
+            threshold: Confidence threshold for suggestions
+
+        Returns:
+            dict: Suggested detection areas
+        """
+        try:
+            page = Page.query.get(page_id)
+            if not page:
+                return {'success': False, 'error': 'Page not found'}
+
+            # Get existing AdBoxes to avoid duplicates
+            existing_ads = AdBox.query.filter_by(page_id=page_id).all()
+            existing_regions = []
+            for ad in existing_ads:
+                existing_regions.append({
+                    'x': ad.x, 'y': ad.y, 'width': ad.width, 'height': ad.height
+                })
+
+            # Load page image
+            publication = Publication.query.get(page.publication_id)
+            image_filename = f"{publication.filename}_page_{page.page_number}.png"
+            image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+
+            if not os.path.exists(image_path):
+                return {'success': False, 'error': 'Page image not found'}
+
+            page_image = cv2.imread(image_path)
+            if page_image is None:
+                return {'success': False, 'error': 'Could not load page image'}
+
+            # Run logo recognition at lower threshold for suggestions
+            suggestions = []
+
+            # Get all business logos
+            business_logos = BusinessLogo.query.filter_by(is_active=True).all()
+
+            for business_logo in business_logos:
+                logo_detections = self.logo_recognition_engine._search_logo_on_page(
+                    page_image, business_logo, confidence_threshold=threshold * 0.7
+                )
+
+                for detection in logo_detections:
+                    bbox = detection['bounding_box']
+
+                    # Check if this overlaps with existing ads
+                    is_duplicate = False
+                    for existing in existing_regions:
+                        overlap = self._calculate_region_overlap(bbox, existing)
+                        if overlap > 0.3:  # 30% overlap threshold
+                            is_duplicate = True
+                            break
+
+                    if not is_duplicate and detection['confidence'] >= threshold:
+                        suggestions.append({
+                            'business_name': business_logo.business_name,
+                            'confidence': detection['confidence'],
+                            'x': bbox['x'],
+                            'y': bbox['y'],
+                            'width': bbox['width'],
+                            'height': bbox['height'],
+                            'suggestion_type': 'logo_recognition'
+                        })
+
+            # Sort by confidence
+            suggestions.sort(key=lambda s: s['confidence'], reverse=True)
+
+            return {
+                'success': True,
+                'page_id': page_id,
+                'suggestions': suggestions[:10],  # Top 10 suggestions
+                'total_suggestions': len(suggestions)
+            }
+
+        except Exception as e:
+            print(f"Error getting detection suggestions: {e}")
+            return {'success': False, 'error': str(e)}
+
+    def _calculate_region_overlap(self, region1, region2):
+        """Calculate overlap ratio between two regions"""
+        try:
+            x1_min, y1_min = region1['x'], region1['y']
+            x1_max, y1_max = x1_min + region1['width'], y1_min + region1['height']
+
+            x2_min, y2_min = region2['x'], region2['y']
+            x2_max, y2_max = x2_min + region2['width'], y2_min + region2['height']
+
+            # Calculate intersection
+            inter_x_min = max(x1_min, x2_min)
+            inter_y_min = max(y1_min, y2_min)
+            inter_x_max = min(x1_max, x2_max)
+            inter_y_max = min(y1_max, y2_max)
+
+            if inter_x_min < inter_x_max and inter_y_min < inter_y_max:
+                intersection = (inter_x_max - inter_x_min) * (inter_y_max - inter_y_min)
+                area1 = region1['width'] * region1['height']
+                area2 = region2['width'] * region2['height']
+                union = area1 + area2 - intersection
+                return intersection / union if union > 0 else 0
+
+            return 0.0
+
+        except:
+            return 0.0
+
+    def _update_hybrid_learning_statistics(self, publication_id, results):
+        """Update learning statistics from hybrid detection session"""
+        try:
+            # Update business logo detection statistics
+            for business_name in results['business_logos_found']:
+                business_logo = BusinessLogo.query.filter_by(business_name=business_name).first()
+                if business_logo:
+                    business_logo.total_detections += 1
+                    business_logo.last_detected_date = datetime.utcnow()
+
+            db.session.commit()
+            print("Updated hybrid learning statistics")
+
+        except Exception as e:
+            print(f"Error updating hybrid learning statistics: {e}")
+
+    def get_hybrid_detection_status(self, publication_id):
+        """Get current status of hybrid detection for a publication"""
+        try:
+            publication = Publication.query.get(publication_id)
+            if not publication:
+                return {'success': False, 'error': 'Publication not found'}
+
+            # Get all AdBoxes for this publication
+            total_ads = db.session.query(AdBox).join(Page).filter(
+                Page.publication_id == publication_id
+            ).count()
+
+            # Get automated vs manual breakdown
+            auto_ads = db.session.query(AdBox).join(Page).filter(
+                Page.publication_id == publication_id,
+                AdBox.detected_automatically == True
+            ).count()
+
+            manual_ads = total_ads - auto_ads
+
+            # Get logo detection breakdown
+            logo_ads = db.session.query(AdBox).join(Page).filter(
+                Page.publication_id == publication_id,
+                AdBox.ad_type == 'logo_detected'
+            ).count()
+
+            # Get business logos found
+            business_logos_found = db.session.query(BusinessLogo.business_name).join(
+                LogoRecognitionResult
+            ).join(AdBox).join(Page).filter(
+                Page.publication_id == publication_id
+            ).distinct().all()
+
+            return {
+                'success': True,
+                'publication_id': publication_id,
+                'publication_name': publication.original_filename,
+                'total_pages': publication.total_pages,
+                'total_ads': total_ads,
+                'automated_ads': auto_ads,
+                'manual_ads': manual_ads,
+                'logo_detected_ads': logo_ads,
+                'business_logos_found': [name[0] for name in business_logos_found],
+                'detection_rate': total_ads / publication.total_pages if publication.total_pages > 0 else 0
+            }
+
+        except Exception as e:
+            print(f"Error getting hybrid detection status: {e}")
+            return {'success': False, 'error': str(e)}
+
 
 # Publication configurations
 PUBLICATION_CONFIGS = {
@@ -5740,7 +8187,7 @@ def login():
             
         # Rate limiting could be added here
         if verify_password(LOGIN_PASSWORD, password):
-            from datetime import datetime
+            from datetime import datetime, timedelta
             session.permanent = True
             session['logged_in'] = True
             session['login_time'] = datetime.utcnow().timestamp()
@@ -7969,6 +10416,290 @@ def safe_db_operation(operation_func, rollback_on_error=True):
         traceback.print_exc()
         
         return False, str(e)
+
+
+# =============================================================================
+# LOGO MANAGEMENT AND HYBRID DETECTION ROUTES
+# =============================================================================
+
+@app.route('/logo_management')
+@login_required
+def logo_management():
+    """Logo management interface"""
+    try:
+        # Get all business logos with statistics
+        business_logos = BusinessLogo.query.order_by(BusinessLogo.business_name).all()
+
+        # Calculate statistics for each logo
+        logo_stats = []
+        for logo in business_logos:
+            total_detections = LogoRecognitionResult.query.filter_by(business_logo_id=logo.id).count()
+            recent_detections = LogoRecognitionResult.query.filter(
+                LogoRecognitionResult.business_logo_id == logo.id,
+                LogoRecognitionResult.detection_date >= datetime.utcnow() - timedelta(days=30)
+            ).count()
+
+            logo_stats.append({
+                'logo': logo,
+                'total_detections': total_detections,
+                'recent_detections': recent_detections,
+                'avg_confidence': logo.average_confidence_score,
+                'is_active': logo.is_active
+            })
+
+        return render_template('logo_management.html', logo_stats=logo_stats)
+
+    except Exception as e:
+        print(f"Error in logo management: {e}")
+        flash('Error loading logo management interface', 'error')
+        return redirect(url_for('index'))
+
+@app.route('/api/hybrid_detection/<int:pub_id>', methods=['POST'])
+@login_required
+def run_hybrid_detection(pub_id):
+    """Run hybrid detection on a publication"""
+    try:
+        data = request.get_json() or {}
+        mode = data.get('mode', 'auto')  # 'auto', 'manual', 'hybrid'
+        page_numbers = data.get('page_numbers')  # Optional specific pages
+
+        # Initialize hybrid detection pipeline
+        hybrid_pipeline = HybridDetectionPipeline()
+
+        # Run detection
+        result = hybrid_pipeline.detect_ads_hybrid(pub_id, mode, page_numbers)
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"Error in hybrid detection: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/manual_click_detection/<int:page_id>', methods=['POST'])
+@login_required
+def process_manual_click_detection(page_id):
+    """Process manual click for smart ad detection"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'})
+
+        click_x = data.get('click_x')
+        click_y = data.get('click_y')
+        business_name = data.get('business_name')
+        learn_logo = data.get('learn_logo', False)
+
+        if click_x is None or click_y is None:
+            return jsonify({'success': False, 'error': 'Click coordinates required'})
+
+        # Initialize hybrid detection pipeline
+        hybrid_pipeline = HybridDetectionPipeline()
+
+        # Process manual click
+        result = hybrid_pipeline.process_manual_click(
+            page_id, click_x, click_y, business_name, learn_logo
+        )
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"Error in manual click detection: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/detection_suggestions/<int:page_id>')
+@login_required
+def get_detection_suggestions(page_id):
+    """Get automated detection suggestions for a page"""
+    try:
+        threshold = float(request.args.get('threshold', 0.6))
+
+        # Initialize hybrid detection pipeline
+        hybrid_pipeline = HybridDetectionPipeline()
+
+        # Get suggestions
+        result = hybrid_pipeline.get_detection_suggestions(page_id, threshold)
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"Error getting detection suggestions: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/hybrid_detection_status/<int:pub_id>')
+@login_required
+def get_hybrid_detection_status(pub_id):
+    """Get hybrid detection status for a publication"""
+    try:
+        # Initialize hybrid detection pipeline
+        hybrid_pipeline = HybridDetectionPipeline()
+
+        # Get status
+        result = hybrid_pipeline.get_hybrid_detection_status(pub_id)
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"Error getting hybrid detection status: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/business_logos')
+@login_required
+def get_business_logos():
+    """Get all business logos for UI selection"""
+    try:
+        logos = BusinessLogo.query.filter_by(is_active=True).order_by(BusinessLogo.business_name).all()
+
+        logo_list = []
+        for logo in logos:
+            logo_list.append({
+                'id': logo.id,
+                'business_name': logo.business_name,
+                'successful_detections': logo.successful_detections,
+                'total_detections': logo.total_detections,
+                'confidence_threshold': logo.confidence_threshold,
+                'last_detected': logo.last_detected_date.isoformat() if logo.last_detected_date else None
+            })
+
+        return jsonify({'success': True, 'logos': logo_list})
+
+    except Exception as e:
+        print(f"Error getting business logos: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/logo_learning/<int:ad_box_id>', methods=['POST'])
+@login_required
+def learn_logo_from_ad(ad_box_id):
+    """Learn logo from an existing ad box"""
+    try:
+        data = request.get_json()
+        if not data:
+            return jsonify({'success': False, 'error': 'No data provided'})
+
+        business_name = data.get('business_name')
+        if not business_name:
+            return jsonify({'success': False, 'error': 'Business name required'})
+
+        # Get the ad box
+        ad_box = AdBox.query.get(ad_box_id)
+        if not ad_box:
+            return jsonify({'success': False, 'error': 'Ad box not found'})
+
+        # Initialize logo learning workflow
+        logo_learning = LogoLearningWorkflow()
+
+        # Load page image to extract features
+        page = Page.query.get(ad_box.page_id)
+        publication = Publication.query.get(page.publication_id)
+        image_filename = f"{publication.filename}_page_{page.page_number}.png"
+        image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+
+        if not os.path.exists(image_path):
+            return jsonify({'success': False, 'error': 'Page image not found'})
+
+        page_image = cv2.imread(image_path)
+        if page_image is None:
+            return jsonify({'success': False, 'error': 'Could not load page image'})
+
+        # Extract ad region
+        x, y, w, h = int(ad_box.x), int(ad_box.y), int(ad_box.width), int(ad_box.height)
+        ad_region = page_image[y:y+h, x:x+w]
+
+        # Extract features
+        feature_extractor = LogoFeatureExtractor()
+        features = feature_extractor.extract_logo_features(ad_region, business_name)
+
+        # Learn logo
+        result = logo_learning.learn_logo_from_manual_ad(ad_box, business_name, features)
+
+        return jsonify(result)
+
+    except Exception as e:
+        print(f"Error learning logo from ad: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/toggle_logo_status/<int:logo_id>', methods=['POST'])
+@login_required
+def toggle_logo_status(logo_id):
+    """Toggle active status of a business logo"""
+    try:
+        logo = BusinessLogo.query.get(logo_id)
+        if not logo:
+            return jsonify({'success': False, 'error': 'Logo not found'})
+
+        logo.is_active = not logo.is_active
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'logo_id': logo_id,
+            'is_active': logo.is_active,
+            'message': f"Logo '{logo.business_name}' {'activated' if logo.is_active else 'deactivated'}"
+        })
+
+    except Exception as e:
+        print(f"Error toggling logo status: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/delete_logo/<int:logo_id>', methods=['DELETE'])
+@login_required
+def delete_logo(logo_id):
+    """Delete a business logo and its associated data"""
+    try:
+        logo = BusinessLogo.query.get(logo_id)
+        if not logo:
+            return jsonify({'success': False, 'error': 'Logo not found'})
+
+        business_name = logo.business_name
+
+        # Delete associated recognition results
+        LogoRecognitionResult.query.filter_by(business_logo_id=logo_id).delete()
+
+        # Delete the logo
+        db.session.delete(logo)
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': f"Logo '{business_name}' and all associated data deleted"
+        })
+
+    except Exception as e:
+        print(f"Error deleting logo: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/hybrid_detection/<int:pub_id>')
+@login_required
+def hybrid_detection_interface(pub_id):
+    """Hybrid detection interface for manual enhancement"""
+    try:
+        publication = Publication.query.get(pub_id)
+        if not publication:
+            flash('Publication not found', 'error')
+            return redirect(url_for('index'))
+
+        # Get pages for this publication
+        pages = Page.query.filter_by(publication_id=pub_id).order_by(Page.page_number).all()
+
+        # Get current detection status
+        hybrid_pipeline = HybridDetectionPipeline()
+        status = hybrid_pipeline.get_hybrid_detection_status(pub_id)
+
+        # Get available business logos
+        business_logos = BusinessLogo.query.filter_by(is_active=True).order_by(BusinessLogo.business_name).all()
+
+        return render_template('hybrid_detection.html',
+                             publication=publication,
+                             pages=pages,
+                             detection_status=status,
+                             business_logos=business_logos)
+
+    except Exception as e:
+        print(f"Error in hybrid detection interface: {e}")
+        flash('Error loading hybrid detection interface', 'error')
+        return redirect(url_for('index'))
+
 
 # GLOBAL DATABASE ERROR HANDLER
 @app.errorhandler(Exception)

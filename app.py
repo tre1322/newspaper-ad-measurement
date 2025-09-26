@@ -369,7 +369,7 @@ def start_background_processing(pub_id):
                                 print(f"📝 Publication processed successfully - continue with manual ad marking")
                             else:
                                 # Proceed with AI detection with memory management
-                                result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.25)
+                                result = AdLearningEngine.auto_detect_ads(publication.id, confidence_threshold=0.1)
                                 
                                 if result and result.get('success'):
                                     print(f"✅ AI detection complete: {result['detections']} ads automatically detected and boxed across {result['pages_processed']} pages")

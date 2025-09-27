@@ -344,39 +344,56 @@ def start_background_processing(pub_id):
                         pages = Page.query.filter_by(publication_id=publication.id).all()
                         file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
 
-                        for page in pages:
-                            print(f"Running content-based detection on page {page.page_number}...")
-                            content_ads = ContentBasedAdDetector.detect_business_content_ads(file_path, page.page_number)
+                        # Import newspaper domain detector
+                        from newspaper_domain_detector import NewspaperDomainDetector
+                        detector = NewspaperDomainDetector()
 
-                            for ad in content_ads:
+                        for page in pages:
+                            print(f"Running newspaper domain detection on page {page.page_number}...")
+
+                            # Use newspaper domain detector
+                            detected_ads = detector.detect_business_ads(file_path, page.page_number)
+
+                            # Convert to expected format and process each ad
+                            for ad in detected_ads:
+                                content_ad = {
+                                    'x': ad.x,
+                                    'y': ad.y,
+                                    'width': ad.width,
+                                    'height': ad.height,
+                                    'confidence': ad.confidence / 100.0,  # Convert to 0-1 scale
+                                    'ad_type': ad.ad_type,
+                                    'text': ad.text_snippet,
+                                    'indicators': ad.business_indicators
+                                }
                                 # Calculate measurements
                                 dpi = page.pixels_per_inch or 150
-                                width_inches_raw = ad['width'] / dpi
-                                height_inches_raw = ad['height'] / dpi
+                                width_inches_raw = content_ad['width'] / dpi
+                                height_inches_raw = content_ad['height'] / dpi
                                 column_inches = width_inches_raw * height_inches_raw
 
                                 # Create AdBox
                                 ad_box = AdBox(
                                     page_id=page.id,
-                                    x=float(ad['x']),
-                                    y=float(ad['y']),
-                                    width=float(ad['width']),
-                                    height=float(ad['height']),
+                                    x=float(content_ad['x']),
+                                    y=float(content_ad['y']),
+                                    width=float(content_ad['width']),
+                                    height=float(content_ad['height']),
                                     width_inches_raw=width_inches_raw,
                                     height_inches_raw=height_inches_raw,
                                     width_inches_rounded=round(width_inches_raw * 16) / 16,
                                     height_inches_rounded=round(height_inches_raw * 16) / 16,
                                     column_inches=column_inches,
-                                    ad_type='business_content',
+                                    ad_type=content_ad['ad_type'],
                                     is_ad=True,
                                     detected_automatically=True,
-                                    confidence_score=ad['confidence'],
+                                    confidence_score=content_ad['confidence'],
                                     user_verified=False
                                 )
                                 db.session.add(ad_box)
                                 total_detected_ads += 1
 
-                            print(f"Content detection found {len(content_ads)} ads on page {page.page_number}")
+                            print(f"Newspaper domain detection found {len(detected_ads)} ads on page {page.page_number}")
 
                         # Update publication totals
                         total_ad_inches = sum(box.column_inches for box in AdBox.query.join(Page).filter(Page.publication_id == publication.id).all())
@@ -9190,7 +9207,7 @@ def upload():
         
         if file:
             try:
-                print(f"📁 Starting upload process for file: {file.filename}")
+                print(f"Starting upload process for file: {file.filename}")
                 
                 # Generate secure unique filename
                 file_ext = os.path.splitext(file.filename.lower())[1]
@@ -9200,11 +9217,11 @@ def upload():
                 # Ensure upload directory exists
                 pdf_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs')
                 os.makedirs(pdf_dir, exist_ok=True)
-                print(f"📂 Upload directory ready: {pdf_dir}")
+                print(f"Upload directory ready: {pdf_dir}")
                 
                 # Save file
                 file_path = os.path.join(pdf_dir, unique_filename)
-                print(f"💾 Saving file to: {file_path}")
+                print(f"Saving file to: {file_path}")
                 file.save(file_path)
                 
                 # Check file size after saving
@@ -9219,7 +9236,7 @@ def upload():
                     return redirect(request.url)
                 
                 # Validate the uploaded file is actually a PDF
-                print(f"🔍 Validating PDF file...")
+                print(f"Validating PDF file...")
                 if not validate_pdf_file(file_path):
                     print(f"❌ PDF validation failed")
                     os.remove(file_path)  # Clean up invalid file
@@ -9228,14 +9245,14 @@ def upload():
                 print(f"PDF validation passed")
                 
                 # Process PDF
-                print(f"📖 Opening PDF to count pages...")
+                print(f"Opening PDF to count pages...")
                 pdf_doc = fitz.open(file_path)
                 page_count = pdf_doc.page_count
                 pdf_doc.close()
-                print(f"📄 PDF has {page_count} pages")
+                print(f"PDF has {page_count} pages")
                 
                 # Create publication record
-                print(f"📊 Creating publication record...")
+                print(f"Creating publication record...")
                 config = PUBLICATION_CONFIGS[pub_type]
                 total_inches = config['total_inches_per_page'] * page_count
                 
@@ -9249,31 +9266,31 @@ def upload():
                 print(f"Publication object created")
                 
                 # Set processing status if available (with timeout protection)
-                print(f"🔄 Setting processing status...")
+                print(f"Setting processing status...")
                 try:
                     publication.set_processing_status('uploaded')
                     print(f"Processing status set")
                 except Exception as e:
                     print(f"WARNING: Could not set processing status: {e}")
                 
-                print(f"💾 Adding publication to database...")
+                print(f"Adding publication to database...")
                 db.session.add(publication)
-                print(f"💾 Committing to database...")
+                print(f"Committing to database...")
                 db.session.commit()
                 print(f"Database commit successful")
                 
                 flash(f'File uploaded successfully! Processing {page_count} pages...', 'success')
-                print(f"🎉 Upload completed for publication {publication.id}: {publication.original_filename}")
+                print(f"Upload completed for publication {publication.id}: {publication.original_filename}")
                 
                 # Start background processing immediately
-                print(f"🚀 Starting background processing...")
+                print(f"Starting background processing...")
                 try:
                     start_background_processing(publication.id)
                     print(f"Background processing started")
                 except Exception as e:
                     print(f"WARNING: Could not start background processing: {e}")
                 
-                print(f"🔄 Redirecting to processing status page...")
+                print(f"Redirecting to processing status page...")
                 # Redirect to processing status page
                 return redirect(url_for('processing_status', pub_id=publication.id))
                 

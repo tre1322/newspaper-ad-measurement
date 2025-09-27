@@ -4024,6 +4024,251 @@ class SimpleAdDetector:
         }
 
 
+class ContentBasedAdDetector:
+    """Content-based ad detection using business information analysis"""
+
+    @staticmethod
+    def detect_business_content_ads(pdf_path, page_number):
+        """
+        Detect ads by analyzing text content for business information
+        Returns list of ad regions with coordinates and business scores
+        """
+        import re
+
+        try:
+            doc = fitz.open(pdf_path)
+            page = doc.load_page(page_number - 1)  # 0-indexed
+
+            # Extract text with detailed positioning
+            text_dict = page.get_text("dict")
+
+            # Extract all text blocks with coordinates
+            text_blocks = ContentBasedAdDetector._extract_text_blocks(text_dict)
+
+            # Score each text block for business content
+            business_blocks = []
+            for block in text_blocks:
+                business_score, indicators = ContentBasedAdDetector._score_business_content(block['text'])
+                if business_score > 0.14:  # 14% threshold - need at least 1 business indicator
+                    block['business_score'] = (business_score, indicators)
+                    business_blocks.append(block)
+
+            # Group nearby business text blocks spatially
+            grouped_regions = ContentBasedAdDetector._group_spatial_regions(business_blocks)
+
+            # Create bounding boxes for grouped regions
+            ad_regions = []
+            for group in grouped_regions:
+                bbox = ContentBasedAdDetector._create_bounding_box(group)
+
+                # Visual validation - check if region looks like an ad
+                if ContentBasedAdDetector._validate_ad_region(bbox, page):
+                    ad_regions.append({
+                        'x': int(bbox['x']),
+                        'y': int(bbox['y']),
+                        'width': int(bbox['width']),
+                        'height': int(bbox['height']),
+                        'confidence': bbox['business_score'],
+                        'business_indicators': bbox['indicators'],
+                        'text_content': bbox['text']
+                    })
+
+            doc.close()
+            return ad_regions
+
+        except Exception as e:
+            print(f"Error in content-based detection: {e}")
+            return []
+
+    @staticmethod
+    def _extract_text_blocks(text_dict):
+        """Extract text blocks with coordinates from PyMuPDF text dict"""
+        text_blocks = []
+
+        for block in text_dict.get("blocks", []):
+            if "lines" in block:  # Text block
+                block_text = ""
+                block_bbox = block["bbox"]
+
+                for line in block["lines"]:
+                    for span in line["spans"]:
+                        block_text += span["text"] + " "
+
+                if block_text.strip():
+                    text_blocks.append({
+                        'text': block_text.strip(),
+                        'x': block_bbox[0],
+                        'y': block_bbox[1],
+                        'width': block_bbox[2] - block_bbox[0],
+                        'height': block_bbox[3] - block_bbox[1],
+                        'bbox': block_bbox
+                    })
+
+        return text_blocks
+
+    @staticmethod
+    def _score_business_content(text):
+        """Score text content for business indicators (0-1 scale)"""
+        import re
+
+        indicators = []
+        text_lower = text.lower()
+
+        # Phone number patterns
+        phone_patterns = [
+            r'\b\d{3}[-.]?\d{3}[-.]?\d{4}\b',  # 123-456-7890 or 123.456.7890
+            r'\(\d{3}\)\s*\d{3}[-.]?\d{4}',   # (123) 456-7890
+            r'\b\d{3}\s+\d{3}\s+\d{4}\b'      # 123 456 7890
+        ]
+        for pattern in phone_patterns:
+            if re.search(pattern, text):
+                indicators.append('phone')
+                break
+
+        # Email patterns
+        if re.search(r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b', text):
+            indicators.append('email')
+
+        # Website patterns
+        if re.search(r'\b(?:www\.|http[s]?://)[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b', text_lower):
+            indicators.append('website')
+
+        # Price indicators
+        price_patterns = [
+            r'\$\d+(?:\.\d{2})?',  # $50 or $50.00
+            r'\bcall for pric',     # "call for pricing"
+            r'\bfree estimat',      # "free estimate"
+            r'\b\d+\s*(?:off|discount|%)',  # discounts
+        ]
+        for pattern in price_patterns:
+            if re.search(pattern, text_lower):
+                indicators.append('pricing')
+                break
+
+        # Business service keywords
+        business_keywords = [
+            'repair', 'service', 'licensed', 'insured', 'certified',
+            'hours', 'open', 'appointment', 'call', 'contact',
+            'auto', 'plumbing', 'electric', 'heating', 'cooling',
+            'restaurant', 'dental', 'medical', 'legal', 'real estate',
+            'insurance', 'financial', 'construction', 'roofing',
+            'landscaping', 'cleaning', 'maintenance', 'installation'
+        ]
+        business_score = sum(1 for keyword in business_keywords if keyword in text_lower)
+        if business_score >= 2:  # Need at least 2 business keywords
+            indicators.append('business_keywords')
+
+        # Address patterns
+        if re.search(r'\b\d+\s+[A-Za-z\s]+(?:st|street|ave|avenue|rd|road|blvd|boulevard|dr|drive|ln|lane|ct|court)\b', text_lower):
+            indicators.append('address')
+
+        # Business hours pattern
+        if re.search(r'\b(?:mon|tue|wed|thu|fri|sat|sun|monday|tuesday|wednesday|thursday|friday|saturday|sunday).*\d{1,2}:\d{2}', text_lower):
+            indicators.append('hours')
+
+        # Calculate score based on number of indicators
+        score = len(indicators) / 7.0  # Max 7 indicator types
+        return min(score, 1.0), indicators
+
+    @staticmethod
+    def _group_spatial_regions(business_blocks, proximity_threshold=50):
+        """Group nearby business text blocks into ad regions"""
+        if not business_blocks:
+            return []
+
+        groups = []
+        used_blocks = set()
+
+        for i, block in enumerate(business_blocks):
+            if i in used_blocks:
+                continue
+
+            # Start new group with this block
+            group = [block]
+            used_blocks.add(i)
+
+            # Find nearby blocks to add to group
+            for j, other_block in enumerate(business_blocks):
+                if j in used_blocks:
+                    continue
+
+                # Calculate distance between blocks
+                distance = ContentBasedAdDetector._calculate_block_distance(block, other_block)
+                if distance <= proximity_threshold:
+                    group.append(other_block)
+                    used_blocks.add(j)
+
+            groups.append(group)
+
+        return groups
+
+    @staticmethod
+    def _calculate_block_distance(block1, block2):
+        """Calculate distance between two text blocks"""
+        # Use center points
+        x1 = block1['x'] + block1['width'] / 2
+        y1 = block1['y'] + block1['height'] / 2
+        x2 = block2['x'] + block2['width'] / 2
+        y2 = block2['y'] + block2['height'] / 2
+
+        return ((x2 - x1) ** 2 + (y2 - y1) ** 2) ** 0.5
+
+    @staticmethod
+    def _create_bounding_box(text_group):
+        """Create bounding box around group of text blocks"""
+        if not text_group:
+            return None
+
+        # Find extremes
+        min_x = min(block['x'] for block in text_group)
+        min_y = min(block['y'] for block in text_group)
+        max_x = max(block['x'] + block['width'] for block in text_group)
+        max_y = max(block['y'] + block['height'] for block in text_group)
+
+        # Combine business scores and indicators
+        total_score = sum(block['business_score'][0] for block in text_group)
+        avg_score = total_score / len(text_group)
+
+        all_indicators = []
+        all_text = []
+        for block in text_group:
+            all_indicators.extend(block['business_score'][1])
+            all_text.append(block['text'])
+
+        return {
+            'x': min_x,
+            'y': min_y,
+            'width': max_x - min_x,
+            'height': max_y - min_y,
+            'business_score': avg_score,
+            'indicators': list(set(all_indicators)),
+            'text': ' '.join(all_text)
+        }
+
+    @staticmethod
+    def _validate_ad_region(bbox, page):
+        """Visual validation of detected content region"""
+        # Size validation - must be reasonable ad size
+        width, height = bbox['width'], bbox['height']
+
+        if width < 100 or height < 80:  # Too small
+            return False
+        if width > 600 or height > 400:  # Too large
+            return False
+
+        # Aspect ratio validation
+        aspect_ratio = width / height if height > 0 else 0
+        if aspect_ratio < 0.5 or aspect_ratio > 4.0:  # Too narrow or too wide
+            return False
+
+        # Area validation
+        area = width * height
+        if area < 8000:  # Minimum area
+            return False
+
+        return True
+
+
 # Publication configurations
 PUBLICATION_CONFIGS = {
     'broadsheet': {

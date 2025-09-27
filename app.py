@@ -3485,7 +3485,7 @@ class HybridDetectionPipeline:
 
     def get_detection_suggestions(self, page_id, threshold=0.6):
         """
-        Get automated suggestions for manual detection on a page
+        Get automated suggestions for manual detection on a page using NewspaperDomainDetector
 
         Args:
             page_id: Database page ID
@@ -3507,50 +3507,46 @@ class HybridDetectionPipeline:
                     'x': ad.x, 'y': ad.y, 'width': ad.width, 'height': ad.height
                 })
 
-            # Load page image
+            # Get PDF file path
             publication = Publication.query.get(page.publication_id)
-            image_filename = f"{publication.filename}_page_{page.page_number}.png"
-            image_path = os.path.join('static', 'uploads', 'pages', image_filename)
+            pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
 
-            if not os.path.exists(image_path):
-                return {'success': False, 'error': 'Page image not found'}
+            if not os.path.exists(pdf_path):
+                return {'success': False, 'error': 'PDF file not found'}
 
-            page_image = cv2.imread(image_path)
-            if page_image is None:
-                return {'success': False, 'error': 'Could not load page image'}
+            # Use NewspaperDomainDetector to find business ads
+            from newspaper_domain_detector import NewspaperDomainDetector
+            detector = NewspaperDomainDetector()
+            business_ads = detector.detect_business_ads(pdf_path, page.page_number)
 
-            # Run logo recognition at lower threshold for suggestions
             suggestions = []
 
-            # Get all business logos
-            business_logos = BusinessLogo.query.filter_by(is_active=True).all()
+            for ad in business_ads:
+                # Check if this overlaps with existing ads
+                is_duplicate = False
+                ad_region = {
+                    'x': ad.x, 'y': ad.y, 'width': ad.width, 'height': ad.height
+                }
 
-            for business_logo in business_logos:
-                logo_detections = self.logo_recognition_engine._search_logo_on_page(
-                    page_image, business_logo, confidence_threshold=threshold * 0.7
-                )
+                for existing in existing_regions:
+                    overlap = self._calculate_region_overlap(ad_region, existing)
+                    if overlap > 0.3:  # 30% overlap threshold
+                        is_duplicate = True
+                        break
 
-                for detection in logo_detections:
-                    bbox = detection['bounding_box']
-
-                    # Check if this overlaps with existing ads
-                    is_duplicate = False
-                    for existing in existing_regions:
-                        overlap = self._calculate_region_overlap(bbox, existing)
-                        if overlap > 0.3:  # 30% overlap threshold
-                            is_duplicate = True
-                            break
-
-                    if not is_duplicate and detection['confidence'] >= threshold:
-                        suggestions.append({
-                            'business_name': business_logo.business_name,
-                            'confidence': detection['confidence'],
-                            'x': bbox['x'],
-                            'y': bbox['y'],
-                            'width': bbox['width'],
-                            'height': bbox['height'],
-                            'suggestion_type': 'logo_recognition'
-                        })
+                # Only suggest if confidence is above threshold and not duplicate
+                if not is_duplicate and ad.confidence >= (threshold * 100):
+                    suggestions.append({
+                        'business_name': f"Business Ad ({ad.ad_type})",
+                        'confidence': ad.confidence / 100.0,  # Convert to 0-1 range
+                        'x': ad.x,
+                        'y': ad.y,
+                        'width': ad.width,
+                        'height': ad.height,
+                        'suggestion_type': 'newspaper_domain',
+                        'business_indicators': ', '.join(ad.business_indicators),
+                        'text_snippet': ad.text_snippet[:50] + "..." if len(ad.text_snippet) > 50 else ad.text_snippet
+                    })
 
             # Sort by confidence
             suggestions.sort(key=lambda s: s['confidence'], reverse=True)

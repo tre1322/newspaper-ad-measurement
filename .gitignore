@@ -65,4 +65,6 @@ google-*.json
 
 # API Keys and Secrets
 config.py
-secrets.py
+secrets.pynul 
+"*.tmp" 
+"temp*" 

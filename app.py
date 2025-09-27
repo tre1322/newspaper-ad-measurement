@@ -716,6 +716,267 @@ class LogoRecognitionResult(db.Model):
     detection_date = db.Column(db.DateTime, default=datetime.utcnow)
     verification_date = db.Column(db.DateTime)
 
+class UserCorrection(db.Model):
+    """
+    Simple learning system: Store user corrections as training data
+    When users add/move/delete ad boxes, save as examples for learning
+    """
+    id = db.Column(db.Integer, primary_key=True)
+    publication_id = db.Column(db.Integer, db.ForeignKey('publication.id'), nullable=False)
+    page_id = db.Column(db.Integer, db.ForeignKey('page.id'), nullable=False)
+
+    # Box coordinates
+    x = db.Column(db.Float, nullable=False)
+    y = db.Column(db.Float, nullable=False)
+    width = db.Column(db.Float, nullable=False)
+    height = db.Column(db.Float, nullable=False)
+
+    # Simple features for learning
+    box_area = db.Column(db.Float)  # width * height
+    aspect_ratio = db.Column(db.Float)  # width / height
+    position_x_ratio = db.Column(db.Float)  # x position as ratio of page width
+    position_y_ratio = db.Column(db.Float)  # y position as ratio of page height
+    border_strength = db.Column(db.Float)  # detected border strength 0-1
+    text_density = db.Column(db.Float)  # text content density 0-1
+
+    # Learning label
+    is_ad = db.Column(db.Boolean, nullable=False)  # True = user says this IS an ad, False = NOT an ad
+
+    # Metadata
+    publication_type = db.Column(db.String(50))  # CCCitizen, broadsheet, etc.
+    correction_type = db.Column(db.String(20))  # 'added', 'moved', 'deleted'
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+
+class SimpleAdLearner:
+    """
+    Simple AI learning system that improves detection from user corrections
+    Uses basic features and RandomForest for learning
+    """
+
+    @staticmethod
+    def extract_box_features(x, y, width, height, page_width, page_height, page_image=None):
+        """
+        Extract simple features from a box region for learning
+        Returns a dictionary of features
+        """
+        features = {}
+
+        # Basic geometric features
+        features['box_area'] = width * height
+        features['aspect_ratio'] = width / height if height > 0 else 0
+        features['position_x_ratio'] = x / page_width if page_width > 0 else 0
+        features['position_y_ratio'] = y / page_height if page_height > 0 else 0
+
+        # Size relative to page
+        features['width_ratio'] = width / page_width if page_width > 0 else 0
+        features['height_ratio'] = height / page_height if page_height > 0 else 0
+
+        # Position categories (useful for learning layout patterns)
+        features['is_top_half'] = 1.0 if features['position_y_ratio'] < 0.5 else 0.0
+        features['is_left_half'] = 1.0 if features['position_x_ratio'] < 0.5 else 0.0
+        features['is_corner'] = 1.0 if (features['position_x_ratio'] < 0.2 or features['position_x_ratio'] > 0.8) and \
+                                      (features['position_y_ratio'] < 0.2 or features['position_y_ratio'] > 0.8) else 0.0
+
+        # Simple border and text analysis (if page image is available)
+        if page_image is not None:
+            try:
+                # Extract region from page image
+                region = page_image[int(y):int(y+height), int(x):int(x+width)]
+                if region.size > 0:
+                    # Border strength (variance at edges)
+                    features['border_strength'] = SimpleAdLearner._calculate_border_strength(region)
+
+                    # Text density (amount of text-like content)
+                    features['text_density'] = SimpleAdLearner._calculate_text_density(region)
+                else:
+                    features['border_strength'] = 0.0
+                    features['text_density'] = 0.0
+            except:
+                features['border_strength'] = 0.0
+                features['text_density'] = 0.0
+        else:
+            features['border_strength'] = 0.0
+            features['text_density'] = 0.0
+
+        return features
+
+    @staticmethod
+    def save_user_correction(publication_id, page_id, x, y, width, height, is_ad, correction_type, publication_type):
+        """
+        Save a user correction as training data
+        """
+        try:
+            # Get page dimensions
+            page = Page.query.get(page_id)
+            if not page:
+                return False
+
+            # Extract features
+            features = SimpleAdLearner.extract_box_features(
+                x, y, width, height, page.width_pixels, page.height_pixels
+            )
+
+            # Create correction record
+            correction = UserCorrection(
+                publication_id=publication_id,
+                page_id=page_id,
+                x=x, y=y, width=width, height=height,
+                box_area=features['box_area'],
+                aspect_ratio=features['aspect_ratio'],
+                position_x_ratio=features['position_x_ratio'],
+                position_y_ratio=features['position_y_ratio'],
+                border_strength=features['border_strength'],
+                text_density=features['text_density'],
+                is_ad=is_ad,
+                publication_type=publication_type,
+                correction_type=correction_type
+            )
+
+            db.session.add(correction)
+            db.session.commit()
+            print(f"Saved user correction: {correction_type} - is_ad={is_ad}")
+            return True
+        except Exception as e:
+            print(f"Error saving user correction: {e}")
+            db.session.rollback()
+            return False
+
+    @staticmethod
+    def train_model():
+        """
+        Train a simple RandomForest model on user corrections
+        Returns model and accuracy if successful
+        """
+        try:
+            # Get all user corrections
+            corrections = UserCorrection.query.all()
+            if len(corrections) < 10:  # Need minimum data
+                return None, f"Need at least 10 corrections, have {len(corrections)}"
+
+            # Prepare training data
+            X = []
+            y = []
+
+            feature_names = ['box_area', 'aspect_ratio', 'position_x_ratio', 'position_y_ratio',
+                           'border_strength', 'text_density']
+
+            for correction in corrections:
+                features = [
+                    correction.box_area or 0,
+                    correction.aspect_ratio or 0,
+                    correction.position_x_ratio or 0,
+                    correction.position_y_ratio or 0,
+                    correction.border_strength or 0,
+                    correction.text_density or 0
+                ]
+                X.append(features)
+                y.append(1 if correction.is_ad else 0)
+
+            X = np.array(X)
+            y = np.array(y)
+
+            # Train RandomForest
+            model = RandomForestClassifier(n_estimators=50, random_state=42, max_depth=10)
+            model.fit(X, y)
+
+            # Calculate accuracy (simple cross-validation would be better, but this is simple)
+            predictions = model.predict(X)
+            accuracy = accuracy_score(y, predictions)
+
+            print(f"Trained model on {len(corrections)} corrections, accuracy: {accuracy:.3f}")
+            return model, accuracy
+
+        except Exception as e:
+            print(f"Error training model: {e}")
+            return None, str(e)
+
+    @staticmethod
+    def apply_learning_filter(detected_boxes, model, page_width, page_height, confidence_threshold=0.85):
+        """
+        Apply learned model to filter detected boxes
+        Returns filtered boxes with confidence scores
+        """
+        if model is None:
+            return detected_boxes
+
+        filtered_boxes = []
+
+        for box in detected_boxes:
+            try:
+                # Extract features for this box
+                features = SimpleAdLearner.extract_box_features(
+                    box.get('x', 0), box.get('y', 0),
+                    box.get('width', 0), box.get('height', 0),
+                    page_width, page_height
+                )
+
+                # Prepare feature vector
+                feature_vector = np.array([[
+                    features['box_area'],
+                    features['aspect_ratio'],
+                    features['position_x_ratio'],
+                    features['position_y_ratio'],
+                    features['border_strength'],
+                    features['text_density']
+                ]])
+
+                # Get prediction and confidence
+                prediction = model.predict(feature_vector)[0]
+                probabilities = model.predict_proba(feature_vector)[0]
+                confidence = max(probabilities)
+
+                # Only keep if model predicts it's an ad with high confidence
+                if prediction == 1 and confidence >= confidence_threshold:
+                    box['ml_confidence'] = confidence
+                    filtered_boxes.append(box)
+
+            except Exception as e:
+                print(f"Error applying learning filter to box: {e}")
+                # Keep box if filtering fails
+                filtered_boxes.append(box)
+
+        print(f"Learning filter: {len(detected_boxes)} -> {len(filtered_boxes)} boxes")
+        return filtered_boxes
+
+    @staticmethod
+    def _calculate_border_strength(region):
+        """Calculate border strength (0-1) based on edge variance"""
+        try:
+            if len(region.shape) == 3:
+                region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+
+            # Calculate variance at borders
+            top_edge = np.std(region[0:3, :]) if region.shape[0] > 3 else 0
+            bottom_edge = np.std(region[-3:, :]) if region.shape[0] > 3 else 0
+            left_edge = np.std(region[:, 0:3]) if region.shape[1] > 3 else 0
+            right_edge = np.std(region[:, -3:]) if region.shape[1] > 3 else 0
+
+            # Average edge variance, normalized to 0-1
+            avg_edge_variance = (top_edge + bottom_edge + left_edge + right_edge) / 4
+            return min(avg_edge_variance / 50.0, 1.0)  # Normalize roughly to 0-1
+        except:
+            return 0.0
+
+    @staticmethod
+    def _calculate_text_density(region):
+        """Calculate text density (0-1) based on connected components"""
+        try:
+            if len(region.shape) == 3:
+                region = cv2.cvtColor(region, cv2.COLOR_BGR2GRAY)
+
+            # Threshold to binary
+            _, binary = cv2.threshold(region, 127, 255, cv2.THRESH_BINARY_INV)
+
+            # Find connected components (text-like regions)
+            num_labels, labels = cv2.connectedComponents(binary)
+
+            # Text density based on number of components relative to area
+            area = region.shape[0] * region.shape[1]
+            density = num_labels / (area / 1000.0) if area > 0 else 0  # Components per 1000 pixels
+            return min(density, 1.0)  # Cap at 1.0
+        except:
+            return 0.0
+
 class NegativeTrainingCollector:
     """
     Collects negative training examples from user corrections
@@ -3371,7 +3632,23 @@ class SimpleAdDetector:
                 # Filter to realistic ad sizes
                 filtered_ads = SimpleAdDetector._filter_realistic_ads(ad_regions)
 
-                print(f"Found {len(filtered_ads)} bordered ads on page {page.page_number}")
+                # Apply AI learning filter if trained model exists
+                try:
+                    learned_filtered_ads = SimpleAdLearner.apply_learning_filter(
+                        filtered_ads,
+                        None,  # model will be loaded automatically
+                        page.width_pixels,
+                        page.height_pixels,
+                        confidence_threshold=0.85
+                    )
+                    if learned_filtered_ads != filtered_ads:
+                        print(f"AI learning filter: {len(filtered_ads)} -> {len(learned_filtered_ads)} ads on page {page.page_number}")
+                        filtered_ads = learned_filtered_ads
+                    else:
+                        print(f"Found {len(filtered_ads)} bordered ads on page {page.page_number}")
+                except Exception as e:
+                    print(f"Learning filter error (using original detections): {e}")
+                    print(f"Found {len(filtered_ads)} bordered ads on page {page.page_number}")
 
                 # Create AdBox entries
                 for ad in filtered_ads:
@@ -8883,6 +9160,21 @@ def process_publication(pub_id):
                 # Fallback to traditional CV detection
                 detected_boxes = AdBoxDetector.detect_boxes(image_path)
                 print(f"Used CV detection for page {page_num + 1}: {len(detected_boxes)} ads detected")
+
+            # Apply AI learning filter to improve detection quality
+            try:
+                filtered_boxes = SimpleAdLearner.apply_learning_filter(
+                    detected_boxes,
+                    None,  # model will be loaded automatically
+                    page_record.width_pixels,
+                    page_record.height_pixels,
+                    confidence_threshold=0.85
+                )
+                if len(filtered_boxes) != len(detected_boxes):
+                    print(f"AI learning filter: {len(detected_boxes)} -> {len(filtered_boxes)} ads on page {page_num + 1}")
+                    detected_boxes = filtered_boxes
+            except Exception as e:
+                print(f"Learning filter error on page {page_num + 1} (using original detections): {e}")
             
             page_total_inches = 0
             
@@ -9552,13 +9844,32 @@ def delete_box(box_id):
         ad_box = db.session.get(AdBox, box_id)
         if not ad_box:
             return jsonify({'success': False, 'error': 'Ad box not found'})
-        
+
         page_id = ad_box.page_id
-        
+
+        # SIMPLE AI LEARNING: Track user correction (deleted ad box - assume it wasn't really an ad)
+        try:
+            page = Page.query.get(page_id)
+            publication = Publication.query.get(page.publication_id)
+
+            SimpleAdLearner.save_user_correction(
+                publication_id=publication.id,
+                page_id=page_id,
+                x=ad_box.x,
+                y=ad_box.y,
+                width=ad_box.width,
+                height=ad_box.height,
+                is_ad=False,  # User deleted this, so they think it's NOT an ad
+                correction_type='deleted',
+                publication_type=publication.publication_type
+            )
+        except Exception as e:
+            print(f"Warning: Could not save learning correction: {e}")
+
         # Delete training data first (avoid selecting non-existent columns)
         from sqlalchemy import text
         db.session.execute(text('DELETE FROM training_data WHERE ad_box_id = :box_id'), {'box_id': box_id})
-        
+
         # Delete the ad box
         db.session.delete(ad_box)
         db.session.commit()
@@ -9660,7 +9971,23 @@ def add_box(page_id):
         
         db.session.add(ad_box)
         db.session.flush()  # Get the ad_box.id without committing
-        
+
+        # SIMPLE AI LEARNING: Track user correction (added ad box)
+        try:
+            SimpleAdLearner.save_user_correction(
+                publication_id=publication.id,
+                page_id=page_id,
+                x=data['x'],
+                y=data['y'],
+                width=data['width'],
+                height=data['height'],
+                is_ad=True,  # User added this, so it's an ad
+                correction_type='added',
+                publication_type=publication.publication_type
+            )
+        except Exception as e:
+            print(f"Warning: Could not save learning correction: {e}")
+
         # PRIORITY 4: Collect positive training data from manually created ad
         try:
             # Collect comprehensive positive training example

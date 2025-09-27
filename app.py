@@ -688,6 +688,39 @@ class ScreenCalibration(db.Model):
     user_agent = db.Column(db.Text)
     is_active = db.Column(db.Boolean, default=True)
 
+class AdTemplate(db.Model):
+    """Store learned ad templates for automatic detection"""
+    __tablename__ = 'ad_templates'
+
+    id = db.Column(db.Integer, primary_key=True)
+    business_name = db.Column(db.String(255), nullable=False, index=True)
+    template_name = db.Column(db.String(255), nullable=False)
+
+    # Template visual features
+    template_image = db.Column(db.LargeBinary)  # Cropped ad image
+    visual_features = db.Column(db.Text)  # JSON: color histogram, edges, etc.
+    text_pattern = db.Column(db.Text)  # Key text patterns found in ad
+    logo_features = db.Column(db.Text)  # JSON: logo characteristics
+
+    # Template dimensions and layout
+    typical_width = db.Column(db.Float)
+    typical_height = db.Column(db.Float)
+    aspect_ratio = db.Column(db.Float)
+
+    # Detection parameters
+    confidence_threshold = db.Column(db.Float, default=0.75)
+    is_active = db.Column(db.Boolean, default=True)
+
+    # Metadata
+    created_from_publication_id = db.Column(db.Integer)
+    created_from_page_number = db.Column(db.Integer)
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+    last_detected = db.Column(db.DateTime)
+    detection_count = db.Column(db.Integer, default=0)
+
+    def __repr__(self):
+        return f'<AdTemplate {self.business_name}: {self.template_name}>'
+
 class MLModel(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     model_name = db.Column(db.String(100), nullable=False)
@@ -11552,6 +11585,198 @@ def handle_database_errors(error):
     
     # Re-raise non-database errors
     raise error
+
+# ===== TEMPLATE LEARNING SYSTEM ENDPOINTS =====
+
+@app.route('/api/learn_template', methods=['POST'])
+@login_required
+def learn_ad_template():
+    """Learn an ad template from manual placement"""
+    try:
+        data = request.json
+        page_id = data.get('page_id')
+        x = float(data.get('x'))
+        y = float(data.get('y'))
+        width = float(data.get('width'))
+        height = float(data.get('height'))
+        business_name = data.get('business_name', '').strip()
+
+        if not business_name:
+            return jsonify({'success': False, 'error': 'Business name is required'})
+
+        # Get page and publication info
+        page = Page.query.get_or_404(page_id)
+        publication = Publication.query.get(page.publication_id)
+        pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
+
+        if not os.path.exists(pdf_path):
+            return jsonify({'success': False, 'error': 'PDF file not found'})
+
+        # Import template extraction
+        from template_learning_system import TemplateExtractor
+
+        # Extract template features
+        template_data = TemplateExtractor.extract_template_from_region(
+            pdf_path, page.page_number, x, y, width, height, business_name
+        )
+
+        if not template_data:
+            return jsonify({'success': False, 'error': 'Failed to extract template features'})
+
+        # Check if template already exists for this business
+        existing_template = AdTemplate.query.filter_by(
+            business_name=business_name
+        ).first()
+
+        if existing_template:
+            # Update existing template
+            existing_template.template_image = template_data['template_image']
+            existing_template.visual_features = template_data['visual_features']
+            existing_template.text_pattern = template_data['text_pattern']
+            existing_template.logo_features = template_data['logo_features']
+            existing_template.typical_width = template_data['typical_width']
+            existing_template.typical_height = template_data['typical_height']
+            existing_template.aspect_ratio = template_data['aspect_ratio']
+            existing_template.last_detected = datetime.utcnow()
+            message = f"Updated existing template for {business_name}"
+        else:
+            # Create new template
+            new_template = AdTemplate(
+                business_name=template_data['business_name'],
+                template_name=template_data['template_name'],
+                template_image=template_data['template_image'],
+                visual_features=template_data['visual_features'],
+                text_pattern=template_data['text_pattern'],
+                logo_features=template_data['logo_features'],
+                typical_width=template_data['typical_width'],
+                typical_height=template_data['typical_height'],
+                aspect_ratio=template_data['aspect_ratio'],
+                created_from_publication_id=publication.id,
+                created_from_page_number=page.page_number
+            )
+            db.session.add(new_template)
+            message = f"Created new template for {business_name}"
+
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': message,
+            'business_name': business_name,
+            'template_name': template_data['template_name']
+        })
+
+    except Exception as e:
+        print(f"Error learning template: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/auto_detect_templates/<int:page_id>', methods=['POST'])
+@login_required
+def auto_detect_templates(page_id):
+    """Auto-detect ads using learned templates"""
+    try:
+        # Get page and publication info
+        page = Page.query.get_or_404(page_id)
+        publication = Publication.query.get(page.publication_id)
+        pdf_path = os.path.join('static', 'uploads', 'pdfs', publication.filename)
+
+        if not os.path.exists(pdf_path):
+            return jsonify({'success': False, 'error': 'PDF file not found'})
+
+        # Get all active templates
+        templates = AdTemplate.query.filter_by(is_active=True).all()
+
+        if not templates:
+            return jsonify({
+                'success': True,
+                'detections': 0,
+                'matches': [],
+                'message': 'No templates available for detection'
+            })
+
+        # Import template matcher
+        from template_learning_system import TemplateMatcher
+
+        # Find matches
+        matches = TemplateMatcher.find_template_matches(
+            pdf_path, page.page_number, templates, confidence_threshold=0.75
+        )
+
+        # Create AdBox entries for matches
+        detections_created = 0
+        for match in matches:
+            # Check if this location already has an ad
+            existing_ad = AdBox.query.filter(
+                AdBox.page_id == page_id,
+                AdBox.x.between(match['x'] - 10, match['x'] + 10),
+                AdBox.y.between(match['y'] - 10, match['y'] + 10)
+            ).first()
+
+            if not existing_ad:
+                # Create new ad box
+                new_ad = AdBox(
+                    page_id=page_id,
+                    x=match['x'],
+                    y=match['y'],
+                    width=match['width'],
+                    height=match['height'],
+                    ad_type='template_detected',
+                    detected_automatically=True,
+                    confidence_score=match['confidence']
+                )
+                db.session.add(new_ad)
+                detections_created += 1
+
+                # Update template detection count
+                template = AdTemplate.query.get(match['template_id'])
+                if template:
+                    template.detection_count += 1
+                    template.last_detected = datetime.utcnow()
+
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'detections': detections_created,
+            'matches': matches,
+            'message': f'Template detection complete: {detections_created} ads detected'
+        })
+
+    except Exception as e:
+        print(f"Error in template detection: {e}")
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/templates')
+@login_required
+def get_templates():
+    """Get all learned templates"""
+    try:
+        templates = AdTemplate.query.filter_by(is_active=True).order_by(AdTemplate.business_name).all()
+
+        template_list = []
+        for template in templates:
+            template_list.append({
+                'id': template.id,
+                'business_name': template.business_name,
+                'template_name': template.template_name,
+                'created_date': template.created_date.isoformat() if template.created_date else None,
+                'detection_count': template.detection_count,
+                'last_detected': template.last_detected.isoformat() if template.last_detected else None,
+                'typical_width': template.typical_width,
+                'typical_height': template.typical_height
+            })
+
+        return jsonify({
+            'success': True,
+            'templates': template_list,
+            'total_templates': len(template_list)
+        })
+
+    except Exception as e:
+        print(f"Error getting templates: {e}")
+        return jsonify({'success': False, 'error': str(e)})
 
 if __name__ == '__main__':
     print("Starting Newspaper Ad Measurement System...")

@@ -9385,26 +9385,45 @@ def process_publication(pub_id):
             db.session.add(page_record)
             db.session.flush()  # Get the page ID
             
-            # AI Box Detection - Use ML predictions if model is available, fallback to CV detection
+            # CONTENT-BASED AD DETECTION - Use business information analysis
             detected_boxes = []
-            ml_predictions = AdLearningEngine.predict_ads(image_path, publication.publication_type, confidence_threshold=0.4)
-            
-            if ml_predictions['success'] and ml_predictions['predictions']:
-                # Use ML predictions
-                for pred in ml_predictions['predictions']:
+
+            # Use new content-based detection that actually works
+            content_ads = ContentBasedAdDetector.detect_business_content_ads(file_path, page_num + 1)
+
+            if content_ads:
+                # Convert content-based ads to standard format
+                for ad in content_ads:
                     detected_boxes.append({
-                        'x': pred['x'],
-                        'y': pred['y'],
-                        'width': pred['width'],
-                        'height': pred['height'],
-                        'confidence': pred['confidence'],
-                        'predicted_type': pred['predicted_type']
+                        'x': ad['x'],
+                        'y': ad['y'],
+                        'width': ad['width'],
+                        'height': ad['height'],
+                        'confidence': ad['confidence'],
+                        'predicted_type': 'business_content'
                     })
-                print(f"Used ML model for page {page_num + 1}: {len(detected_boxes)} ads predicted")
+                print(f"Used content-based detection for page {page_num + 1}: {len(detected_boxes)} business ads found")
             else:
-                # Fallback to traditional CV detection
-                detected_boxes = AdBoxDetector.detect_boxes(image_path)
-                print(f"Used CV detection for page {page_num + 1}: {len(detected_boxes)} ads detected")
+                # Fallback to old broken detection only if content detection completely fails
+                try:
+                    ml_predictions = AdLearningEngine.predict_ads(image_path, publication.publication_type, confidence_threshold=0.4)
+                    if ml_predictions['success'] and ml_predictions['predictions']:
+                        for pred in ml_predictions['predictions']:
+                            detected_boxes.append({
+                                'x': pred['x'],
+                                'y': pred['y'],
+                                'width': pred['width'],
+                                'height': pred['height'],
+                                'confidence': pred['confidence'],
+                                'predicted_type': pred['predicted_type']
+                            })
+                        print(f"Fallback ML detection for page {page_num + 1}: {len(detected_boxes)} ads")
+                    else:
+                        detected_boxes = AdBoxDetector.detect_boxes(image_path)
+                        print(f"Fallback CV detection for page {page_num + 1}: {len(detected_boxes)} ads")
+                except Exception as e:
+                    print(f"All detection methods failed for page {page_num + 1}: {e}")
+                    detected_boxes = []
 
             # Apply AI learning filter to improve detection quality
             try:

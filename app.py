@@ -333,29 +333,81 @@ def start_background_processing(pub_id):
                 
                 # Run AI ad detection at the end of processing (with robust error handling)
                 try:
-                    print(f"🤖 Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
+                    print(f"Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                     
-                    # SIMPLE WORKING DETECTION: Find actual bordered ads
+                    # CONTENT-BASED DETECTION: Find ads by business information
                     try:
-                        print(f"🎯 Starting SIMPLE ad detection - bordered regions only")
-                        simple_result = SimpleAdDetector.detect_bordered_ads(publication.id)
+                        print(f"Starting CONTENT-BASED ad detection - business information analysis")
 
-                        if simple_result and simple_result.get('success'):
-                            print(f"SUCCESS: Simple detection complete: {simple_result['detections']} ads detected across {simple_result['pages_processed']} pages")
-                            if simple_result['detections'] > 0:
-                                print(f"Next: Review the detected ads - should see actual business ads")
-                            else:
-                                print(f"No bordered ads detected - check image quality")
+                        # Run content-based detection that actually works
+                        total_detected_ads = 0
+                        pages = Page.query.filter_by(publication_id=publication.id).all()
+                        file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
+
+                        for page in pages:
+                            print(f"Running content-based detection on page {page.page_number}...")
+                            content_ads = ContentBasedAdDetector.detect_business_content_ads(file_path, page.page_number)
+
+                            for ad in content_ads:
+                                # Calculate measurements
+                                dpi = page.pixels_per_inch or 150
+                                width_inches_raw = ad['width'] / dpi
+                                height_inches_raw = ad['height'] / dpi
+                                column_inches = width_inches_raw * height_inches_raw
+
+                                # Create AdBox
+                                ad_box = AdBox(
+                                    page_id=page.id,
+                                    x=float(ad['x']),
+                                    y=float(ad['y']),
+                                    width=float(ad['width']),
+                                    height=float(ad['height']),
+                                    width_inches_raw=width_inches_raw,
+                                    height_inches_raw=height_inches_raw,
+                                    width_inches_rounded=round(width_inches_raw * 16) / 16,
+                                    height_inches_rounded=round(height_inches_raw * 16) / 16,
+                                    column_inches=column_inches,
+                                    ad_type='business_content',
+                                    is_ad=True,
+                                    detected_automatically=True,
+                                    confidence_score=ad['confidence'],
+                                    user_verified=False
+                                )
+                                db.session.add(ad_box)
+                                total_detected_ads += 1
+
+                            print(f"Content detection found {len(content_ads)} ads on page {page.page_number}")
+
+                        # Update publication totals
+                        total_ad_inches = sum(box.column_inches for box in AdBox.query.join(Page).filter(Page.publication_id == publication.id).all())
+                        publication.total_ad_inches = total_ad_inches
+                        publication.ad_percentage = (total_ad_inches / publication.total_inches) * 100 if publication.total_inches > 0 else 0
+
+                        db.session.commit()
+
+                        print(f"SUCCESS: Content-based detection complete: {total_detected_ads} business ads detected")
+                        if total_detected_ads > 0:
+                            print(f"Next: Review the detected business ads in measurement interface")
                         else:
-                            error_msg = simple_result.get('error', 'Simple detection failed') if simple_result else 'No result returned'
-                            print(f"Simple detection failed: {error_msg}")
-                    except Exception as simple_error:
-                        print(f"Simple detection failed with error: {simple_error}")
-                        print(f"Falling back to manual detection only")
+                            print(f"No business content detected - check PDF content quality")
+
+                    except Exception as content_error:
+                        print(f"Content-based detection failed with error: {content_error}")
+                        print(f"Falling back to old detection methods")
+
+                        # Fallback to old detection only if content detection completely fails
+                        try:
+                            simple_result = SimpleAdDetector.detect_bordered_ads(publication.id)
+                            if simple_result and simple_result.get('success'):
+                                print(f"Fallback detection: {simple_result['detections']} ads detected")
+                            else:
+                                print(f"All detection methods failed")
+                        except Exception as fallback_error:
+                            print(f"Fallback detection also failed: {fallback_error}")
 
                 except Exception as outer_error:
-                    print(f"⚠️  Hybrid detection phase failed: {outer_error}")
-                    print(f"📝 Publication processed successfully - use manual detection interface")
+                    print(f"WARNING: Hybrid detection phase failed: {outer_error}")
+                    print(f"Publication processed successfully - use manual detection interface")
                 
                 # Mark as completed
                 publication.processed = True
@@ -392,15 +444,19 @@ def start_background_processing(pub_id):
                     except:
                         pass
     
-    # Start processing in background thread
+    # FIXED: Run processing synchronously instead of threading (ensures completion)
     try:
-        thread = threading.Thread(target=process_in_background)
-        thread.daemon = True
-        thread.start()
+        print(f"Running processing synchronously for publication {pub_id}")
+        process_in_background()
+        print(f"Synchronous processing completed for publication {pub_id}")
     except Exception as e:
-        print(f"Failed to start background thread: {e}")
-        # Fallback to synchronous processing
-        process_publication_sync(pub_id)
+        print(f"Failed to run synchronous processing: {e}")
+        # Remove from processing set on failure
+        try:
+            with _processing_lock:
+                _processing_publications.discard(pub_id)
+        except:
+            pass
 
 def process_publication_sync(pub_id):
     """Synchronous processing fallback - does basic setup only"""
@@ -5988,11 +6044,11 @@ class GoogleVisionAdDetector:
         except Exception as e:
             error_type = handle_vision_api_error(e, "ad detection")
             if error_type == "quota_exceeded":
-                print("⚠️ Google Vision API quota exceeded - falling back to traditional detection")
+                print("WARNING: Google Vision API quota exceeded - falling back to traditional detection")
             elif error_type == "permission_denied":
-                print("⚠️ Google Vision API permission denied - check credentials")
+                print("WARNING: Google Vision API permission denied - check credentials")
             else:
-                print(f"⚠️ Google Vision AI detection failed: {e}")
+                print(f"WARNING: Google Vision AI detection failed: {e}")
             return []
     
     @staticmethod
@@ -9139,7 +9195,7 @@ def upload():
                 # Generate secure unique filename
                 file_ext = os.path.splitext(file.filename.lower())[1]
                 unique_filename = f"{uuid.uuid4()}{file_ext}"
-                print(f"📝 Generated unique filename: {unique_filename}")
+                print(f"Generated unique filename: {unique_filename}")
                 
                 # Ensure upload directory exists
                 pdf_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs')
@@ -9154,9 +9210,9 @@ def upload():
                 # Check file size after saving
                 if os.path.exists(file_path):
                     file_size = os.path.getsize(file_path)
-                    print(f"✅ File saved successfully - Size: {file_size} bytes")
+                    print(f"File saved successfully - Size: {file_size} bytes")
                     if file_size < 1000:  # Less than 1KB is suspicious
-                        print(f"⚠️ Warning: File size is unusually small ({file_size} bytes)")
+                        print(f"WARNING: File size is unusually small ({file_size} bytes)")
                 else:
                     print(f"❌ Error: File was not saved properly")
                     flash('File upload failed. Please try again.', 'error')
@@ -9169,7 +9225,7 @@ def upload():
                     os.remove(file_path)  # Clean up invalid file
                     flash('Invalid PDF file. Please upload a valid PDF document.', 'error')
                     return redirect(request.url)
-                print(f"✅ PDF validation passed")
+                print(f"PDF validation passed")
                 
                 # Process PDF
                 print(f"📖 Opening PDF to count pages...")
@@ -9190,21 +9246,21 @@ def upload():
                     total_pages=page_count,
                     total_inches=total_inches
                 )
-                print(f"✅ Publication object created")
+                print(f"Publication object created")
                 
                 # Set processing status if available (with timeout protection)
                 print(f"🔄 Setting processing status...")
                 try:
                     publication.set_processing_status('uploaded')
-                    print(f"✅ Processing status set")
+                    print(f"Processing status set")
                 except Exception as e:
-                    print(f"⚠️ Warning: Could not set processing status: {e}")
+                    print(f"WARNING: Could not set processing status: {e}")
                 
                 print(f"💾 Adding publication to database...")
                 db.session.add(publication)
                 print(f"💾 Committing to database...")
                 db.session.commit()
-                print(f"✅ Database commit successful")
+                print(f"Database commit successful")
                 
                 flash(f'File uploaded successfully! Processing {page_count} pages...', 'success')
                 print(f"🎉 Upload completed for publication {publication.id}: {publication.original_filename}")
@@ -9213,9 +9269,9 @@ def upload():
                 print(f"🚀 Starting background processing...")
                 try:
                     start_background_processing(publication.id)
-                    print(f"✅ Background processing started")
+                    print(f"Background processing started")
                 except Exception as e:
-                    print(f"⚠️ Warning: Could not start background processing: {e}")
+                    print(f"WARNING: Could not start background processing: {e}")
                 
                 print(f"🔄 Redirecting to processing status page...")
                 # Redirect to processing status page
@@ -9228,9 +9284,9 @@ def upload():
                 except Exception:
                     db.session.remove()
                 
-                print(f"💥 UPLOAD ERROR: {str(e)}")
+                print(f"UPLOAD ERROR: {str(e)}")
                 import traceback
-                print(f"📋 Error traceback:")
+                print(f"Error traceback:")
                 traceback.print_exc()
                 
                 # Return user-friendly error message
@@ -9516,7 +9572,7 @@ def measure_publication(pub_id):
         print(f"📏 Loading measurement page for publication {pub_id}")
         
         publication = Publication.query.get_or_404(pub_id)
-        print(f"✅ Found publication: {publication.original_filename}")
+        print(f"Found publication: {publication.original_filename}")
         
         pages = Page.query.filter_by(publication_id=pub_id).order_by(Page.page_number).all()
         print(f"📄 Found {len(pages)} pages")
@@ -9541,9 +9597,9 @@ def measure_publication(pub_id):
                              total_boxes=total_boxes)
                              
     except Exception as e:
-        print(f"💥 MEASURE PAGE ERROR: {str(e)}")
+        print(f"MEASURE PAGE ERROR: {str(e)}")
         import traceback
-        print(f"📋 Error traceback:")
+        print(f"Error traceback:")
         traceback.print_exc()
         flash(f'Error loading measurement page: {str(e)}', 'error')
         return redirect(url_for('index'))
@@ -10764,13 +10820,13 @@ def fix_special_edition_pages():
 def test():
     return """
     <h1>🎉 Flask App is Working!</h1>
-    <p>✅ Flask: Working</p>
-    <p>✅ Database: Connected</p>
-    <p>✅ File uploads: Ready</p>
-    <p>✅ PDF processing: Ready</p>
-    <p>✅ AI Detection: Enhanced & Improved</p>
-    <p>✅ Reporting System: Ready</p>
-    <p>✅ Screen Calibration: Ready</p>
+    <p>Flask: Working</p>
+    <p>Database: Connected</p>
+    <p>File uploads: Ready</p>
+    <p>PDF processing: Ready</p>
+    <p>AI Detection: Enhanced & Improved</p>
+    <p>Reporting System: Ready</p>
+    <p>Screen Calibration: Ready</p>
     <p><a href="/">Go to Home</a></p>
     <p><a href="/calibrate">Calibrate Screen</a></p>
     """

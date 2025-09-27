@@ -337,63 +337,69 @@ def start_background_processing(pub_id):
                     
                     # CONTENT-BASED DETECTION: Find ads by business information
                     try:
-                        print(f"Starting CONTENT-BASED ad detection - business information analysis")
+                        print(f"Starting TEMPLATE-BASED ad detection - learned business templates")
 
-                        # Run content-based detection that actually works
+                        # Run template-based detection using learned templates
                         total_detected_ads = 0
                         pages = Page.query.filter_by(publication_id=publication.id).all()
                         file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
 
-                        # Import newspaper domain detector
-                        from newspaper_domain_detector import NewspaperDomainDetector
-                        detector = NewspaperDomainDetector()
+                        # Import template learning system
+                        from template_learning_system import TemplateMatcher
 
-                        for page in pages:
-                            print(f"Running newspaper domain detection on page {page.page_number}...")
+                        # Get all active templates
+                        active_templates = AdTemplate.query.filter_by(is_active=True).all()
 
-                            # Use newspaper domain detector
-                            detected_ads = detector.detect_business_ads(file_path, page.page_number)
+                        if not active_templates:
+                            print(f"No learned templates found - skipping template detection")
+                            print(f"Use manual ad placement to learn templates for automatic detection")
+                        else:
+                            print(f"Found {len(active_templates)} learned templates to search for")
 
-                            # Convert to expected format and process each ad
-                            for ad in detected_ads:
-                                content_ad = {
-                                    'x': ad.x,
-                                    'y': ad.y,
-                                    'width': ad.width,
-                                    'height': ad.height,
-                                    'confidence': ad.confidence / 100.0,  # Convert to 0-1 scale
-                                    'ad_type': ad.ad_type,
-                                    'text': ad.text_snippet,
-                                    'indicators': ad.business_indicators
-                                }
-                                # Calculate measurements
-                                dpi = page.pixels_per_inch or 150
-                                width_inches_raw = content_ad['width'] / dpi
-                                height_inches_raw = content_ad['height'] / dpi
-                                column_inches = width_inches_raw * height_inches_raw
+                            for page in pages:
+                                print(f"Running template detection on page {page.page_number}...")
 
-                                # Create AdBox
-                                ad_box = AdBox(
-                                    page_id=page.id,
-                                    x=float(content_ad['x']),
-                                    y=float(content_ad['y']),
-                                    width=float(content_ad['width']),
-                                    height=float(content_ad['height']),
-                                    width_inches_raw=width_inches_raw,
-                                    height_inches_raw=height_inches_raw,
-                                    width_inches_rounded=round(width_inches_raw * 16) / 16,
-                                    height_inches_rounded=round(height_inches_raw * 16) / 16,
-                                    column_inches=column_inches,
-                                    ad_type=content_ad['ad_type'],
-                                    is_ad=True,
-                                    detected_automatically=True,
-                                    confidence_score=content_ad['confidence'],
-                                    user_verified=False
+                                # Use template matcher to find learned business ads
+                                detected_matches = TemplateMatcher.find_template_matches(
+                                    file_path, page.page_number, active_templates, confidence_threshold=0.75
                                 )
-                                db.session.add(ad_box)
-                                total_detected_ads += 1
 
-                            print(f"Newspaper domain detection found {len(detected_ads)} ads on page {page.page_number}")
+                                # Convert to expected format and process each match
+                                for match in detected_matches:
+                                    # Calculate measurements
+                                    dpi = page.pixels_per_inch or 150
+                                    width_inches_raw = match['width'] / dpi
+                                    height_inches_raw = match['height'] / dpi
+                                    column_inches = width_inches_raw * height_inches_raw
+
+                                    # Create AdBox
+                                    ad_box = AdBox(
+                                        page_id=page.id,
+                                        x=float(match['x']),
+                                        y=float(match['y']),
+                                        width=float(match['width']),
+                                        height=float(match['height']),
+                                        width_inches_raw=width_inches_raw,
+                                        height_inches_raw=height_inches_raw,
+                                        width_inches_rounded=round(width_inches_raw * 16) / 16,
+                                        height_inches_rounded=round(height_inches_raw * 16) / 16,
+                                        column_inches=column_inches,
+                                        ad_type='template_detected',
+                                        is_ad=True,
+                                        detected_automatically=True,
+                                        confidence_score=match['confidence'],
+                                        user_verified=False
+                                    )
+                                    db.session.add(ad_box)
+                                    total_detected_ads += 1
+
+                                    # Update template detection statistics
+                                    template = AdTemplate.query.get(match['template_id'])
+                                    if template:
+                                        template.detection_count += 1
+                                        template.last_detected = datetime.utcnow()
+
+                                print(f"Template detection found {len(detected_matches)} ads on page {page.page_number}")
 
                         # Update publication totals
                         total_ad_inches = sum(box.column_inches for box in AdBox.query.join(Page).filter(Page.publication_id == publication.id).all())
@@ -402,11 +408,11 @@ def start_background_processing(pub_id):
 
                         db.session.commit()
 
-                        print(f"SUCCESS: Content-based detection complete: {total_detected_ads} business ads detected")
+                        print(f"SUCCESS: Template-based detection complete: {total_detected_ads} business ads detected")
                         if total_detected_ads > 0:
                             print(f"Next: Review the detected business ads in measurement interface")
                         else:
-                            print(f"No business content detected - check PDF content quality")
+                            print(f"No learned templates detected - use manual placement to train templates")
 
                     except Exception as content_error:
                         print(f"Content-based detection failed with error: {content_error}")
@@ -3516,9 +3522,9 @@ class HybridDetectionPipeline:
             print(f"Error processing manual click: {e}")
             return {'success': False, 'error': str(e)}
 
-    def get_detection_suggestions(self, page_id, threshold=0.6):
+    def get_detection_suggestions(self, page_id, threshold=0.75):
         """
-        Get automated suggestions for manual detection on a page using NewspaperDomainDetector
+        Get automated suggestions for manual detection on a page using template learning
 
         Args:
             page_id: Database page ID
@@ -3547,38 +3553,47 @@ class HybridDetectionPipeline:
             if not os.path.exists(pdf_path):
                 return {'success': False, 'error': 'PDF file not found'}
 
-            # Use NewspaperDomainDetector to find business ads
-            from newspaper_domain_detector import NewspaperDomainDetector
-            detector = NewspaperDomainDetector()
-            business_ads = detector.detect_business_ads(pdf_path, page.page_number)
+            # Use template learning system to find business ads
+            from template_learning_system import TemplateMatcher
+
+            # Get all active templates
+            active_templates = AdTemplate.query.filter_by(is_active=True).all()
+
+            if not active_templates:
+                return {'success': True, 'suggestions': [], 'message': 'No learned templates available'}
+
+            # Find template matches
+            template_matches = TemplateMatcher.find_template_matches(
+                pdf_path, page.page_number, active_templates, confidence_threshold=threshold
+            )
 
             suggestions = []
 
-            for ad in business_ads:
+            for match in template_matches:
                 # Check if this overlaps with existing ads
                 is_duplicate = False
-                ad_region = {
-                    'x': ad.x, 'y': ad.y, 'width': ad.width, 'height': ad.height
+                match_region = {
+                    'x': match['x'], 'y': match['y'], 'width': match['width'], 'height': match['height']
                 }
 
                 for existing in existing_regions:
-                    overlap = self._calculate_region_overlap(ad_region, existing)
+                    overlap = self._calculate_region_overlap(match_region, existing)
                     if overlap > 0.3:  # 30% overlap threshold
                         is_duplicate = True
                         break
 
                 # Only suggest if confidence is above threshold and not duplicate
-                if not is_duplicate and ad.confidence >= (threshold * 100):
+                if not is_duplicate and match['confidence'] >= threshold:
                     suggestions.append({
-                        'business_name': f"Business Ad ({ad.ad_type})",
-                        'confidence': ad.confidence / 100.0,  # Convert to 0-1 range
-                        'x': ad.x,
-                        'y': ad.y,
-                        'width': ad.width,
-                        'height': ad.height,
-                        'suggestion_type': 'newspaper_domain',
-                        'business_indicators': ', '.join(ad.business_indicators),
-                        'text_snippet': ad.text_snippet[:50] + "..." if len(ad.text_snippet) > 50 else ad.text_snippet
+                        'business_name': match['business_name'],
+                        'confidence': match['confidence'],
+                        'x': match['x'],
+                        'y': match['y'],
+                        'width': match['width'],
+                        'height': match['height'],
+                        'suggestion_type': 'template_match',
+                        'template_name': match['template_name'],
+                        'template_id': match['template_id']
                     })
 
             # Sort by confidence
@@ -9244,26 +9259,34 @@ def process_publication(pub_id):
             db.session.add(page_record)
             db.session.flush()  # Get the page ID
             
-            # NEWSPAPER DOMAIN DETECTION - Use business information analysis
+            # TEMPLATE LEARNING DETECTION - Use learned business templates
             detected_boxes = []
 
-            # Import and use newspaper domain detector
-            from newspaper_domain_detector import NewspaperDomainDetector
-            detector = NewspaperDomainDetector()
-            content_ads = detector.detect_business_ads(file_path, page_num + 1)
+            # Import and use template learning system
+            from template_learning_system import TemplateMatcher
 
-            if content_ads:
-                # Convert newspaper domain ads to standard format
-                for ad in content_ads:
+            # Get all active templates
+            active_templates = AdTemplate.query.filter_by(is_active=True).all()
+
+            if active_templates:
+                # Use template matching to find learned business ads
+                template_matches = TemplateMatcher.find_template_matches(
+                    file_path, page_num + 1, active_templates, confidence_threshold=0.75
+                )
+
+                # Convert template matches to standard format
+                for match in template_matches:
                     detected_boxes.append({
-                        'x': ad.x,
-                        'y': ad.y,
-                        'width': ad.width,
-                        'height': ad.height,
-                        'confidence': ad.confidence / 100.0,  # Convert to 0-1 range
-                        'predicted_type': ad.ad_type
+                        'x': match['x'],
+                        'y': match['y'],
+                        'width': match['width'],
+                        'height': match['height'],
+                        'confidence': match['confidence'],
+                        'predicted_type': 'template_detected',
+                        'business_name': match['business_name'],
+                        'template_id': match['template_id']
                     })
-                print(f"Used newspaper domain detection for page {page_num + 1}: {len(detected_boxes)} business ads found")
+                print(f"Used template learning detection for page {page_num + 1}: {len(detected_boxes)} business ads found")
             else:
                 # Fallback to old broken detection only if content detection completely fails
                 try:

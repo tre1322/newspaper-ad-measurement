@@ -2556,15 +2556,18 @@ function createNewBox(x, y, width, height) {
             // Create the visual box element
             const boxElement = createBoxElement(data.box_id, boxData.x, boxData.y, boxData.width, boxData.height);
             document.getElementById('pageContainer').appendChild(boxElement);
-            
+
             // Add to measurements list
             addBoxToMeasurementsList(data);
-            
+
             // Update page total
             updatePageTotalRegular();
-            
+
             // Make it immediately interactive
             initializeBoxInteraction(boxElement);
+
+            // Check for template learning opportunity
+            checkForTemplatePrompt(data);
         } else {
             alert('Error creating box: ' + data.error);
         }
@@ -2572,6 +2575,43 @@ function createNewBox(x, y, width, height) {
     .catch(error => {
         console.error('Error creating box:', error);
         alert('Error creating box. Please try again.');
+    });
+}
+
+function checkForTemplatePrompt(response) {
+    if (response.success) {
+        // Wait a moment for the ad box to be drawn
+        setTimeout(() => {
+            const businessName = prompt("Save this ad as a template for automatic detection?\n\nEnter business name (or Cancel to skip):");
+
+            if (businessName && businessName.trim()) {
+                saveAdTemplate(response.box_id, businessName.trim());
+            }
+        }, 500);
+    }
+}
+
+function saveAdTemplate(boxId, businessName) {
+    fetch(`/api/save_template/${boxId}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+            business_name: businessName
+        })
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            showMessage(data.message, 'success');
+        } else {
+            showMessage('Template save failed: ' + data.error, 'error');
+        }
+    })
+    .catch(error => {
+        console.error('Template save error:', error);
+        showMessage('Error saving template', 'error');
     });
 }
 

@@ -675,6 +675,17 @@ class AdBox(db.Model):
     confidence_score = db.Column(db.Float)  # AI detection confidence
     created_date = db.Column(db.DateTime, default=datetime.utcnow)
 
+class AdTemplate(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    business_name = db.Column(db.String(255), nullable=False)
+    template_image_path = db.Column(db.String(500), nullable=False)
+    width = db.Column(db.Integer, nullable=False)
+    height = db.Column(db.Integer, nullable=False)
+    confidence_threshold = db.Column(db.Float, default=0.8)
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+    detection_count = db.Column(db.Integer, default=0)
+    is_active = db.Column(db.Boolean, default=True)
+
 class ScreenCalibration(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     device_fingerprint = db.Column(db.String(255), nullable=False)
@@ -10120,7 +10131,22 @@ def add_box(page_id):
         
         # Recalculate totals
         update_totals(page_id)
-        
+
+        # Add template learning opportunity
+        try:
+            # Get the page image path to check if template extraction is possible
+            page = Page.query.get(page_id)
+            publication = Publication.query.get(page.publication_id)
+            image_filename = f"{publication.filename}_page_{page.page_number}.png"
+            image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+
+            template_possible = os.path.exists(image_path)
+
+        except Exception as e:
+            # Don't break ad creation if template check fails
+            print(f"Template check error: {e}")
+            template_possible = False
+
         return jsonify({
             'success': True,
             'box_id': ad_box.id,
@@ -11051,6 +11077,72 @@ def activate_ml_model(model_id):
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)})
 
+@app.route('/api/save_template/<int:ad_box_id>', methods=['POST'])
+@login_required
+def save_ad_template(ad_box_id):
+    """Save ad as template for future detection"""
+    try:
+        data = request.json
+        business_name = data.get('business_name', '').strip()
+
+        if not business_name:
+            return jsonify({'success': False, 'error': 'Business name required'})
+
+        # Get the ad box
+        ad_box = AdBox.query.get(ad_box_id)
+        if not ad_box:
+            return jsonify({'success': False, 'error': 'Ad box not found'})
+
+        # Get page info
+        page = Page.query.get(ad_box.page_id)
+        publication = Publication.query.get(page.publication_id)
+
+        # Load page image
+        image_filename = f"{publication.filename}_page_{page.page_number}.png"
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+
+        if not os.path.exists(image_path):
+            return jsonify({'success': False, 'error': 'Page image not found'})
+
+        # Load and crop the ad region
+        page_img = cv2.imread(image_path)
+        if page_img is None:
+            return jsonify({'success': False, 'error': 'Could not load page image'})
+
+        # Extract ad region
+        x, y, w, h = int(ad_box.x), int(ad_box.y), int(ad_box.width), int(ad_box.height)
+        ad_region = page_img[y:y+h, x:x+w]
+
+        # Save template image
+        safe_name = "".join(c for c in business_name if c.isalnum() or c in (' ', '-', '_')).strip()
+        safe_name = safe_name.replace(' ', '_')
+        template_filename = f"{safe_name}_{ad_box_id}.png"
+        template_path = os.path.join(TEMPLATE_DIR, template_filename)
+
+        cv2.imwrite(template_path, ad_region)
+
+        # Save template record
+        template = AdTemplate(
+            business_name=business_name,
+            template_image_path=template_path,
+            width=w,
+            height=h
+        )
+
+        db.session.add(template)
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'message': f'Template saved for {business_name}! Future uploads will auto-detect this ad.',
+            'template_id': template.id
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error saving template: {e}")
+        return jsonify({'success': False, 'error': str(e)})
+
 @app.route('/ml')
 @login_required
 def ml_dashboard():
@@ -11082,6 +11174,43 @@ def ml_dashboard():
     except Exception as e:
         flash(f'Error loading ML dashboard: {str(e)}', 'error')
         return redirect(url_for('index'))
+
+@app.route('/templates')
+@login_required
+def list_templates():
+    """List all saved templates for verification"""
+    try:
+        templates = AdTemplate.query.filter_by(is_active=True).order_by(AdTemplate.created_date.desc()).all()
+
+        template_html = '''
+        <h1>Saved Ad Templates</h1>
+        <style>
+            .template-card { border: 1px solid #ccc; margin: 10px; padding: 15px; border-radius: 5px; }
+            .template-name { color: #2196F3; font-weight: bold; }
+            .template-info { color: #666; margin: 5px 0; }
+        </style>
+        '''
+
+        if templates:
+            for template in templates:
+                template_html += f'''
+                <div class="template-card">
+                    <div class="template-name">{template.business_name}</div>
+                    <div class="template-info">Size: {template.width}x{template.height} pixels</div>
+                    <div class="template-info">Created: {template.created_date.strftime('%Y-%m-%d %H:%M')}</div>
+                    <div class="template-info">Auto-detections: {template.detection_count}</div>
+                    <div class="template-info">Confidence threshold: {template.confidence_threshold}</div>
+                </div>
+                '''
+        else:
+            template_html += '<p>No templates saved yet. Create a manual ad and save it as a template.</p>'
+
+        template_html += '<br><a href="/" style="color: #2196F3;">← Back to Home</a>'
+
+        return template_html
+
+    except Exception as e:
+        return f'<h1>Error loading templates</h1><p>{str(e)}</p><a href="/">Back to Home</a>'
 
 
 # Create database tables and ensure schema is up to date

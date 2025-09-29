@@ -18,9 +18,9 @@
                 <a href="{{ url_for('upload') }}" class="btn btn-primary btn-lg action-btn">
                     <i class="fas fa-upload me-2"></i>Upload Publication
                 </a>
-                <a href="#" class="btn btn-secondary btn-lg action-btn">
-                    <i class="fas fa-brain me-2"></i>AI Learning
-                </a>
+                <button onclick="cleanupOldPublications()" class="btn btn-warning btn-lg action-btn">
+                    <i class="fas fa-trash me-2"></i>Delete Old Publications
+                </button>
             </div>
         </div>
     </div>
@@ -39,36 +39,38 @@
                 <div class="row">
                     {% for pub in publications %}
                     <div class="col-md-6 col-lg-4 col-xl-3 mb-4">
-                        <div class="card publication-card h-100">
-                            <div class="card-body">
-                                <h5 class="card-title">
-                                    <i class="fas fa-file-pdf text-primary me-2"></i>
-                                    {{ pub.original_filename }}
-                                </h5>
-                                <h6 class="card-subtitle mb-3 text-muted">
-                                    {{ pub.publication_type|title }} - {{ pub.total_pages }} pages
-                                </h6>
-                                <p class="card-text">
-                                    <small class="text-muted">
-                                        <i class="fas fa-clock me-1"></i> 
-                                        {{ pub.upload_date.strftime('%Y-%m-%d %H:%M') }}
-                                    </small>
-                                </p>
-                                {% if pub.processed %}
-                                    <div class="status-section">
-                                        <span class="badge badge-success mb-2">Processed</span>
-                                        <div class="ad-percentage">
-                                            <strong class="percentage-text">{{ "%.1f"|format(pub.ad_percentage) }}%</strong>
-                                            <span class="percentage-label">advertising</span>
+                        <a href="{{ url_for('measure_publication', pub_id=pub.id) }}" class="publication-card-link">
+                            <div class="card publication-card h-100">
+                                <div class="card-body">
+                                    <h5 class="card-title">
+                                        <i class="fas fa-file-pdf text-primary me-2"></i>
+                                        {{ pub.original_filename }}
+                                    </h5>
+                                    <h6 class="card-subtitle mb-3 text-muted">
+                                        {{ pub.publication_type|title }} - {{ pub.total_pages }} pages
+                                    </h6>
+                                    <p class="card-text">
+                                        <small class="text-muted">
+                                            <i class="fas fa-clock me-1"></i>
+                                            {{ pub.upload_date.strftime('%Y-%m-%d %H:%M') }}
+                                        </small>
+                                    </p>
+                                    {% if pub.processed %}
+                                        <div class="status-section">
+                                            <span class="badge badge-success mb-2">Processed</span>
+                                            <div class="ad-percentage">
+                                                <strong class="percentage-text">{{ "%.1f"|format(pub.ad_percentage) }}%</strong>
+                                                <span class="percentage-label">advertising</span>
+                                            </div>
                                         </div>
-                                    </div>
-                                {% else %}
-                                    <div class="status-section">
-                                        <span class="badge badge-warning">Pending</span>
-                                    </div>
-                                {% endif %}
+                                    {% else %}
+                                        <div class="status-section">
+                                            <span class="badge badge-warning">Pending</span>
+                                        </div>
+                                    {% endif %}
+                                </div>
                             </div>
-                        </div>
+                        </a>
                     </div>
                     {% endfor %}
                 </div>
@@ -163,6 +165,19 @@
     color: var(--white);
 }
 
+.btn-warning.action-btn {
+    background: #f59e0b;
+    border: none;
+    color: var(--white);
+}
+
+.btn-warning.action-btn:hover {
+    background: #d97706;
+    transform: translateY(-2px);
+    box-shadow: 0 8px 25px rgba(245, 158, 11, 0.3);
+    color: var(--white);
+}
+
 /* Publications Section */
 .publications-section {
     background: var(--white);
@@ -184,11 +199,24 @@
 }
 
 /* Publication Cards */
+.publication-card-link {
+    text-decoration: none;
+    color: inherit;
+    display: block;
+    transition: transform 0.2s;
+}
+
+.publication-card-link:hover {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 8px rgba(0,0,0,0.1);
+}
+
 .publication-card {
     border: 2px solid transparent;
     border-radius: 12px;
     transition: all 0.3s ease;
     box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+    cursor: pointer;
 }
 
 .publication-card:hover {
@@ -294,4 +322,23 @@
     }
 }
 </style>
+
+<script>
+function cleanupOldPublications() {
+    if (!confirm('Delete all publications older than 2 months? This cannot be undone.')) {
+        return;
+    }
+
+    fetch('/cleanup_old_publications', {method: 'POST'})
+        .then(r => r.json())
+        .then(d => {
+            if (d.success) {
+                alert(d.message);
+                location.reload();
+            } else {
+                alert('Error: ' + d.error);
+            }
+        });
+}
+</script>
 {% endblock %}

@@ -335,92 +335,92 @@ def start_background_processing(pub_id):
                 try:
                     print(f"Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
                     
-                    # CONTENT-BASED DETECTION: Find ads by business information
-                    try:
-                        print(f"Starting CONTENT-BASED ad detection - business information analysis")
+                    # CONTENT-BASED DETECTION - DISABLED
+                    # try:
+                    #     print(f"Starting CONTENT-BASED ad detection - business information analysis")
 
-                        # Run content-based detection that actually works
-                        total_detected_ads = 0
-                        pages = Page.query.filter_by(publication_id=publication.id).all()
-                        file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
+                    #     # Run content-based detection that actually works
+                    #     total_detected_ads = 0
+                    #     pages = Page.query.filter_by(publication_id=publication.id).all()
+                    #     file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
 
-                        # Import newspaper domain detector
-                        from newspaper_domain_detector import NewspaperDomainDetector
-                        detector = NewspaperDomainDetector()
+                    #     # Import newspaper domain detector
+                    #     from newspaper_domain_detector import NewspaperDomainDetector
+                    #     detector = NewspaperDomainDetector()
 
-                        for page in pages:
-                            print(f"Running newspaper domain detection on page {page.page_number}...")
+                    #     for page in pages:
+                    #         print(f"Running newspaper domain detection on page {page.page_number}...")
 
-                            # Use newspaper domain detector
-                            detected_ads = detector.detect_business_ads(file_path, page.page_number)
+                    #         # Use newspaper domain detector
+                    #         detected_ads = detector.detect_business_ads(file_path, page.page_number)
 
-                            # Convert to expected format and process each ad
-                            for ad in detected_ads:
-                                content_ad = {
-                                    'x': ad.x,
-                                    'y': ad.y,
-                                    'width': ad.width,
-                                    'height': ad.height,
-                                    'confidence': ad.confidence / 100.0,  # Convert to 0-1 scale
-                                    'ad_type': ad.ad_type,
-                                    'text': ad.text_snippet,
-                                    'indicators': ad.business_indicators
-                                }
-                                # Calculate measurements
-                                dpi = page.pixels_per_inch or 150
-                                width_inches_raw = content_ad['width'] / dpi
-                                height_inches_raw = content_ad['height'] / dpi
-                                column_inches = width_inches_raw * height_inches_raw
+                    #         # Convert to expected format and process each ad
+                    #         for ad in detected_ads:
+                    #             content_ad = {
+                    #                 'x': ad.x,
+                    #                 'y': ad.y,
+                    #                 'width': ad.width,
+                    #                 'height': ad.height,
+                    #                 'confidence': ad.confidence / 100.0,  # Convert to 0-1 scale
+                    #                 'ad_type': ad.ad_type,
+                    #                 'text': ad.text_snippet,
+                    #                 'indicators': ad.business_indicators
+                    #             }
+                    #             # Calculate measurements
+                    #             dpi = page.pixels_per_inch or 150
+                    #             width_inches_raw = content_ad['width'] / dpi
+                    #             height_inches_raw = content_ad['height'] / dpi
+                    #             column_inches = width_inches_raw * height_inches_raw
 
-                                # Create AdBox
-                                ad_box = AdBox(
-                                    page_id=page.id,
-                                    x=float(content_ad['x']),
-                                    y=float(content_ad['y']),
-                                    width=float(content_ad['width']),
-                                    height=float(content_ad['height']),
-                                    width_inches_raw=width_inches_raw,
-                                    height_inches_raw=height_inches_raw,
-                                    width_inches_rounded=round(width_inches_raw * 16) / 16,
-                                    height_inches_rounded=round(height_inches_raw * 16) / 16,
-                                    column_inches=column_inches,
-                                    ad_type=content_ad['ad_type'],
-                                    is_ad=True,
-                                    detected_automatically=True,
-                                    confidence_score=content_ad['confidence'],
-                                    user_verified=False
-                                )
-                                db.session.add(ad_box)
-                                total_detected_ads += 1
+                    #             # Create AdBox
+                    #             ad_box = AdBox(
+                    #                 page_id=page.id,
+                    #                 x=float(content_ad['x']),
+                    #                 y=float(content_ad['y']),
+                    #                 width=float(content_ad['width']),
+                    #                 height=float(content_ad['height']),
+                    #                 width_inches_raw=width_inches_raw,
+                    #                 height_inches_raw=height_inches_raw,
+                    #                 width_inches_rounded=round(width_inches_raw * 16) / 16,
+                    #                 height_inches_rounded=round(height_inches_raw * 16) / 16,
+                    #                 column_inches=column_inches,
+                    #                 ad_type=content_ad['ad_type'],
+                    #                 is_ad=True,
+                    #                 detected_automatically=True,
+                    #                 confidence_score=content_ad['confidence'],
+                    #                 user_verified=False
+                    #             )
+                    #             db.session.add(ad_box)
+                    #             total_detected_ads += 1
 
-                            print(f"Newspaper domain detection found {len(detected_ads)} ads on page {page.page_number}")
+                    #         print(f"Newspaper domain detection found {len(detected_ads)} ads on page {page.page_number}")
 
-                        # Update publication totals
-                        total_ad_inches = sum(box.column_inches for box in AdBox.query.join(Page).filter(Page.publication_id == publication.id).all())
-                        publication.total_ad_inches = total_ad_inches
-                        publication.ad_percentage = (total_ad_inches / publication.total_inches) * 100 if publication.total_inches > 0 else 0
+                    #     # Update publication totals
+                    #     total_ad_inches = sum(box.column_inches for box in AdBox.query.join(Page).filter(Page.publication_id == publication.id).all())
+                    #     publication.total_ad_inches = total_ad_inches
+                    #     publication.ad_percentage = (total_ad_inches / publication.total_inches) * 100 if publication.total_inches > 0 else 0
 
-                        db.session.commit()
+                    #     db.session.commit()
 
-                        print(f"SUCCESS: Content-based detection complete: {total_detected_ads} business ads detected")
-                        if total_detected_ads > 0:
-                            print(f"Next: Review the detected business ads in measurement interface")
-                        else:
-                            print(f"No business content detected - check PDF content quality")
+                    #     print(f"SUCCESS: Content-based detection complete: {total_detected_ads} business ads detected")
+                    #     if total_detected_ads > 0:
+                    #         print(f"Next: Review the detected business ads in measurement interface")
+                    #     else:
+                    #         print(f"No business content detected - check PDF content quality")
 
-                    except Exception as content_error:
-                        print(f"Content-based detection failed with error: {content_error}")
-                        print(f"Falling back to old detection methods")
+                    # except Exception as content_error:
+                    #     print(f"Content-based detection failed with error: {content_error}")
+                    #     print(f"Falling back to old detection methods")
 
-                        # Fallback to old detection only if content detection completely fails
-                        try:
-                            simple_result = SimpleAdDetector.detect_bordered_ads(publication.id)
-                            if simple_result and simple_result.get('success'):
-                                print(f"Fallback detection: {simple_result['detections']} ads detected")
-                            else:
-                                print(f"All detection methods failed")
-                        except Exception as fallback_error:
-                            print(f"Fallback detection also failed: {fallback_error}")
+                        # FALLBACK DETECTION - DISABLED
+                        # try:
+                        #     simple_result = SimpleAdDetector.detect_bordered_ads(publication.id)
+                        #     if simple_result and simple_result.get('success'):
+                        #         print(f"Fallback detection: {simple_result['detections']} ads detected")
+                        #     else:
+                        #         print(f"All detection methods failed")
+                        # except Exception as fallback_error:
+                        #     print(f"Fallback detection also failed: {fallback_error}")
 
                 except Exception as outer_error:
                     print(f"WARNING: Hybrid detection phase failed: {outer_error}")
@@ -9232,7 +9232,9 @@ def process_publication(pub_id):
             # Import and use newspaper domain detector
             from newspaper_domain_detector import NewspaperDomainDetector
             detector = NewspaperDomainDetector()
-            content_ads = detector.detect_business_ads(file_path, page_num + 1)
+            # AUTOMATIC DETECTION DISABLED
+            # content_ads = detector.detect_business_ads(file_path, page_num + 1)
+            content_ads = []  # Detection disabled - no automatic ads
 
             if content_ads:
                 # Convert newspaper domain ads to standard format
@@ -9249,7 +9251,8 @@ def process_publication(pub_id):
             else:
                 # Fallback to old broken detection only if content detection completely fails
                 try:
-                    ml_predictions = AdLearningEngine.predict_ads(image_path, publication.publication_type, confidence_threshold=0.4)
+                    # ml_predictions = AdLearningEngine.predict_ads(image_path, publication.publication_type, confidence_threshold=0.4)
+                    ml_predictions = {'success': False, 'predictions': []}  # ML disabled
                     if ml_predictions['success'] and ml_predictions['predictions']:
                         for pred in ml_predictions['predictions']:
                             detected_boxes.append({
@@ -9262,26 +9265,27 @@ def process_publication(pub_id):
                             })
                         print(f"Fallback ML detection for page {page_num + 1}: {len(detected_boxes)} ads")
                     else:
-                        detected_boxes = AdBoxDetector.detect_boxes(image_path)
+                        # detected_boxes = AdBoxDetector.detect_boxes(image_path)
+                        detected_boxes = []  # CV detection disabled - no automatic boxes
                         print(f"Fallback CV detection for page {page_num + 1}: {len(detected_boxes)} ads")
                 except Exception as e:
                     print(f"All detection methods failed for page {page_num + 1}: {e}")
                     detected_boxes = []
 
             # Apply AI learning filter to improve detection quality
-            try:
-                filtered_boxes = SimpleAdLearner.apply_learning_filter(
-                    detected_boxes,
-                    None,  # model will be loaded automatically
-                    page_record.width_pixels,
-                    page_record.height_pixels,
-                    confidence_threshold=0.85
-                )
-                if len(filtered_boxes) != len(detected_boxes):
-                    print(f"AI learning filter: {len(detected_boxes)} -> {len(filtered_boxes)} ads on page {page_num + 1}")
-                    detected_boxes = filtered_boxes
-            except Exception as e:
-                print(f"Learning filter error on page {page_num + 1} (using original detections): {e}")
+            # try:
+            #     filtered_boxes = SimpleAdLearner.apply_learning_filter(
+            #         detected_boxes,
+            #         None,  # model will be loaded automatically
+            #         page_record.width_pixels,
+            #         page_record.height_pixels,
+            #         confidence_threshold=0.85
+            #     )
+            #     if len(filtered_boxes) != len(detected_boxes):
+            #         print(f"AI learning filter: {len(detected_boxes)} -> {len(filtered_boxes)} ads on page {page_num + 1}")
+            #         detected_boxes = filtered_boxes
+            # except Exception as e:
+            #     print(f"Learning filter error on page {page_num + 1} (using original detections): {e}")
             
             page_total_inches = 0
             
@@ -10771,6 +10775,248 @@ def add_manual_box(page_id):
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)})
 
+@app.route('/api/save_template/<int:box_id>', methods=['POST'])
+def save_template(box_id):
+    """Save an ad box as a template for future matching"""
+    box = AdBox.query.get_or_404(box_id)
+    page = Page.query.get(box.page_id)
+    publication = Publication.query.get(page.publication_id)
+
+    data = request.json
+
+    try:
+        # Get the page image
+        image_filename = f"{publication.filename}_page_{page.page_number}.png"
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+
+        if not os.path.exists(image_path):
+            return jsonify({'success': False, 'error': 'Page image not found'})
+
+        # Extract the ad region as template
+        img = cv2.imread(image_path)
+        x, y, w, h = int(box.x), int(box.y), int(box.width), int(box.height)
+
+        # Ensure coordinates are within bounds
+        x = max(0, min(x, img.shape[1] - 1))
+        y = max(0, min(y, img.shape[0] - 1))
+        w = min(w, img.shape[1] - x)
+        h = min(h, img.shape[0] - y)
+
+        template_img = img[y:y+h, x:x+w]
+
+        # Save template to disk
+        template_id = str(uuid.uuid4())
+        template_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'templates')
+        os.makedirs(template_dir, exist_ok=True)
+
+        template_path = os.path.join(template_dir, f"{template_id}.png")
+        cv2.imwrite(template_path, template_img)
+
+        # Store template metadata with error handling
+        metadata_path = os.path.join(template_dir, 'metadata.json')
+        metadata = {}
+
+        # Safely read existing metadata
+        try:
+            if os.path.exists(metadata_path):
+                with open(metadata_path, 'r') as f:
+                    content = f.read()
+                    if content.strip():  # Only parse if file has content
+                        metadata = json.loads(content)
+        except (json.JSONDecodeError, ValueError) as e:
+            # If JSON is corrupted, start fresh
+            print(f"Warning: metadata.json corrupted, creating new file. Error: {e}")
+            metadata = {}
+
+        # Add new template
+        metadata[template_id] = {
+            'publication_id': publication.id,
+            'box_id': box.id,
+            'x': x,
+            'y': y,
+            'width': w,
+            'height': h,
+            'column_inches': float(box.column_inches),
+            'created_at': datetime.now().isoformat()
+        }
+
+        # Safely write metadata
+        try:
+            with open(metadata_path, 'w') as f:
+                json.dump(metadata, f, indent=2)
+        except Exception as e:
+            print(f"Error writing metadata.json: {e}")
+            return jsonify({'success': False, 'error': f'Failed to save metadata: {e}'})
+
+        return jsonify({
+            'success': True,
+            'message': 'Template saved successfully',
+            'template_id': template_id
+        })
+
+    except Exception as e:
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/api/match_templates/<int:page_id>', methods=['POST'])
+def match_templates(page_id):
+    """Match saved templates against a page"""
+    page = Page.query.get_or_404(page_id)
+    publication = Publication.query.get(page.publication_id)
+
+    try:
+        # Get page image
+        image_filename = f"{publication.filename}_page_{page.page_number}.png"
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+
+        if not os.path.exists(image_path):
+            return jsonify({'success': False, 'error': 'Page image not found'})
+
+        img = cv2.imread(image_path)
+        if img is None:
+            return jsonify({'success': False, 'error': 'Failed to read page image'})
+
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+
+        # Load templates
+        template_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'templates')
+        metadata_path = os.path.join(template_dir, 'metadata.json')
+
+        if not os.path.exists(metadata_path):
+            return jsonify({'success': True, 'matches': 0, 'message': 'No templates found'})
+
+        with open(metadata_path, 'r') as f:
+            metadata = json.load(f)
+
+        matches_found = []
+
+        # Try each template
+        for template_id, template_info in metadata.items():
+            template_path = os.path.join(template_dir, f"{template_id}.png")
+
+            print(f"\n=== Testing template {template_id} ===")
+            print(f"Template info: {template_info}")
+            print(f"Template path: {template_path}")
+
+            if not os.path.exists(template_path):
+                print(f"Template file not found!")
+                continue
+
+            template = cv2.imread(template_path, 0)
+            if template is None:
+                print(f"Failed to load template!")
+                continue
+
+            print(f"Template loaded: {template.shape}")
+
+            # Template matching
+            result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
+            threshold = 0.8
+            max_val = result.max()
+            print(f"Best match score: {max_val:.3f} (threshold: 0.8)")
+
+            if max_val < threshold:
+                print(f"No match - score too low")
+            else:
+                print(f"Match found!")
+
+            locations = np.where(result >= threshold)
+
+            for pt in zip(*locations[::-1]):
+                x, y = pt
+                h, w = template.shape[:2]
+
+                # Check overlap with existing boxes
+                overlaps = False
+                for existing_box in AdBox.query.filter_by(page_id=page_id).all():
+                    if (abs(x - existing_box.x) < w/2 and
+                        abs(y - existing_box.y) < h/2):
+                        overlaps = True
+                        break
+
+                if not overlaps:
+                    matches_found.append({
+                        'x': int(x),
+                        'y': int(y),
+                        'width': int(w),
+                        'height': int(h),
+                        'column_inches': template_info['column_inches']
+                    })
+
+        # Create boxes for matches
+        boxes_created = []
+        for match in matches_found:
+            new_box = AdBox(
+                page_id=page_id,
+                x=match['x'],
+                y=match['y'],
+                width=match['width'],
+                height=match['height'],
+                column_inches=match['column_inches'],
+                ad_type='template_match',
+                user_verified=False
+            )
+            db.session.add(new_box)
+            boxes_created.append(new_box)
+
+        if boxes_created:
+            db.session.commit()
+            page.page_ad_inches = sum(box.column_inches for box in AdBox.query.filter_by(page_id=page_id).all())
+            db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'matches': len(boxes_created),
+            'message': f'Found {len(boxes_created)} matching ads'
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
+@app.route('/cleanup_old_publications', methods=['POST'])
+def cleanup_old_publications():
+    """Delete publications older than 2 months"""
+    from datetime import datetime, timedelta
+
+    try:
+        # Calculate cutoff date (2 months ago)
+        cutoff_date = datetime.now() - timedelta(days=60)
+
+        # Find old publications
+        old_pubs = Publication.query.filter(
+            Publication.upload_date < cutoff_date
+        ).all()
+
+        deleted_count = 0
+        for pub in old_pubs:
+            # Delete page images
+            for page in pub.pages:
+                image_filename = f"{pub.filename}_page_{page.page_number}.png"
+                image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+                if os.path.exists(image_path):
+                    os.remove(image_path)
+
+            # Delete PDF
+            pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', pub.filename)
+            if os.path.exists(pdf_path):
+                os.remove(pdf_path)
+
+            # Delete from database (cascades to pages and ad_boxes)
+            db.session.delete(pub)
+            deleted_count += 1
+
+        db.session.commit()
+
+        return jsonify({
+            'success': True,
+            'deleted': deleted_count,
+            'message': f'Deleted {deleted_count} old publications'
+        })
+
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)})
+
 @app.route('/api/update_manual_box/<int:box_id>', methods=['POST'])
 def update_manual_box(box_id):
     """Update a manual ad box"""
@@ -11077,103 +11323,38 @@ def activate_ml_model(model_id):
         db.session.rollback()
         return jsonify({'success': False, 'error': str(e)})
 
-@app.route('/api/save_template/<int:ad_box_id>', methods=['POST'])
-@login_required
-def save_ad_template(ad_box_id):
-    """Save ad as template for future detection"""
-    try:
-        data = request.json
-        business_name = data.get('business_name', '').strip()
 
-        if not business_name:
-            return jsonify({'success': False, 'error': 'Business name required'})
-
-        # Get the ad box
-        ad_box = AdBox.query.get(ad_box_id)
-        if not ad_box:
-            return jsonify({'success': False, 'error': 'Ad box not found'})
-
-        # Get page info
-        page = Page.query.get(ad_box.page_id)
-        publication = Publication.query.get(page.publication_id)
-
-        # Load page image
-        image_filename = f"{publication.filename}_page_{page.page_number}.png"
-        image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
-
-        if not os.path.exists(image_path):
-            return jsonify({'success': False, 'error': 'Page image not found'})
-
-        # Load and crop the ad region
-        page_img = cv2.imread(image_path)
-        if page_img is None:
-            return jsonify({'success': False, 'error': 'Could not load page image'})
-
-        # Extract ad region
-        x, y, w, h = int(ad_box.x), int(ad_box.y), int(ad_box.width), int(ad_box.height)
-        ad_region = page_img[y:y+h, x:x+w]
-
-        # Save template image
-        safe_name = "".join(c for c in business_name if c.isalnum() or c in (' ', '-', '_')).strip()
-        safe_name = safe_name.replace(' ', '_')
-        template_filename = f"{safe_name}_{ad_box_id}.png"
-        template_path = os.path.join(TEMPLATE_DIR, template_filename)
-
-        cv2.imwrite(template_path, ad_region)
-
-        # Save template record
-        template = AdTemplate(
-            business_name=business_name,
-            template_image_path=template_path,
-            width=w,
-            height=h
-        )
-
-        db.session.add(template)
-        db.session.commit()
-
-        return jsonify({
-            'success': True,
-            'message': f'Template saved for {business_name}! Future uploads will auto-detect this ad.',
-            'template_id': template.id
-        })
-
-    except Exception as e:
-        db.session.rollback()
-        print(f"Error saving template: {e}")
-        return jsonify({'success': False, 'error': str(e)})
-
-@app.route('/ml')
-@login_required
-def ml_dashboard():
-    """Machine Learning Dashboard"""
-    try:
-        # Get training statistics
-        stats = {}
-        for pub_type in PUBLICATION_CONFIGS.keys():
-            stats[pub_type] = AdLearningEngine.get_training_stats(pub_type)
-        
-        # Get active models
-        active_models = MLModel.query.filter_by(is_active=True).all()
-        
-        # Get recent training data
-        recent_training = TrainingData.query.order_by(TrainingData.extracted_date.desc()).limit(10).all()
-        
-        # Check if we have enough data to train
-        ready_to_train = {}
-        for pub_type in PUBLICATION_CONFIGS.keys():
-            ready_to_train[pub_type] = stats[pub_type]['total_samples'] >= 20
-        
-        return render_template('ml_dashboard.html',
-                             stats=stats,
-                             active_models=active_models,
-                             recent_training=recent_training,
-                             ready_to_train=ready_to_train,
-                             publication_types=list(PUBLICATION_CONFIGS.keys()))
-                             
-    except Exception as e:
-        flash(f'Error loading ML dashboard: {str(e)}', 'error')
-        return redirect(url_for('index'))
+# @app.route('/ml')
+# @login_required
+# def ml_dashboard():
+#     """Machine Learning Dashboard"""
+#     try:
+#         # Get training statistics
+#         stats = {}
+#         for pub_type in PUBLICATION_CONFIGS.keys():
+#             stats[pub_type] = AdLearningEngine.get_training_stats(pub_type)
+#
+#         # Get active models
+#         active_models = MLModel.query.filter_by(is_active=True).all()
+#
+#         # Get recent training data
+#         recent_training = TrainingData.query.order_by(TrainingData.extracted_date.desc()).limit(10).all()
+#
+#         # Check if we have enough data to train
+#         ready_to_train = {}
+#         for pub_type in PUBLICATION_CONFIGS.keys():
+#             ready_to_train[pub_type] = stats[pub_type]['total_samples'] >= 20
+#
+#         return render_template('ml_dashboard.html',
+#                              stats=stats,
+#                              active_models=active_models,
+#                              recent_training=recent_training,
+#                              ready_to_train=ready_to_train,
+#                              publication_types=list(PUBLICATION_CONFIGS.keys()))
+#
+#     except Exception as e:
+#         flash(f'Error loading ML dashboard: {str(e)}', 'error')
+#         return redirect(url_for('index'))
 
 @app.route('/templates')
 @login_required

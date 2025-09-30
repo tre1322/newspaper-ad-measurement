@@ -11683,17 +11683,34 @@ def list_templates():
 def debug_templates():
     """Debug endpoint to see what's in the templates directory"""
     import os
+    import json
 
     templates = []
+    metadata_exists = False
+    metadata_content = None
+
     if os.path.exists(TEMPLATE_DIR):
         files = os.listdir(TEMPLATE_DIR)
         templates = [f for f in files if f.endswith('.png')]
+
+        # Check for metadata.json
+        metadata_path = os.path.join(TEMPLATE_DIR, 'metadata.json')
+        metadata_exists = os.path.exists(metadata_path)
+
+        if metadata_exists:
+            try:
+                with open(metadata_path, 'r') as f:
+                    metadata_content = json.load(f)
+            except:
+                metadata_content = "Error reading metadata"
 
     return {
         'template_dir': TEMPLATE_DIR,
         'exists': os.path.exists(TEMPLATE_DIR),
         'template_count': len(templates),
-        'templates': templates
+        'templates': templates,
+        'metadata_exists': metadata_exists,
+        'metadata_entries': len(metadata_content) if isinstance(metadata_content, dict) else 0
     }
 
 

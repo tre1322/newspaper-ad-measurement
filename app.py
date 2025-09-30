@@ -109,6 +109,10 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
+# Template storage directory (mounted to Railway volume)
+TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'uploads', 'templates')
+os.makedirs(TEMPLATE_DIR, exist_ok=True)
+
 # Security configuration for file uploads
 ALLOWED_EXTENSIONS = {'.pdf'}
 MAX_FILENAME_LENGTH = 255
@@ -10868,10 +10872,7 @@ def save_template(box_id):
 
         # Save template to disk
         template_id = str(uuid.uuid4())
-        template_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'templates')
-        os.makedirs(template_dir, exist_ok=True)
-
-        template_path = os.path.join(template_dir, f"{template_id}.png")
+        template_path = os.path.join(TEMPLATE_DIR, f"{template_id}.png")
         print(f"💾 Saving template to: {template_path}")
         cv2.imwrite(template_path, template_img)
 
@@ -10918,7 +10919,7 @@ def save_template(box_id):
         print(f"{'='*60}\n")
 
         # Store template metadata with error handling
-        metadata_path = os.path.join(template_dir, 'metadata.json')
+        metadata_path = os.path.join(TEMPLATE_DIR, 'metadata.json')
         metadata = {}
 
         # Safely read existing metadata
@@ -10991,8 +10992,7 @@ def match_templates(page_id):
         page_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
         # Load templates
-        template_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'templates')
-        metadata_path = os.path.join(template_dir, 'metadata.json')
+        metadata_path = os.path.join(TEMPLATE_DIR, 'metadata.json')
 
         if not os.path.exists(metadata_path):
             return jsonify({'success': True, 'matches': 0, 'message': 'No templates found'})
@@ -11013,7 +11013,7 @@ def match_templates(page_id):
 
             # Get template info
             # Load template and apply same preprocessing (grayscale + blur)
-            template_path = os.path.join(template_dir, f"{template_id}.png")
+            template_path = os.path.join(TEMPLATE_DIR, f"{template_id}.png")
             template_img = Image.open(template_path)
 
             # Convert to grayscale

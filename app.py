@@ -5,13 +5,19 @@ import cv2
 import numpy as np
 import math
 import json
-import imagehash
-import pytesseract
-from PIL import Image
-from pdf_structure_analyzer import PDFStructureAdDetector
 
-# Configure Tesseract path for Windows
-pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+# Template matching imports (optional)
+try:
+    import imagehash
+    import pytesseract
+    TEMPLATE_MATCHING_AVAILABLE = True
+    # Configure Tesseract path for Windows
+    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+except ImportError:
+    TEMPLATE_MATCHING_AVAILABLE = False
+    print("Warning: Template matching dependencies not available (imagehash, pytesseract)")
+
+from pdf_structure_analyzer import PDFStructureAdDetector
 
 # Google Vision AI setup - SECURE VERSION
 # Load environment variables first
@@ -32,7 +38,14 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from functools import wraps
 from werkzeug.utils import secure_filename
-from PIL import Image, ImageDraw, ImageFont, ImageFilter
+
+# PIL imports - ImageFilter is optional for template matching
+try:
+    from PIL import Image, ImageDraw, ImageFont, ImageFilter
+except ImportError:
+    from PIL import Image, ImageDraw, ImageFont
+    ImageFilter = None
+
 import io
 import base64
 from reportlab.pdfgen import canvas

@@ -5,7 +5,13 @@ import cv2
 import numpy as np
 import math
 import json
+import imagehash
+import pytesseract
+from PIL import Image
 from pdf_structure_analyzer import PDFStructureAdDetector
+
+# Configure Tesseract path for Windows
+pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 
 # Google Vision AI setup - SECURE VERSION
 # Load environment variables first
@@ -26,7 +32,7 @@ from datetime import datetime, timedelta
 from dotenv import load_dotenv
 from functools import wraps
 from werkzeug.utils import secure_filename
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, ImageFilter
 import io
 import base64
 from reportlab.pdfgen import canvas
@@ -287,18 +293,32 @@ def start_background_processing(pub_id):
                     
                     for page_num in range(batch_start, batch_end):
                         page = pdf_doc[page_num]
-                        
+
                         # Convert to image with lower resolution for faster processing
                         mat = fitz.Matrix(1.5, 1.5)  # Reduced from 2x to 1.5x for speed
+
+                        print(f"\n📄 Converting PDF page {page_num + 1} to PNG")
+                        print(f"🎯 Matrix scale: {mat.a}x{mat.d} (1.5x zoom)")
+                        print(f"📐 PDF page rect: {page.rect}")
+
                         pix = page.get_pixmap(matrix=mat)
+
+                        print(f"🖼️ Generated PNG size: {pix.width}x{pix.height}")
+                        print(f"🎨 Color space: {pix.colorspace}")
+                        print(f"📊 Alpha channel: {pix.alpha}")
+                        print(f"💾 Image data size: {len(pix.tobytes('png'))} bytes")
+
                         img_data = pix.tobytes("png")
-                        
+
                         # Save page image
                         image_filename = f"{publication.filename}_page_{page_num + 1}.png"
                         image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
-                        
+
                         with open(image_path, 'wb') as img_file:
                             img_file.write(img_data)
+
+                        print(f"✅ Saved PNG: {image_path}")
+                        print(f"{'='*50}")
                         
                         # Check if page record already exists to prevent duplicates
                         existing_page = Page.query.filter_by(
@@ -556,14 +576,29 @@ def generate_page_image_if_needed(publication, page_number):
         
         if page_number <= pdf_doc.page_count:
             page = pdf_doc[page_number - 1]  # 0-based indexing
+
+            print(f"\n📄 ON-DEMAND: Converting PDF page {page_number} to PNG")
+            print(f"📁 Publication: {publication.id} ({publication.filename})")
+
             mat = fitz.Matrix(1.5, 1.5)  # Good quality but not too heavy
+            print(f"🎯 Matrix scale: {mat.a}x{mat.d} (1.5x zoom)")
+            print(f"📐 PDF page rect: {page.rect}")
+
             pix = page.get_pixmap(matrix=mat)
+
+            print(f"🖼️ Generated PNG size: {pix.width}x{pix.height}")
+            print(f"🎨 Color space: {pix.colorspace}")
+            print(f"📊 Alpha channel: {pix.alpha}")
+            print(f"💾 Image data size: {len(pix.tobytes('png'))} bytes")
+
             img_data = pix.tobytes("png")
-            
+
             # Save image
             with open(image_path, 'wb') as img_file:
                 img_file.write(img_data)
-            
+
+            print(f"✅ ON-DEMAND: Saved PNG: {image_path}")
+            print(f"{'='*50}")
             print(f"Generated image for page {page_number} of publication {publication.id}")
         
         pdf_doc.close()
@@ -10231,17 +10266,17 @@ def intelligent_detect_ad(page_id):
                 detected_box['height'], pdf_pixels_per_inch, screen_scaling_factor
             )
         
-        # Apply intelligent measurement rules
-        config = PUBLICATION_CONFIGS[publication.publication_type]
-        if ad_type != 'manual' and 'column_standards' in config:
-            # Match width to column standards
-            width_inches_raw = IntelligentAdDetector.match_to_column_width(
-                width_inches_raw, ad_type, config['column_standards']
-            )
-            # Round depth up (except public notices)
-            height_inches_raw = IntelligentAdDetector.round_depth_up(height_inches_raw, ad_type)
-        
-        # Calculate column inches
+        # DISABLED: Column snapping removed to measure ads exactly as detected
+        # config = PUBLICATION_CONFIGS[publication.publication_type]
+        # if ad_type != 'manual' and 'column_standards' in config:
+        #     # Match width to column standards
+        #     width_inches_raw = IntelligentAdDetector.match_to_column_width(
+        #         width_inches_raw, ad_type, config['column_standards']
+        #     )
+        #     # Round depth up (except public notices)
+        #     height_inches_raw = IntelligentAdDetector.round_depth_up(height_inches_raw, ad_type)
+
+        # Calculate column inches (using exact measurements)
         column_inches = width_inches_raw * height_inches_raw
         
         # Create ad box record
@@ -10785,16 +10820,26 @@ def save_template(box_id):
     data = request.json
 
     try:
+        print(f"\n{'='*60}")
+        print(f"🔍 SAVING TEMPLATE FOR BOX {box_id}")
+        print(f"{'='*60}")
+
         # Get the page image
         image_filename = f"{publication.filename}_page_{page.page_number}.png"
         image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+        print(f"📄 Page path: {image_path}")
+        print(f"📄 Page file exists: {os.path.exists(image_path)}")
 
         if not os.path.exists(image_path):
             return jsonify({'success': False, 'error': 'Page image not found'})
 
         # Extract the ad region as template
         img = cv2.imread(image_path)
+        print(f"📏 Full page image shape: {img.shape}")
+
         x, y, w, h = int(box.x), int(box.y), int(box.width), int(box.height)
+        print(f"📦 Original box coordinates: ({x}, {y}) - ({x + w}, {y + h})")
+        print(f"📦 Original dimensions: {w}x{h}")
 
         # Ensure coordinates are within bounds
         x = max(0, min(x, img.shape[1] - 1))
@@ -10802,7 +10847,11 @@ def save_template(box_id):
         w = min(w, img.shape[1] - x)
         h = min(h, img.shape[0] - y)
 
+        print(f"📦 Adjusted coordinates: ({x}, {y}) - ({x + w}, {y + h})")
+        print(f"📦 Adjusted dimensions: {w}x{h}")
+
         template_img = img[y:y+h, x:x+w]
+        print(f"📏 Template crop shape: {template_img.shape}")
 
         # Save template to disk
         template_id = str(uuid.uuid4())
@@ -10810,7 +10859,50 @@ def save_template(box_id):
         os.makedirs(template_dir, exist_ok=True)
 
         template_path = os.path.join(template_dir, f"{template_id}.png")
+        print(f"💾 Saving template to: {template_path}")
         cv2.imwrite(template_path, template_img)
+
+        # Generate perceptual hash for the template
+        # Preprocessing: grayscale + light blur to reduce noise while preserving aspect ratio
+        template_pil = Image.open(template_path)
+        print(f"📐 Template size: {template_pil.size}")
+
+        # Convert to grayscale
+        if template_pil.mode != 'L':
+            template_pil = template_pil.convert('L')
+
+        # Apply light Gaussian blur to reduce noise
+        template_pil = template_pil.filter(ImageFilter.GaussianBlur(radius=1))
+
+        phash_value = str(imagehash.phash(template_pil, hash_size=16))
+        print(f"🔑 Template hash (grayscale + blur): {phash_value}")
+
+        # Verify template was saved correctly by reloading
+        verify_img = Image.open(template_path)
+        if verify_img.mode != 'L':
+            verify_img = verify_img.convert('L')
+        verify_img = verify_img.filter(ImageFilter.GaussianBlur(radius=1))
+        verify_hash = imagehash.phash(verify_img, hash_size=16)
+        print(f"✅ Template saved. Verification hash: {verify_hash}")
+        print(f"🔄 Hash consistency check: {phash_value == str(verify_hash)}")
+
+        # Extract business name via OCR (in addition to phash)
+        template_img_ocr = Image.open(template_path)
+        try:
+            extracted_text = pytesseract.image_to_string(template_img_ocr, config='--psm 6').strip()
+            business_name = None
+            for line in extracted_text.split('\n'):
+                line = line.strip()
+                if len(line) > 5:
+                    business_name = line.upper()
+                    break
+            print(f"📝 OCR business name: {business_name}")
+        except Exception as e:
+            print(f"⚠️ OCR extraction failed: {e}")
+            extracted_text = ""
+            business_name = None
+
+        print(f"{'='*60}\n")
 
         # Store template metadata with error handling
         metadata_path = os.path.join(template_dir, 'metadata.json')
@@ -10837,7 +10929,10 @@ def save_template(box_id):
             'width': w,
             'height': h,
             'column_inches': float(box.column_inches),
-            'created_at': datetime.now().isoformat()
+            'created_at': datetime.now().isoformat(),
+            'phash': phash_value,
+            'ocr_text': extracted_text,
+            'business_name': business_name
         }
 
         # Safely write metadata
@@ -10864,18 +10959,23 @@ def match_templates(page_id):
     publication = Publication.query.get(page.publication_id)
 
     try:
+        print(f"\n{'='*60}")
+        print(f"🔍 MATCHING TEMPLATES AGAINST PAGE {page_id}")
+        print(f"{'='*60}")
+
         # Get page image
         image_filename = f"{publication.filename}_page_{page.page_number}.png"
         image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+        print(f"📄 Page path: {image_path}")
+        print(f"📄 Page file exists: {os.path.exists(image_path)}")
 
         if not os.path.exists(image_path):
             return jsonify({'success': False, 'error': 'Page image not found'})
 
+        # Load page image
         img = cv2.imread(image_path)
-        if img is None:
-            return jsonify({'success': False, 'error': 'Failed to read page image'})
-
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        print(f"📏 Page image shape: {img.shape}")
+        page_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
         # Load templates
         template_dir = os.path.join(app.config['UPLOAD_FOLDER'], 'templates')
@@ -10887,49 +10987,158 @@ def match_templates(page_id):
         with open(metadata_path, 'r') as f:
             metadata = json.load(f)
 
+        print(f"🎯 Total templates to test: {len([t for t in metadata.values() if 'phash' in t])}")
+        print(f"{'='*60}\n")
+
         matches_found = []
 
-        # Try each template
+        # Test each template
         for template_id, template_info in metadata.items():
+            if 'phash' not in template_info:
+                print(f"⚠️ Template {template_id} missing hash, skipping")
+                continue
+
+            # Get template info
+            # Load template and apply same preprocessing (grayscale + blur)
             template_path = os.path.join(template_dir, f"{template_id}.png")
+            template_img = Image.open(template_path)
+
+            # Convert to grayscale
+            if template_img.mode != 'L':
+                template_img = template_img.convert('L')
+
+            # Apply light Gaussian blur to reduce noise
+            template_img = template_img.filter(ImageFilter.GaussianBlur(radius=1))
+
+            template_hash = imagehash.phash(template_img, hash_size=16)
+
+            template_w = template_info['width']
+            template_h = template_info['height']
 
             print(f"\n=== Testing template {template_id} ===")
-            print(f"Template info: {template_info}")
-            print(f"Template path: {template_path}")
+            print(f"📦 Template dimensions: {template_w}x{template_h}")
+            print(f"🔑 Template hash (grayscale + blur): {template_hash}")
 
-            if not os.path.exists(template_path):
-                print(f"Template file not found!")
-                continue
+            # CRITICAL TEST: Extract the EXACT same region that was saved as template
+            test_x, test_y = template_info['x'], template_info['y']
+            print(f"🧪 TESTING EXACT COORDINATES: ({test_x}, {test_y})")
 
-            template = cv2.imread(template_path, 0)
-            if template is None:
-                print(f"Failed to load template!")
-                continue
+            # Make sure coordinates are valid
+            if (test_x + template_w <= page_pil.width and
+                test_y + template_h <= page_pil.height and
+                test_x >= 0 and test_y >= 0):
 
-            print(f"Template loaded: {template.shape}")
-
-            # Template matching
-            result = cv2.matchTemplate(gray, template, cv2.TM_CCOEFF_NORMED)
-            threshold = 0.8
-            max_val = result.max()
-            print(f"Best match score: {max_val:.3f} (threshold: 0.8)")
-
-            if max_val < threshold:
-                print(f"No match - score too low")
+                test_region = page_pil.crop((test_x, test_y, test_x + template_w, test_y + template_h))
+                # Apply same preprocessing as template
+                if test_region.mode != 'L':
+                    test_region = test_region.convert('L')
+                test_region = test_region.filter(ImageFilter.GaussianBlur(radius=1))
+                test_hash = imagehash.phash(test_region, hash_size=16)
+                test_distance = template_hash - test_hash
+                print(f"🔍 Exact same coordinates distance: {test_distance}")
+                print(f"   (This should be 0-3 if everything is working correctly)")
+                print(f"🔑 Test region hash: {test_hash}")
+                print(f"🔑 Expected hash:   {template_hash}")
             else:
-                print(f"Match found!")
+                print(f"⚠️ Template coordinates ({test_x}, {test_y}) + ({template_w}, {template_h}) out of bounds for page ({page_pil.width}, {page_pil.height})")
 
-            locations = np.where(result >= threshold)
+            best_distance = 100
+            best_location = None
 
-            for pt in zip(*locations[::-1]):
-                x, y = pt
-                h, w = template.shape[:2]
+            # FIRST: Test exact template coordinates
+            exact_x, exact_y = template_info['x'], template_info['y']
+
+            # Make sure exact coordinates are valid
+            if (exact_x + template_w <= page_pil.width and
+                exact_y + template_h <= page_pil.height and
+                exact_x >= 0 and exact_y >= 0):
+
+                exact_region = page_pil.crop((exact_x, exact_y, exact_x + template_w, exact_y + template_h))
+                # Apply same preprocessing as template
+                if exact_region.mode != 'L':
+                    exact_region = exact_region.convert('L')
+                exact_region = exact_region.filter(ImageFilter.GaussianBlur(radius=1))
+                exact_hash = imagehash.phash(exact_region, hash_size=16)
+                exact_distance = template_hash - exact_hash
+
+                print(f"✅ Testing EXACT saved location: ({exact_x}, {exact_y})")
+                print(f"   Distance at exact location: {exact_distance}")
+
+                best_distance = exact_distance
+                best_location = (exact_x, exact_y)
+
+                # If exact location is a perfect match, use it immediately
+                if exact_distance < 5:
+                    print(f"🎯 PERFECT MATCH at saved coordinates! Skipping sliding window.")
+                else:
+                    print(f"⚠️ Exact coordinates not perfect match, running sliding window...")
+
+                    # Do sliding window with larger step size for speed
+                    step_size = min(40, template_w // 8, template_h // 8)
+                    step_size = max(1, step_size)  # Ensure at least 1 pixel step
+
+                    print(f"🔍 Sliding window with step size: {step_size}")
+
+                    for y in range(0, img.shape[0] - template_h, step_size):
+                        for x in range(0, img.shape[1] - template_w, step_size):
+                            # Skip if we already tested this exact location
+                            if x == exact_x and y == exact_y:
+                                continue
+
+                            # Extract region and get its hash
+                            region = page_pil.crop((x, y, x + template_w, y + template_h))
+                            # Apply same preprocessing as template
+                            if region.mode != 'L':
+                                region = region.convert('L')
+                            region = region.filter(ImageFilter.GaussianBlur(radius=1))
+                            region_hash = imagehash.phash(region, hash_size=16)
+
+                            # Calculate distance
+                            distance = template_hash - region_hash
+
+                            if distance < best_distance:
+                                best_distance = distance
+                                best_location = (x, y)
+            else:
+                print(f"⚠️ Exact coordinates out of bounds, using full sliding window")
+
+                # Do sliding window with larger step size for speed
+                step_size = min(40, template_w // 4, template_h // 4)
+                step_size = max(1, step_size)
+
+                print(f"🔍 Full sliding window with step size: {step_size}")
+
+                for y in range(0, img.shape[0] - template_h, step_size):
+                    for x in range(0, img.shape[1] - template_w, step_size):
+                        # Extract region and get its hash
+                        region = page_pil.crop((x, y, x + template_w, y + template_h))
+                        # Apply same preprocessing as template
+                        if region.mode != 'L':
+                            region = region.convert('L')
+                        region = region.filter(ImageFilter.GaussianBlur(radius=1))
+                        region_hash = imagehash.phash(region, hash_size=16)
+
+                        # Calculate distance
+                        distance = template_hash - region_hash
+
+                        if distance < best_distance:
+                            best_distance = distance
+                            best_location = (x, y)
+
+            # Threshold set to 60 for balanced matching
+            THRESHOLD = 60
+
+            print(f"🏆 Final best match distance: {best_distance} (threshold: {THRESHOLD})")
+
+            # If distance <= threshold, it's a match
+            if best_distance <= THRESHOLD:
+                x, y = best_location
 
                 # Check overlap with existing boxes
                 overlaps = False
                 for existing_box in AdBox.query.filter_by(page_id=page_id).all():
-                    if (abs(x - existing_box.x) < w/2 and
-                        abs(y - existing_box.y) < h/2):
+                    if (abs(x - existing_box.x) < template_w/2 and
+                        abs(y - existing_box.y) < template_h/2):
                         overlaps = True
                         break
 
@@ -10937,23 +11146,87 @@ def match_templates(page_id):
                     matches_found.append({
                         'x': int(x),
                         'y': int(y),
-                        'width': int(w),
-                        'height': int(h),
-                        'column_inches': template_info['column_inches']
+                        'width': template_w,
+                        'height': template_h,
+                        'column_inches': template_info.get('column_inches', 0)
                     })
+                    print(f"✅ MATCH FOUND at ({x}, {y})")
+                else:
+                    print(f"⚠️ Match found but overlaps with existing box")
+            else:
+                # If perceptual hash didn't find a match, try OCR
+                print(f"❌ No match - distance too high ({best_distance} > {THRESHOLD})")
+                print(f"🔍 Trying OCR fallback...")
+
+                template_business = template_info.get('business_name')
+                if template_business:
+                    print(f"📝 Looking for business name: {template_business}")
+                    # Test exact coordinates
+                    test_x, test_y = template_info['x'], template_info['y']
+                    if (test_x + template_w <= page_pil.width and
+                        test_y + template_h <= page_pil.height and
+                        test_x >= 0 and test_y >= 0):
+
+                        try:
+                            test_region = page_pil.crop((test_x, test_y, test_x + template_w, test_y + template_h))
+                            region_text = pytesseract.image_to_string(test_region, config='--psm 6').upper()
+
+                            if template_business in region_text:
+                                print(f"✅ OCR MATCH at exact coordinates!")
+                                # Check overlap before adding
+                                overlaps_ocr = False
+                                for existing_box in AdBox.query.filter_by(page_id=page_id).all():
+                                    if (abs(test_x - existing_box.x) < template_w/2 and
+                                        abs(test_y - existing_box.y) < template_h/2):
+                                        overlaps_ocr = True
+                                        break
+
+                                if not overlaps_ocr:
+                                    matches_found.append({
+                                        'x': int(test_x),
+                                        'y': int(test_y),
+                                        'width': template_w,
+                                        'height': template_h,
+                                        'column_inches': template_info.get('column_inches', 0)
+                                    })
+                                else:
+                                    print(f"⚠️ OCR match overlaps with existing box")
+                            else:
+                                print(f"❌ OCR didn't find business name at exact coordinates")
+                        except Exception as e:
+                            print(f"⚠️ OCR fallback failed: {e}")
+                else:
+                    print(f"⚠️ No business name stored in template, skipping OCR")
 
         # Create boxes for matches
         boxes_created = []
         for match in matches_found:
+            # Calculate inches from pixels using page DPI
+            # Get page dimensions and calculate DPI (using 72 DPI as default)
+            dpi = 72  # Default DPI - could be improved with actual page DPI if stored
+
+            width_inches_raw = match['width'] / dpi
+            height_inches_raw = match['height'] / dpi
+            width_inches_rounded = round(width_inches_raw * 2) / 2  # Round to nearest 0.5
+            height_inches_rounded = round(height_inches_raw * 2) / 2
+
+            print(f"📐 Creating AdBox: {match['width']}x{match['height']} px = {width_inches_raw:.2f}x{height_inches_raw:.2f} inches")
+
             new_box = AdBox(
                 page_id=page_id,
                 x=match['x'],
                 y=match['y'],
                 width=match['width'],
                 height=match['height'],
+                width_inches_raw=width_inches_raw,
+                height_inches_raw=height_inches_raw,
+                width_inches_rounded=width_inches_rounded,
+                height_inches_rounded=height_inches_rounded,
                 column_inches=match['column_inches'],
                 ad_type='template_match',
-                user_verified=False
+                is_ad=True,
+                user_verified=False,
+                detected_automatically=True
             )
             db.session.add(new_box)
             boxes_created.append(new_box)

@@ -18,7 +18,9 @@
       "Bash(set FLASK_APP=app.py)",
       "Bash(git checkout:*)",
       "Bash(del nul)",
-      "Bash(del debug_content_detection.py final_proof_test.py debug_oa_publication.py force_content_detection.py manual_upload_test.py run_complete_processing.py test_complete_background.py test_content_detection.py test_content_integration.py)"
+      "Bash(del debug_content_detection.py final_proof_test.py debug_oa_publication.py force_content_detection.py manual_upload_test.py run_complete_processing.py test_complete_background.py test_content_detection.py test_content_integration.py)",
+      "Bash(del /q \"C:\\Users\\trevo\\newspaper-ad-measurement\\static\\uploads\\templates\\*.*\")",
+      "Bash(where:*)"
     ],
     "deny": [],
     "defaultMode": "acceptEdits",

@@ -377,6 +377,9 @@
                     <button type="button" class="btn btn-info" id="copyAdBtn" title="Copy last measured ad box" disabled>
                         <i class="fas fa-copy"></i> Copy Ad Measurement
                     </button>
+                    <button type="button" class="btn btn-primary" id="matchTemplatesBtn" title="Find ads matching saved templates">
+                        <i class="fas fa-search"></i> Match Templates
+                    </button>
                     {% endif %}
                     <a href="{{ url_for('publication_report', pub_id=publication.id) }}" class="btn btn-success" title="Generate comprehensive report">
                         <i class="fas fa-chart-bar"></i> Generate Report
@@ -681,7 +684,10 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Initialize copy ad functionality
     setupCopyAdButton();
-    
+
+    // Initialize template matching functionality
+    setupMatchTemplatesButton();
+
     // Initialize copy button based on existing ad boxes
     initializeCopyButtonState();
     
@@ -783,6 +789,62 @@ function setupCopyAdButton() {
             }
         });
     }
+}
+
+// Template Matching functionality
+function setupMatchTemplatesButton() {
+    const matchTemplatesBtn = document.getElementById('matchTemplatesBtn');
+
+    if (matchTemplatesBtn) {
+        matchTemplatesBtn.addEventListener('click', function() {
+            matchTemplates();
+        });
+    }
+}
+
+function matchTemplates() {
+    // Show loading indicator
+    const matchTemplatesBtn = document.getElementById('matchTemplatesBtn');
+    const originalText = matchTemplatesBtn.innerHTML;
+    matchTemplatesBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Matching...';
+    matchTemplatesBtn.disabled = true;
+
+    console.log('🔍 Starting template matching...');
+
+    fetch(`/api/match_templates/{{ page.id }}`, {
+        method: 'POST',
+        headers: {
+            'Content-Type': 'application/json',
+        }
+    })
+    .then(response => response.json())
+    .then(data => {
+        console.log('📊 Template matching response:', data);
+
+        // Reset button
+        matchTemplatesBtn.innerHTML = originalText;
+        matchTemplatesBtn.disabled = false;
+
+        if (data.success) {
+            if (data.matches && data.matches > 0) {
+                showSuccessMessage(`✅ Found ${data.matches} template matches! New ad boxes have been added.`);
+                // Refresh the page to show new ad boxes
+                window.location.reload();
+            } else {
+                showSuccessMessage('ℹ️ No template matches found on this page.');
+            }
+        } else {
+            showErrorMessage('❌ Error matching templates: ' + (data.error || 'Unknown error'));
+        }
+    })
+    .catch(error => {
+        console.error('❌ Template matching error:', error);
+        showErrorMessage('❌ Network error occurred while matching templates');
+
+        // Reset button
+        matchTemplatesBtn.innerHTML = originalText;
+        matchTemplatesBtn.disabled = false;
+    });
 }
 
 function addFullPageAd() {

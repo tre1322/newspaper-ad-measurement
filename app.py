@@ -11679,6 +11679,23 @@ def list_templates():
     except Exception as e:
         return f'<h1>Error loading templates</h1><p>{str(e)}</p><a href="/">Back to Home</a>'
 
+@app.route('/debug/templates')
+def debug_templates():
+    """Debug endpoint to see what's in the templates directory"""
+    import os
+
+    templates = []
+    if os.path.exists(TEMPLATE_DIR):
+        files = os.listdir(TEMPLATE_DIR)
+        templates = [f for f in files if f.endswith('.png')]
+
+    return {
+        'template_dir': TEMPLATE_DIR,
+        'exists': os.path.exists(TEMPLATE_DIR),
+        'template_count': len(templates),
+        'templates': templates
+    }
+
 
 # Create database tables and ensure schema is up to date
 with app.app_context():

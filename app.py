@@ -109,8 +109,8 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
-# Template storage directory (mounted to Railway volume)
-TEMPLATE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'static', 'uploads', 'templates')
+# Use absolute path that matches Railway volume mount
+TEMPLATE_DIR = '/app/uploads/templates'
 os.makedirs(TEMPLATE_DIR, exist_ok=True)
 
 # Security configuration for file uploads

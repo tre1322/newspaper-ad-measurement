@@ -11690,10 +11690,19 @@ def debug_templates():
     ensure_template_dir()
     import os
     import json
+    import subprocess
 
     templates = []
     metadata_exists = False
     metadata_content = None
+
+    # Check if path is a mount point
+    mount_check = "Not checked"
+    try:
+        result = subprocess.run(['mountpoint', '-q', TEMPLATE_DIR], capture_output=True)
+        mount_check = "IS a mountpoint" if result.returncode == 0 else "NOT a mountpoint"
+    except:
+        mount_check = "Cannot check (mountpoint command unavailable)"
 
     if os.path.exists(TEMPLATE_DIR):
         files = os.listdir(TEMPLATE_DIR)
@@ -11712,6 +11721,7 @@ def debug_templates():
 
     return {
         'template_dir': TEMPLATE_DIR,
+        'is_mountpoint': mount_check,
         'exists': os.path.exists(TEMPLATE_DIR),
         'template_count': len(templates),
         'templates': templates,

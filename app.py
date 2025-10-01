@@ -111,7 +111,10 @@ app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
 # Use absolute path that matches Railway volume mount
 TEMPLATE_DIR = '/app/uploads/templates'
-os.makedirs(TEMPLATE_DIR, exist_ok=True)
+
+# Create directory on first use, not at import time
+def ensure_template_dir():
+    os.makedirs(TEMPLATE_DIR, exist_ok=True)
 
 # Security configuration for file uploads
 ALLOWED_EXTENSIONS = {'.pdf'}
@@ -10830,6 +10833,7 @@ def add_manual_box(page_id):
 @app.route('/api/save_template/<int:box_id>', methods=['POST'])
 def save_template(box_id):
     """Save an ad box as a template for future matching"""
+    ensure_template_dir()
     box = AdBox.query.get_or_404(box_id)
     page = Page.query.get(box.page_id)
     publication = Publication.query.get(page.publication_id)
@@ -10969,6 +10973,7 @@ def save_template(box_id):
 @app.route('/api/match_templates/<int:page_id>', methods=['POST'])
 def match_templates(page_id):
     """Match saved templates against a page"""
+    ensure_template_dir()
     page = Page.query.get_or_404(page_id)
     publication = Publication.query.get(page.publication_id)
 
@@ -11682,6 +11687,7 @@ def list_templates():
 @app.route('/debug/templates')
 def debug_templates():
     """Debug endpoint to see what's in the templates directory"""
+    ensure_template_dir()
     import os
     import json
 

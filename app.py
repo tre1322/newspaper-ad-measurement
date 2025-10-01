@@ -109,13 +109,6 @@ app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
 app.config['UPLOAD_FOLDER'] = 'static/uploads'
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
-# Use absolute path that matches Railway volume mount
-TEMPLATE_DIR = '/app/uploads/templates'
-
-# Create directory on first use, not at import time
-def ensure_template_dir():
-    os.makedirs(TEMPLATE_DIR, exist_ok=True)
-
 # Security configuration for file uploads
 ALLOWED_EXTENSIONS = {'.pdf'}
 MAX_FILENAME_LENGTH = 255
@@ -753,6 +746,22 @@ class ScreenCalibration(db.Model):
     calibration_date = db.Column(db.DateTime, default=datetime.utcnow)
     user_agent = db.Column(db.Text)
     is_active = db.Column(db.Boolean, default=True)
+
+class Template(db.Model):
+    __tablename__ = 'templates'
+
+    id = db.Column(db.String(36), primary_key=True)  # UUID
+    image_data = db.Column(db.LargeBinary, nullable=False)  # PNG as binary
+    business_name = db.Column(db.String(255))
+    ocr_text = db.Column(db.Text)
+    phash = db.Column(db.String(64))
+    x = db.Column(db.Integer)
+    y = db.Column(db.Integer)
+    width = db.Column(db.Integer)
+    height = db.Column(db.Integer)
+    column_inches = db.Column(db.Float)
+    publication_id = db.Column(db.Integer, db.ForeignKey('publication.id'))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
 class MLModel(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -10833,7 +10842,6 @@ def add_manual_box(page_id):
 @app.route('/api/save_template/<int:box_id>', methods=['POST'])
 def save_template(box_id):
     """Save an ad box as a template for future matching"""
-    ensure_template_dir()
     box = AdBox.query.get_or_404(box_id)
     page = Page.query.get(box.page_id)
     publication = Publication.query.get(page.publication_id)
@@ -10874,15 +10882,14 @@ def save_template(box_id):
         template_img = img[y:y+h, x:x+w]
         print(f"📏 Template crop shape: {template_img.shape}")
 
-        # Save template to disk
-        template_id = str(uuid.uuid4())
-        template_path = os.path.join(TEMPLATE_DIR, f"{template_id}.png")
-        print(f"💾 Saving template to: {template_path}")
-        cv2.imwrite(template_path, template_img)
+        # Convert to PNG bytes
+        success, buffer = cv2.imencode('.png', template_img)
+        image_bytes = buffer.tobytes()
+        print(f"💾 Encoded template as PNG ({len(image_bytes)} bytes)")
 
         # Generate perceptual hash for the template
         # Preprocessing: grayscale + light blur to reduce noise while preserving aspect ratio
-        template_pil = Image.open(template_path)
+        template_pil = Image.open(io.BytesIO(image_bytes))
         print(f"📐 Template size: {template_pil.size}")
 
         # Convert to grayscale
@@ -10895,19 +10902,9 @@ def save_template(box_id):
         phash_value = str(imagehash.phash(template_pil, hash_size=16))
         print(f"🔑 Template hash (grayscale + blur): {phash_value}")
 
-        # Verify template was saved correctly by reloading
-        verify_img = Image.open(template_path)
-        if verify_img.mode != 'L':
-            verify_img = verify_img.convert('L')
-        verify_img = verify_img.filter(ImageFilter.GaussianBlur(radius=1))
-        verify_hash = imagehash.phash(verify_img, hash_size=16)
-        print(f"✅ Template saved. Verification hash: {verify_hash}")
-        print(f"🔄 Hash consistency check: {phash_value == str(verify_hash)}")
-
         # Extract business name via OCR (in addition to phash)
-        template_img_ocr = Image.open(template_path)
         try:
-            extracted_text = pytesseract.image_to_string(template_img_ocr, config='--psm 6').strip()
+            extracted_text = pytesseract.image_to_string(template_pil, config='--psm 6').strip()
             business_name = None
             for line in extracted_text.split('\n'):
                 line = line.strip()
@@ -10922,44 +10919,25 @@ def save_template(box_id):
 
         print(f"{'='*60}\n")
 
-        # Store template metadata with error handling
-        metadata_path = os.path.join(TEMPLATE_DIR, 'metadata.json')
-        metadata = {}
+        # Save to database
+        template_id = str(uuid.uuid4())
+        template = Template(
+            id=template_id,
+            image_data=image_bytes,
+            business_name=business_name,
+            ocr_text=extracted_text,
+            phash=phash_value,
+            x=x,
+            y=y,
+            width=w,
+            height=h,
+            column_inches=box.column_inches,
+            publication_id=page.publication_id
+        )
 
-        # Safely read existing metadata
-        try:
-            if os.path.exists(metadata_path):
-                with open(metadata_path, 'r') as f:
-                    content = f.read()
-                    if content.strip():  # Only parse if file has content
-                        metadata = json.loads(content)
-        except (json.JSONDecodeError, ValueError) as e:
-            # If JSON is corrupted, start fresh
-            print(f"Warning: metadata.json corrupted, creating new file. Error: {e}")
-            metadata = {}
-
-        # Add new template
-        metadata[template_id] = {
-            'publication_id': publication.id,
-            'box_id': box.id,
-            'x': x,
-            'y': y,
-            'width': w,
-            'height': h,
-            'column_inches': float(box.column_inches),
-            'created_at': datetime.now().isoformat(),
-            'phash': phash_value,
-            'ocr_text': extracted_text,
-            'business_name': business_name
-        }
-
-        # Safely write metadata
-        try:
-            with open(metadata_path, 'w') as f:
-                json.dump(metadata, f, indent=2)
-        except Exception as e:
-            print(f"Error writing metadata.json: {e}")
-            return jsonify({'success': False, 'error': f'Failed to save metadata: {e}'})
+        db.session.add(template)
+        db.session.commit()
+        print(f"✅ Template saved to database with ID: {template_id}")
 
         return jsonify({
             'success': True,
@@ -10968,12 +10946,12 @@ def save_template(box_id):
         })
 
     except Exception as e:
+        db.session.rollback()
         return jsonify({'success': False, 'error': str(e)})
 
 @app.route('/api/match_templates/<int:page_id>', methods=['POST'])
 def match_templates(page_id):
     """Match saved templates against a page"""
-    ensure_template_dir()
     page = Page.query.get_or_404(page_id)
     publication = Publication.query.get(page.publication_id)
 
@@ -10996,30 +10974,25 @@ def match_templates(page_id):
         print(f"📏 Page image shape: {img.shape}")
         page_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-        # Load templates
-        metadata_path = os.path.join(TEMPLATE_DIR, 'metadata.json')
+        # Load templates from database
+        templates = Template.query.all()
 
-        if not os.path.exists(metadata_path):
+        if not templates:
             return jsonify({'success': True, 'matches': 0, 'message': 'No templates found'})
 
-        with open(metadata_path, 'r') as f:
-            metadata = json.load(f)
-
-        print(f"🎯 Total templates to test: {len([t for t in metadata.values() if 'phash' in t])}")
+        print(f"🎯 Total templates to test: {len(templates)}")
         print(f"{'='*60}\n")
 
         matches_found = []
 
         # Test each template
-        for template_id, template_info in metadata.items():
-            if 'phash' not in template_info:
-                print(f"⚠️ Template {template_id} missing hash, skipping")
+        for template in templates:
+            if not template.phash:
+                print(f"⚠️ Template {template.id} missing hash, skipping")
                 continue
 
-            # Get template info
-            # Load template and apply same preprocessing (grayscale + blur)
-            template_path = os.path.join(TEMPLATE_DIR, f"{template_id}.png")
-            template_img = Image.open(template_path)
+            # Load template image from database bytes
+            template_img = Image.open(io.BytesIO(template.image_data))
 
             # Convert to grayscale
             if template_img.mode != 'L':
@@ -11030,15 +11003,15 @@ def match_templates(page_id):
 
             template_hash = imagehash.phash(template_img, hash_size=16)
 
-            template_w = template_info['width']
-            template_h = template_info['height']
+            template_w = template.width
+            template_h = template.height
 
-            print(f"\n=== Testing template {template_id} ===")
+            print(f"\n=== Testing template {template.id} ===")
             print(f"📦 Template dimensions: {template_w}x{template_h}")
             print(f"🔑 Template hash (grayscale + blur): {template_hash}")
 
             # CRITICAL TEST: Extract the EXACT same region that was saved as template
-            test_x, test_y = template_info['x'], template_info['y']
+            test_x, test_y = template.x, template.y
             print(f"🧪 TESTING EXACT COORDINATES: ({test_x}, {test_y})")
 
             # Make sure coordinates are valid
@@ -11064,7 +11037,7 @@ def match_templates(page_id):
             best_location = None
 
             # FIRST: Test exact template coordinates
-            exact_x, exact_y = template_info['x'], template_info['y']
+            exact_x, exact_y = template.x, template.y
 
             # Make sure exact coordinates are valid
             if (exact_x + template_w <= page_pil.width and
@@ -11166,7 +11139,7 @@ def match_templates(page_id):
                         'y': int(y),
                         'width': template_w,
                         'height': template_h,
-                        'column_inches': template_info.get('column_inches', 0)
+                        'column_inches': template.column_inches if template.column_inches else 0
                     })
                     print(f"✅ MATCH FOUND at ({x}, {y})")
                 else:
@@ -11176,11 +11149,11 @@ def match_templates(page_id):
                 print(f"❌ No match - distance too high ({best_distance} > {THRESHOLD})")
                 print(f"🔍 Trying OCR fallback...")
 
-                template_business = template_info.get('business_name')
+                template_business = template.business_name
                 if template_business:
                     print(f"📝 Looking for business name: {template_business}")
                     # Test exact coordinates
-                    test_x, test_y = template_info['x'], template_info['y']
+                    test_x, test_y = template.x, template.y
                     if (test_x + template_w <= page_pil.width and
                         test_y + template_h <= page_pil.height and
                         test_x >= 0 and test_y >= 0):
@@ -11205,7 +11178,7 @@ def match_templates(page_id):
                                         'y': int(test_y),
                                         'width': template_w,
                                         'height': template_h,
-                                        'column_inches': template_info.get('column_inches', 0)
+                                        'column_inches': template.column_inches if template.column_inches else 0
                                     })
                                 else:
                                     print(f"⚠️ OCR match overlaps with existing box")
@@ -11652,7 +11625,7 @@ def activate_ml_model(model_id):
 def list_templates():
     """List all saved templates for verification"""
     try:
-        templates = AdTemplate.query.filter_by(is_active=True).order_by(AdTemplate.created_date.desc()).all()
+        templates = Template.query.order_by(Template.created_at.desc()).all()
 
         template_html = '''
         <h1>Saved Ad Templates</h1>
@@ -11665,13 +11638,16 @@ def list_templates():
 
         if templates:
             for template in templates:
+                business_display = template.business_name if template.business_name else "Unknown Business"
+                created_display = template.created_at.strftime('%Y-%m-%d %H:%M') if template.created_at else "Unknown"
                 template_html += f'''
                 <div class="template-card">
-                    <div class="template-name">{template.business_name}</div>
+                    <div class="template-name">{business_display}</div>
                     <div class="template-info">Size: {template.width}x{template.height} pixels</div>
-                    <div class="template-info">Created: {template.created_date.strftime('%Y-%m-%d %H:%M')}</div>
-                    <div class="template-info">Auto-detections: {template.detection_count}</div>
-                    <div class="template-info">Confidence threshold: {template.confidence_threshold}</div>
+                    <div class="template-info">Column Inches: {template.column_inches if template.column_inches else "N/A"}</div>
+                    <div class="template-info">Created: {created_display}</div>
+                    <div class="template-info">Hash: {template.phash[:16] if template.phash else "N/A"}...</div>
+                    <div class="template-info">Image Size: {len(template.image_data) if template.image_data else 0} bytes</div>
                 </div>
                 '''
         else:
@@ -11686,47 +11662,26 @@ def list_templates():
 
 @app.route('/debug/templates')
 def debug_templates():
-    """Debug endpoint to see what's in the templates directory"""
-    ensure_template_dir()
-    import os
-    import json
-    import subprocess
+    """Debug endpoint to see templates stored in database"""
+    templates = Template.query.all()
 
-    templates = []
-    metadata_exists = False
-    metadata_content = None
-
-    # Check if path is a mount point
-    mount_check = "Not checked"
-    try:
-        result = subprocess.run(['mountpoint', '-q', TEMPLATE_DIR], capture_output=True)
-        mount_check = "IS a mountpoint" if result.returncode == 0 else "NOT a mountpoint"
-    except:
-        mount_check = "Cannot check (mountpoint command unavailable)"
-
-    if os.path.exists(TEMPLATE_DIR):
-        files = os.listdir(TEMPLATE_DIR)
-        templates = [f for f in files if f.endswith('.png')]
-
-        # Check for metadata.json
-        metadata_path = os.path.join(TEMPLATE_DIR, 'metadata.json')
-        metadata_exists = os.path.exists(metadata_path)
-
-        if metadata_exists:
-            try:
-                with open(metadata_path, 'r') as f:
-                    metadata_content = json.load(f)
-            except:
-                metadata_content = "Error reading metadata"
+    template_info = []
+    for template in templates:
+        template_info.append({
+            'id': template.id,
+            'business_name': template.business_name,
+            'dimensions': f"{template.width}x{template.height}",
+            'column_inches': template.column_inches,
+            'phash': template.phash,
+            'publication_id': template.publication_id,
+            'created_at': template.created_at.isoformat() if template.created_at else None,
+            'image_size_bytes': len(template.image_data) if template.image_data else 0
+        })
 
     return {
-        'template_dir': TEMPLATE_DIR,
-        'is_mountpoint': mount_check,
-        'exists': os.path.exists(TEMPLATE_DIR),
+        'storage_type': 'database',
         'template_count': len(templates),
-        'templates': templates,
-        'metadata_exists': metadata_exists,
-        'metadata_entries': len(metadata_content) if isinstance(metadata_content, dict) else 0
+        'templates': template_info
     }
 
 

@@ -10952,7 +10952,7 @@ def save_template(box_id):
 
 @app.route('/api/match_templates/<int:page_id>', methods=['POST'])
 def match_templates(page_id):
-    """Match saved templates against a page"""
+    """Match saved templates against a page using OCR-only matching"""
     page = Page.query.get_or_404(page_id)
     publication = Publication.query.get(page.publication_id)
 
@@ -10970,22 +10970,23 @@ def match_templates(page_id):
         if not os.path.exists(image_path):
             return jsonify({'success': False, 'error': 'Page image not found'})
 
-        # Load page image
+        # Load page image once
         img = cv2.imread(image_path)
         print(f"📏 Page image shape: {img.shape}")
         page_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-        # Load templates from database - only load metadata, not image_data
-        # Only match against templates from the last 6 months to improve performance
+        # Extract ALL text from entire page once (much faster than per-region OCR)
+        print("📝 Extracting text from entire page...")
+        page_text = pytesseract.image_to_string(page_pil, config='--psm 6').upper()
+        print(f"Extracted {len(page_text)} characters from page")
+
+        # Load templates (metadata only)
         from datetime import timedelta
         six_months_ago = datetime.utcnow() - timedelta(days=180)
-
-        # Load only the metadata we need, not the full image_data blob
         templates = Template.query.filter(
             Template.created_at >= six_months_ago
         ).with_entities(
             Template.id,
-            Template.phash,
             Template.business_name,
             Template.x,
             Template.y,
@@ -11004,152 +11005,21 @@ def match_templates(page_id):
 
         # Test each template
         for template in templates:
-            if not template.phash:
-                print(f"⚠️ Template {template.id} missing hash, skipping")
+            if not template.business_name:
+                print(f"⚠️ Template {template.id} has no business name, skipping")
                 continue
-
-            # Load template image from database bytes (only when needed)
-            # Fetch only the image_data for this specific template
-            template_image_data = db.session.query(Template.image_data).filter(
-                Template.id == template.id
-            ).scalar()
-
-            if not template_image_data:
-                print(f"⚠️ Template {template.id} has no image data, skipping")
-                continue
-
-            template_img = Image.open(io.BytesIO(template_image_data))
-
-            # Convert to grayscale
-            if template_img.mode != 'L':
-                template_img = template_img.convert('L')
-
-            # Apply light Gaussian blur to reduce noise
-            template_img = template_img.filter(ImageFilter.GaussianBlur(radius=1))
-
-            template_hash = imagehash.phash(template_img, hash_size=16)
-
-            template_w = template.width
-            template_h = template.height
 
             print(f"\n=== Testing template {template.id} ===")
-            print(f"📦 Template dimensions: {template_w}x{template_h}")
-            print(f"🔑 Template hash (grayscale + blur): {template_hash}")
+            print(f"📝 Looking for: {template.business_name}")
 
-            # CRITICAL TEST: Extract the EXACT same region that was saved as template
-            test_x, test_y = template.x, template.y
-            print(f"🧪 TESTING EXACT COORDINATES: ({test_x}, {test_y})")
+            # Simple text search - if business name appears anywhere on page
+            if template.business_name.upper() in page_text:
+                print(f"✅ OCR MATCH - Business name found on page!")
 
-            # Make sure coordinates are valid
-            if (test_x + template_w <= page_pil.width and
-                test_y + template_h <= page_pil.height and
-                test_x >= 0 and test_y >= 0):
-
-                test_region = page_pil.crop((test_x, test_y, test_x + template_w, test_y + template_h))
-                # Apply same preprocessing as template
-                if test_region.mode != 'L':
-                    test_region = test_region.convert('L')
-                test_region = test_region.filter(ImageFilter.GaussianBlur(radius=1))
-                test_hash = imagehash.phash(test_region, hash_size=16)
-                test_distance = template_hash - test_hash
-                print(f"🔍 Exact same coordinates distance: {test_distance}")
-                print(f"   (This should be 0-3 if everything is working correctly)")
-                print(f"🔑 Test region hash: {test_hash}")
-                print(f"🔑 Expected hash:   {template_hash}")
-            else:
-                print(f"⚠️ Template coordinates ({test_x}, {test_y}) + ({template_w}, {template_h}) out of bounds for page ({page_pil.width}, {page_pil.height})")
-
-            best_distance = 100
-            best_location = None
-
-            # FIRST: Test exact template coordinates
-            exact_x, exact_y = template.x, template.y
-
-            # Make sure exact coordinates are valid
-            if (exact_x + template_w <= page_pil.width and
-                exact_y + template_h <= page_pil.height and
-                exact_x >= 0 and exact_y >= 0):
-
-                exact_region = page_pil.crop((exact_x, exact_y, exact_x + template_w, exact_y + template_h))
-                # Apply same preprocessing as template
-                if exact_region.mode != 'L':
-                    exact_region = exact_region.convert('L')
-                exact_region = exact_region.filter(ImageFilter.GaussianBlur(radius=1))
-                exact_hash = imagehash.phash(exact_region, hash_size=16)
-                exact_distance = template_hash - exact_hash
-
-                print(f"✅ Testing EXACT saved location: ({exact_x}, {exact_y})")
-                print(f"   Distance at exact location: {exact_distance}")
-
-                best_distance = exact_distance
-                best_location = (exact_x, exact_y)
-
-                # If exact location is a perfect match, use it immediately
-                if exact_distance < 5:
-                    print(f"🎯 PERFECT MATCH at saved coordinates! Skipping sliding window.")
-                else:
-                    print(f"⚠️ Exact coordinates not perfect match, running sliding window...")
-
-                    # Do sliding window with larger step size for speed
-                    step_size = min(40, template_w // 8, template_h // 8)
-                    step_size = max(1, step_size)  # Ensure at least 1 pixel step
-
-                    print(f"🔍 Sliding window with step size: {step_size}")
-
-                    for y in range(0, img.shape[0] - template_h, step_size):
-                        for x in range(0, img.shape[1] - template_w, step_size):
-                            # Skip if we already tested this exact location
-                            if x == exact_x and y == exact_y:
-                                continue
-
-                            # Extract region and get its hash
-                            region = page_pil.crop((x, y, x + template_w, y + template_h))
-                            # Apply same preprocessing as template
-                            if region.mode != 'L':
-                                region = region.convert('L')
-                            region = region.filter(ImageFilter.GaussianBlur(radius=1))
-                            region_hash = imagehash.phash(region, hash_size=16)
-
-                            # Calculate distance
-                            distance = template_hash - region_hash
-
-                            if distance < best_distance:
-                                best_distance = distance
-                                best_location = (x, y)
-            else:
-                print(f"⚠️ Exact coordinates out of bounds, using full sliding window")
-
-                # Do sliding window with larger step size for speed
-                step_size = min(40, template_w // 4, template_h // 4)
-                step_size = max(1, step_size)
-
-                print(f"🔍 Full sliding window with step size: {step_size}")
-
-                for y in range(0, img.shape[0] - template_h, step_size):
-                    for x in range(0, img.shape[1] - template_w, step_size):
-                        # Extract region and get its hash
-                        region = page_pil.crop((x, y, x + template_w, y + template_h))
-                        # Apply same preprocessing as template
-                        if region.mode != 'L':
-                            region = region.convert('L')
-                        region = region.filter(ImageFilter.GaussianBlur(radius=1))
-                        region_hash = imagehash.phash(region, hash_size=16)
-
-                        # Calculate distance
-                        distance = template_hash - region_hash
-
-                        if distance < best_distance:
-                            best_distance = distance
-                            best_location = (x, y)
-
-            # Threshold set to 60 for balanced matching
-            THRESHOLD = 60
-
-            print(f"🏆 Final best match distance: {best_distance} (threshold: {THRESHOLD})")
-
-            # If distance <= threshold, it's a match
-            if best_distance <= THRESHOLD:
-                x, y = best_location
+                # Use original template coordinates as best guess
+                x, y = template.x, template.y
+                template_w = template.width
+                template_h = template.height
 
                 # Check overlap with existing boxes
                 overlaps = False
@@ -11167,53 +11037,11 @@ def match_templates(page_id):
                         'height': template_h,
                         'column_inches': template.column_inches if template.column_inches else 0
                     })
-                    print(f"✅ MATCH FOUND at ({x}, {y})")
+                    print(f"✅ MATCH ADDED at ({x}, {y})")
                 else:
                     print(f"⚠️ Match found but overlaps with existing box")
             else:
-                # If perceptual hash didn't find a match, try OCR
-                print(f"❌ No match - distance too high ({best_distance} > {THRESHOLD})")
-                print(f"🔍 Trying OCR fallback...")
-
-                template_business = template.business_name
-                if template_business:
-                    print(f"📝 Looking for business name: {template_business}")
-                    # Test exact coordinates
-                    test_x, test_y = template.x, template.y
-                    if (test_x + template_w <= page_pil.width and
-                        test_y + template_h <= page_pil.height and
-                        test_x >= 0 and test_y >= 0):
-
-                        try:
-                            test_region = page_pil.crop((test_x, test_y, test_x + template_w, test_y + template_h))
-                            region_text = pytesseract.image_to_string(test_region, config='--psm 6').upper()
-
-                            if template_business in region_text:
-                                print(f"✅ OCR MATCH at exact coordinates!")
-                                # Check overlap before adding
-                                overlaps_ocr = False
-                                for existing_box in AdBox.query.filter_by(page_id=page_id).all():
-                                    if (abs(test_x - existing_box.x) < template_w/2 and
-                                        abs(test_y - existing_box.y) < template_h/2):
-                                        overlaps_ocr = True
-                                        break
-
-                                if not overlaps_ocr:
-                                    matches_found.append({
-                                        'x': int(test_x),
-                                        'y': int(test_y),
-                                        'width': template_w,
-                                        'height': template_h,
-                                        'column_inches': template.column_inches if template.column_inches else 0
-                                    })
-                                else:
-                                    print(f"⚠️ OCR match overlaps with existing box")
-                            else:
-                                print(f"❌ OCR didn't find business name at exact coordinates")
-                        except Exception as e:
-                            print(f"⚠️ OCR fallback failed: {e}")
-                else:
-                    print(f"⚠️ No business name stored in template, skipping OCR")
+                print(f"❌ Business name not found on page")
 
         # Create boxes for matches
         boxes_created = []

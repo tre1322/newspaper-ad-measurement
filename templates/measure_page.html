@@ -2141,21 +2141,25 @@ function createManualBoxAtPosition(x, y) {
     .then(response => response.json())
     .then(data => {
         if (data.success) {
+            console.log('🎯 Manual box created with ID:', data.box_id);
+            console.log('🎯 Box coordinates:', {x: data.x, y: data.y, width: data.width, height: data.height});
+
             // Create visual manual box
             createManualBoxElement(data);
-            
+
             // Update measurements panel
             addAdToSidebar(data);
-            
+
             // Update page total
             updatePageTotalRegular();
 
             // Auto-save template
+            console.log('🎯 Calling autoSaveTemplate for box_id:', data.box_id);
             autoSaveTemplate(data.box_id, data.x, data.y, data.width, data.height);
 
             // Show success message
             showSuccessMessage('Manual box created! Drag and resize to fit.');
-            
+
         } else {
             showErrorMessage('Error creating manual box: ' + data.error);
         }
@@ -2826,62 +2830,87 @@ let templateSaveQueue = [];
 let currentlySaving = false;
 
 async function autoSaveTemplate(boxId, x, y, width, height) {
-    console.log('>>> Adding to template save queue:', boxId);
-    console.log('>>> Currently saving:', currentlySaving);
-    console.log('>>> Queue length before add:', templateSaveQueue.length);
+    const timestamp = new Date().toISOString();
+    console.log('');
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log(`🎯 [${timestamp}] ADDING TO QUEUE`);
+    console.log(`   Box ID: ${boxId}`);
+    console.log(`   Coordinates: (${x}, ${y}) - ${width}x${height}`);
+    console.log(`   Currently saving: ${currentlySaving}`);
+    console.log(`   Queue length before: ${templateSaveQueue.length}`);
+    console.log('═══════════════════════════════════════════════════════════');
+    console.log('');
 
     // Add to queue
     templateSaveQueue.push({boxId, x, y, width, height});
-    console.log('>>> Queue length after add:', templateSaveQueue.length);
+
+    console.log(`   Queue length after: ${templateSaveQueue.length}`);
+    console.log(`   Queue contents: ${JSON.stringify(templateSaveQueue.map(item => item.boxId))}`);
 
     // Process queue if not already processing
     if (!currentlySaving) {
-        console.log('>>> Starting queue processing NOW');
+        console.log(`   ✅ Starting queue processing NOW for Box ${boxId}`);
         processTemplateSaveQueue();
     } else {
-        console.log('>>> Queue is already processing, item will be processed later');
+        console.log(`   ⏸️ Queue is already processing, Box ${boxId} will be processed later`);
     }
 }
 
 async function processTemplateSaveQueue() {
     if (templateSaveQueue.length === 0) {
         currentlySaving = false;
-        console.log('✅ Template save queue empty');
+        console.log('');
+        console.log('✅✅✅ QUEUE EMPTY - All templates processed ✅✅✅');
+        console.log('');
         return;
     }
 
     currentlySaving = true;
     const {boxId, x, y, width, height} = templateSaveQueue.shift();
 
-    console.log(`>>> [${new Date().toISOString()}] Processing template save for box:`, boxId);
-    console.log('>>> Remaining in queue:', templateSaveQueue.length);
+    const timestamp = new Date().toISOString();
+    console.log('');
+    console.log('▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓');
+    console.log(`📋 [${timestamp}] PROCESSING FROM QUEUE`);
+    console.log(`   Box ID: ${boxId}`);
+    console.log(`   Remaining in queue: ${templateSaveQueue.length}`);
+    console.log(`   Queue contents: ${JSON.stringify(templateSaveQueue.map(item => item.boxId))}`);
+    console.log('▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓');
+    console.log('');
 
     // CRITICAL FIX: Show modal IMMEDIATELY with loading state
+    console.log(`🔔 [${timestamp}] SHOWING MODAL FOR BOX: ${boxId}`);
     const modalPromise = showBusinessNameModalAsync(boxId, null); // null = loading state
 
     try {
-        console.log(`>>> [${new Date().toISOString()}] Sending request for box:`, boxId);
+        console.log(`📤 [${new Date().toISOString()}] SENDING API REQUEST for Box: ${boxId}`);
         const response = await fetch(`/api/save_template/${boxId}`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({x, y, width, height, auto_saved: true})
         });
 
-        console.log(`>>> [${new Date().toISOString()}] Received response for box:`, boxId);
+        const receiveTimestamp = new Date().toISOString();
+        console.log(`📥 [${receiveTimestamp}] RECEIVED API RESPONSE for Box: ${boxId}`);
         const data = await response.json();
-        console.log('>>> Response data:', data);
-        console.log('>>> Suggested names:', data.suggested_names);
+        console.log(`   Response for Box ${boxId}:`, data);
+        console.log(`   Suggested names for Box ${boxId}:`, data.suggested_names);
 
         if (data.needs_business_name) {
-            console.log(`🔔 [${new Date().toISOString()}] POPULATING MODAL FOR BOX:`, boxId);
-            console.log('>>> Modal suggestions:', data.suggested_names);
+            console.log('');
+            console.log('🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨');
+            console.log(`🎨 POPULATING MODAL FOR BOX: ${boxId}`);
+            console.log(`🎨 Suggestions: ${JSON.stringify(data.suggested_names)}`);
+            console.log('🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨');
+            console.log('');
             // Populate the already-visible modal with data
             populateBusinessNameModal(boxId, data.suggested_names);
             // Wait for user input before processing next
+            console.log(`⏸️ WAITING for user to complete modal for Box ${boxId}...`);
             await modalPromise;
-            console.log('✅ User completed business name modal');
+            console.log(`✅ User completed modal for Box ${boxId}`);
         } else if (data.success) {
-            console.log('✅ Template saved:', data.template_id);
+            console.log(`✅ Template saved successfully: ${data.template_id}`);
             // Close the modal if it's showing
             cancelBusinessNamePrompt();
             if (window.resolveBusinessNameModal) {
@@ -2889,7 +2918,7 @@ async function processTemplateSaveQueue() {
                 window.resolveBusinessNameModal = null;
             }
         } else {
-            console.error('❌ Template save failed:', data.error);
+            console.error(`❌ Template save failed for Box ${boxId}:`, data.error);
             cancelBusinessNamePrompt();
             if (window.resolveBusinessNameModal) {
                 window.resolveBusinessNameModal();
@@ -2897,8 +2926,8 @@ async function processTemplateSaveQueue() {
             }
         }
     } catch (error) {
-        console.error('>>> FETCH ERROR:', error);
-        console.error('>>> Error stack:', error.stack);
+        console.error(`❌❌❌ FETCH ERROR for Box ${boxId}:`, error);
+        console.error('Error stack:', error.stack);
         cancelBusinessNamePrompt();
         if (window.resolveBusinessNameModal) {
             window.resolveBusinessNameModal();
@@ -2907,6 +2936,9 @@ async function processTemplateSaveQueue() {
     }
 
     // Process next item in queue
+    console.log('');
+    console.log(`➡️ Moving to next item in queue...`);
+    console.log('');
     processTemplateSaveQueue();
 }
 
@@ -2929,12 +2961,14 @@ function showBusinessNameModalAsync(boxId, suggestedNames) {
 
 function promptBusinessNameLoading(boxId) {
     console.log('🔔 promptBusinessNameLoading called for box:', boxId);
+    console.log('🔔 This modal will show data for BOX ID:', boxId);
 
     // CRITICAL: Clear any previous dialog first
     cancelBusinessNamePrompt();
 
     // Store current box ID for submission
     window.currentBoxId = boxId;
+    console.log('🔔 Stored window.currentBoxId =', window.currentBoxId);
 
     const dialog = document.createElement('div');
     dialog.style.cssText = `
@@ -2952,8 +2986,9 @@ function promptBusinessNameLoading(boxId) {
 
     dialog.innerHTML = `
         <h3>Select Business Name for Template</h3>
+        <p style="font-size: 12px; color: #666;">Box ID: ${boxId}</p>
         <div id="modalContent" style="padding: 20px; text-align: center;">
-            <p>Loading ad text...</p>
+            <p>Loading ad text for Box ${boxId}...</p>
             <div style="margin: 20px 0;">⏳</div>
         </div>
     `;
@@ -2977,7 +3012,8 @@ function promptBusinessNameLoading(boxId) {
 }
 
 function populateBusinessNameModal(boxId, suggestedNames) {
-    console.log('📝 populateBusinessNameModal called:', {boxId, suggestedNames});
+    console.log('📝 populateBusinessNameModal called for BOX ID:', boxId);
+    console.log('📝 Suggested names:', suggestedNames);
 
     const modalContent = document.getElementById('modalContent');
     if (!modalContent) {
@@ -2987,8 +3023,10 @@ function populateBusinessNameModal(boxId, suggestedNames) {
 
     // Update box ID
     window.currentBoxId = boxId;
+    console.log('📝 Updated window.currentBoxId to:', boxId);
 
-    let html = '<p>Detected text from ad:</p>';
+    let html = `<p><strong>Box ID: ${boxId}</strong></p>`;
+    html += '<p>Detected text from ad:</p>';
 
     if (suggestedNames && suggestedNames.length > 0) {
         html += '<div style="margin: 10px 0;">';

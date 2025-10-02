@@ -2827,13 +2827,19 @@ let currentlySaving = false;
 
 async function autoSaveTemplate(boxId, x, y, width, height) {
     console.log('>>> Adding to template save queue:', boxId);
+    console.log('>>> Currently saving:', currentlySaving);
+    console.log('>>> Queue length before add:', templateSaveQueue.length);
 
     // Add to queue
     templateSaveQueue.push({boxId, x, y, width, height});
+    console.log('>>> Queue length after add:', templateSaveQueue.length);
 
     // Process queue if not already processing
     if (!currentlySaving) {
+        console.log('>>> Starting queue processing NOW');
         processTemplateSaveQueue();
+    } else {
+        console.log('>>> Queue is already processing, item will be processed later');
     }
 }
 
@@ -2847,21 +2853,25 @@ async function processTemplateSaveQueue() {
     currentlySaving = true;
     const {boxId, x, y, width, height} = templateSaveQueue.shift();
 
-    console.log('>>> Processing template save for box:', boxId);
+    console.log(`>>> [${new Date().toISOString()}] Processing template save for box:`, boxId);
     console.log('>>> Remaining in queue:', templateSaveQueue.length);
 
     try {
+        console.log(`>>> [${new Date().toISOString()}] Sending request for box:`, boxId);
         const response = await fetch(`/api/save_template/${boxId}`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
             body: JSON.stringify({x, y, width, height, auto_saved: true})
         });
 
+        console.log(`>>> [${new Date().toISOString()}] Received response for box:`, boxId);
         const data = await response.json();
-        console.log('>>> Response for box', boxId, ':', data);
+        console.log('>>> Response data:', data);
+        console.log('>>> Suggested names:', data.suggested_names);
 
         if (data.needs_business_name) {
-            console.log('🔔 SHOWING BUSINESS NAME MODAL');
+            console.log(`🔔 [${new Date().toISOString()}] SHOWING BUSINESS NAME MODAL FOR BOX:`, boxId);
+            console.log('>>> Modal suggestions:', data.suggested_names);
             // Show modal and WAIT for user input before processing next
             await showBusinessNameModalAsync(boxId, data.suggested_names);
             console.log('✅ User completed business name modal');

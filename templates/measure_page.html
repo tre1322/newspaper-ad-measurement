@@ -2856,6 +2856,9 @@ async function processTemplateSaveQueue() {
     console.log(`>>> [${new Date().toISOString()}] Processing template save for box:`, boxId);
     console.log('>>> Remaining in queue:', templateSaveQueue.length);
 
+    // CRITICAL FIX: Show modal IMMEDIATELY with loading state
+    const modalPromise = showBusinessNameModalAsync(boxId, null); // null = loading state
+
     try {
         console.log(`>>> [${new Date().toISOString()}] Sending request for box:`, boxId);
         const response = await fetch(`/api/save_template/${boxId}`, {
@@ -2870,19 +2873,37 @@ async function processTemplateSaveQueue() {
         console.log('>>> Suggested names:', data.suggested_names);
 
         if (data.needs_business_name) {
-            console.log(`🔔 [${new Date().toISOString()}] SHOWING BUSINESS NAME MODAL FOR BOX:`, boxId);
+            console.log(`🔔 [${new Date().toISOString()}] POPULATING MODAL FOR BOX:`, boxId);
             console.log('>>> Modal suggestions:', data.suggested_names);
-            // Show modal and WAIT for user input before processing next
-            await showBusinessNameModalAsync(boxId, data.suggested_names);
+            // Populate the already-visible modal with data
+            populateBusinessNameModal(boxId, data.suggested_names);
+            // Wait for user input before processing next
+            await modalPromise;
             console.log('✅ User completed business name modal');
         } else if (data.success) {
             console.log('✅ Template saved:', data.template_id);
+            // Close the modal if it's showing
+            cancelBusinessNamePrompt();
+            if (window.resolveBusinessNameModal) {
+                window.resolveBusinessNameModal();
+                window.resolveBusinessNameModal = null;
+            }
         } else {
             console.error('❌ Template save failed:', data.error);
+            cancelBusinessNamePrompt();
+            if (window.resolveBusinessNameModal) {
+                window.resolveBusinessNameModal();
+                window.resolveBusinessNameModal = null;
+            }
         }
     } catch (error) {
         console.error('>>> FETCH ERROR:', error);
         console.error('>>> Error stack:', error.stack);
+        cancelBusinessNamePrompt();
+        if (window.resolveBusinessNameModal) {
+            window.resolveBusinessNameModal();
+            window.resolveBusinessNameModal = null;
+        }
     }
 
     // Process next item in queue
@@ -2896,9 +2917,104 @@ function showBusinessNameModalAsync(boxId, suggestedNames) {
         // Store resolve function to call when user submits
         window.resolveBusinessNameModal = resolve;
 
-        // Show the modal
-        promptBusinessName(boxId, suggestedNames);
+        if (suggestedNames === null) {
+            // Show modal with loading state
+            promptBusinessNameLoading(boxId);
+        } else {
+            // Show modal with data
+            promptBusinessName(boxId, suggestedNames);
+        }
     });
+}
+
+function promptBusinessNameLoading(boxId) {
+    console.log('🔔 promptBusinessNameLoading called for box:', boxId);
+
+    // CRITICAL: Clear any previous dialog first
+    cancelBusinessNamePrompt();
+
+    // Store current box ID for submission
+    window.currentBoxId = boxId;
+
+    const dialog = document.createElement('div');
+    dialog.style.cssText = `
+        position: fixed;
+        top: 50%;
+        left: 50%;
+        transform: translate(-50%, -50%);
+        background: white;
+        padding: 20px;
+        border-radius: 8px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+        z-index: 10000;
+        min-width: 400px;
+    `;
+
+    dialog.innerHTML = `
+        <h3>Select Business Name for Template</h3>
+        <div id="modalContent" style="padding: 20px; text-align: center;">
+            <p>Loading ad text...</p>
+            <div style="margin: 20px 0;">⏳</div>
+        </div>
+    `;
+
+    dialog.id = 'businessNameDialog';
+    document.body.appendChild(dialog);
+
+    // Add backdrop
+    const backdrop = document.createElement('div');
+    backdrop.id = 'businessNameBackdrop';
+    backdrop.style.cssText = `
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(0,0,0,0.5);
+        z-index: 9999;
+    `;
+    document.body.appendChild(backdrop);
+}
+
+function populateBusinessNameModal(boxId, suggestedNames) {
+    console.log('📝 populateBusinessNameModal called:', {boxId, suggestedNames});
+
+    const modalContent = document.getElementById('modalContent');
+    if (!modalContent) {
+        console.error('❌ Modal content element not found!');
+        return;
+    }
+
+    // Update box ID
+    window.currentBoxId = boxId;
+
+    let html = '<p>Detected text from ad:</p>';
+
+    if (suggestedNames && suggestedNames.length > 0) {
+        html += '<div style="margin: 10px 0;">';
+        suggestedNames.forEach((name, idx) => {
+            html += `
+                <label style="display: block; padding: 8px; cursor: pointer; border: 1px solid #ddd; margin: 5px 0; border-radius: 4px;">
+                    <input type="radio" name="businessName" value="${name}" ${idx === 0 ? 'checked' : ''}>
+                    ${name}
+                </label>
+            `;
+        });
+        html += '</div>';
+    } else {
+        html += '<p style="color: #999;">No text detected</p>';
+    }
+
+    html += `
+        <p>Or enter custom name:</p>
+        <input type="text" id="customBusinessName" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin: 10px 0;">
+        <div style="margin-top: 15px; text-align: right;">
+            <button onclick="cancelBusinessNamePrompt()" style="padding: 8px 16px; margin-right: 10px; background: #ccc; border: none; border-radius: 4px; cursor: pointer;">Cancel</button>
+            <button onclick="confirmBusinessName()" style="padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">Save Template</button>
+        </div>
+    `;
+
+    modalContent.innerHTML = html;
 }
 
 function savePendingTemplates() {

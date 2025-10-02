@@ -11,8 +11,9 @@ try:
     import imagehash
     import pytesseract
     TEMPLATE_MATCHING_AVAILABLE = True
-    # Configure Tesseract path for Windows
-    pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
+    # Configure Tesseract path for Windows (only on Windows)
+    if os.name == 'nt':
+        pytesseract.pytesseract.tesseract_cmd = r'C:\Program Files\Tesseract-OCR\tesseract.exe'
 except ImportError:
     TEMPLATE_MATCHING_AVAILABLE = False
     print("Warning: Template matching dependencies not available (imagehash, pytesseract)")

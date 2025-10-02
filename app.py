@@ -10903,29 +10903,41 @@ def save_template(box_id):
         phash_value = str(imagehash.phash(template_pil, hash_size=16))
         print(f"🔑 Template hash (grayscale + blur): {phash_value}")
 
-        # Extract business name via OCR (in addition to phash)
+        # Extract all text via OCR
         try:
             extracted_text = pytesseract.image_to_string(template_pil, config='--psm 6').strip()
-            business_name = None
-            for line in extracted_text.split('\n'):
-                line = line.strip()
-                if len(line) > 5:
-                    business_name = line.upper()
-                    break
-            print(f"📝 OCR business name: {business_name}")
+            # Don't auto-select business name - return options to user
+            lines = [line.strip() for line in extracted_text.split('\n') if len(line.strip()) > 3]
+            suggested_names = lines[:5]  # Top 5 lines as suggestions
+            print(f"📝 OCR extracted {len(lines)} potential business name lines")
+            print(f"📝 Suggested names: {suggested_names}")
         except Exception as e:
             print(f"⚠️ OCR extraction failed: {e}")
             extracted_text = ""
-            business_name = None
+            suggested_names = []
 
         print(f"{'='*60}\n")
 
-        # Save to database
+        # Check if business_name was provided in request
+        business_name = data.get('business_name')
+
+        if not business_name:
+            # Return suggestions to frontend for user confirmation
+            return jsonify({
+                'success': True,
+                'template_id': None,
+                'ocr_text': extracted_text,
+                'suggested_names': suggested_names,
+                'needs_business_name': True,
+                'box_id': box_id
+            })
+
+        # Business name confirmed - save to database
         template_id = str(uuid.uuid4())
         template = Template(
             id=template_id,
             image_data=image_bytes,
-            business_name=business_name,
+            business_name=business_name.upper(),
             ocr_text=extracted_text,
             phash=phash_value,
             x=x,
@@ -10943,7 +10955,8 @@ def save_template(box_id):
         return jsonify({
             'success': True,
             'message': 'Template saved successfully',
-            'template_id': template_id
+            'template_id': template_id,
+            'needs_business_name': False
         })
 
     except Exception as e:

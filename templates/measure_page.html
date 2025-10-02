@@ -2715,8 +2715,16 @@ function saveAdTemplate(boxId, businessName = null) {
 function promptBusinessName(boxId, suggestedNames) {
     console.log('🔔 promptBusinessName called:', {boxId, suggestedNames});
 
-    // CRITICAL: Clear any previous dialog first
-    cancelBusinessNamePrompt();
+    // CRITICAL: Clear any previous dialog WITHOUT resolving the promise
+    const oldDialog = document.getElementById('businessNameDialog');
+    const oldBackdrop = document.getElementById('businessNameBackdrop');
+    if (oldDialog) {
+        console.log('⚠️ Removing old dialog element (without resolving promise)');
+        oldDialog.remove();
+    }
+    if (oldBackdrop) {
+        oldBackdrop.remove();
+    }
 
     // Store current box ID for submission
     window.currentBoxId = boxId;
@@ -2963,8 +2971,16 @@ function promptBusinessNameLoading(boxId) {
     console.log('🔔 promptBusinessNameLoading called for box:', boxId);
     console.log('🔔 This modal will show data for BOX ID:', boxId);
 
-    // CRITICAL: Clear any previous dialog first
-    cancelBusinessNamePrompt();
+    // CRITICAL: Clear any previous dialog WITHOUT resolving the promise
+    const oldDialog = document.getElementById('businessNameDialog');
+    const oldBackdrop = document.getElementById('businessNameBackdrop');
+    if (oldDialog) {
+        console.log('⚠️ Removing old dialog element (without resolving promise)');
+        oldDialog.remove();
+    }
+    if (oldBackdrop) {
+        oldBackdrop.remove();
+    }
 
     // Store current box ID for submission
     window.currentBoxId = boxId;

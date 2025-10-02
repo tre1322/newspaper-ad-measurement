@@ -10975,10 +10975,25 @@ def match_templates(page_id):
         print(f"📏 Page image shape: {img.shape}")
         page_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-        # Extract ALL text from entire page once (much faster than per-region OCR)
-        print("📝 Extracting text from entire page...")
-        page_text = pytesseract.image_to_string(page_pil, config='--psm 6').upper()
-        print(f"Extracted {len(page_text)} characters from page")
+        # Extract text with bounding boxes
+        print("📝 Extracting text with positions...")
+        ocr_data = pytesseract.image_to_data(page_pil, config='--psm 6', output_type=pytesseract.Output.DICT)
+
+        # Build searchable text with positions
+        words_data = []
+        for i in range(len(ocr_data['text'])):
+            word = ocr_data['text'][i].strip()
+            if word:
+                words_data.append({
+                    'text': word.upper(),
+                    'x': ocr_data['left'][i],
+                    'y': ocr_data['top'][i],
+                    'width': ocr_data['width'][i],
+                    'height': ocr_data['height'][i],
+                    'conf': ocr_data['conf'][i]
+                })
+
+        print(f"✅ Extracted {len(words_data)} words with positions")
 
         # Load templates (metadata only)
         from datetime import timedelta
@@ -11003,7 +11018,7 @@ def match_templates(page_id):
 
         matches_found = []
 
-        # Test each template
+        # For each template, search for business name in OCR results
         for template in templates:
             if not template.business_name:
                 print(f"⚠️ Template {template.id} has no business name, skipping")
@@ -11012,35 +11027,54 @@ def match_templates(page_id):
             print(f"\n=== Testing template {template.id} ===")
             print(f"📝 Looking for: {template.business_name}")
 
-            # Simple text search - if business name appears anywhere on page
-            if template.business_name.upper() in page_text:
-                print(f"✅ OCR MATCH - Business name found on page!")
+            # Split business name into words for matching
+            name_words = template.business_name.strip().split()
 
-                # Use original template coordinates as best guess
-                x, y = template.x, template.y
-                template_w = template.width
-                template_h = template.height
+            # Search for business name words in OCR data
+            found = False
+            for i, word_data in enumerate(words_data):
+                if word_data['text'] == name_words[0].upper():
+                    # First word matches - check if subsequent words match
+                    match = True
+                    for j, name_word in enumerate(name_words[1:], 1):
+                        if i+j >= len(words_data) or words_data[i+j]['text'] != name_word.upper():
+                            match = False
+                            break
 
-                # Check overlap with existing boxes
-                overlaps = False
-                for existing_box in AdBox.query.filter_by(page_id=page_id).all():
-                    if (abs(x - existing_box.x) < template_w/2 and
-                        abs(y - existing_box.y) < template_h/2):
-                        overlaps = True
+                    if match:
+                        # Found the business name - use its position
+                        x = word_data['x']
+                        y = word_data['y']
+                        # Use template dimensions as best guess for box size
+                        width = template.width
+                        height = template.height
+
+                        print(f"✅ FOUND at position ({x}, {y})")
+
+                        # Check overlap with existing boxes
+                        overlaps = False
+                        for existing_box in AdBox.query.filter_by(page_id=page_id).all():
+                            if (abs(x - existing_box.x) < width/2 and
+                                abs(y - existing_box.y) < height/2):
+                                overlaps = True
+                                break
+
+                        if not overlaps:
+                            matches_found.append({
+                                'x': x,
+                                'y': y,
+                                'width': width,
+                                'height': height,
+                                'column_inches': template.column_inches if template.column_inches else 0
+                            })
+                            print(f"✅ MATCH ADDED at ({x}, {y})")
+                        else:
+                            print(f"⚠️ Match found but overlaps with existing box")
+
+                        found = True
                         break
 
-                if not overlaps:
-                    matches_found.append({
-                        'x': int(x),
-                        'y': int(y),
-                        'width': template_w,
-                        'height': template_h,
-                        'column_inches': template.column_inches if template.column_inches else 0
-                    })
-                    print(f"✅ MATCH ADDED at ({x}, {y})")
-                else:
-                    print(f"⚠️ Match found but overlaps with existing box")
-            else:
+            if not found:
                 print(f"❌ Business name not found on page")
 
         # Create boxes for matches

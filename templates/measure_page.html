@@ -2701,14 +2701,14 @@ function saveAdTemplate(boxId, businessName = null) {
             // Show business name selection dialog
             promptBusinessName(boxId, data.suggested_names);
         } else if (data.success) {
-            showMessage(data.message, 'success');
+            showSuccessMessage(data.message);
         } else {
-            showMessage('Template save failed: ' + data.error, 'error');
+            showErrorMessage('Template save failed: ' + data.error);
         }
     })
     .catch(error => {
         console.error('Template save error:', error);
-        showMessage('Error saving template', 'error');
+        showErrorMessage('Error saving template');
     });
 }
 
@@ -2804,15 +2804,26 @@ function confirmBusinessName() {
         return;
     }
 
-    console.log('✅ User confirmed business name:', businessName);
+    console.log('✅✅✅ User confirmed business name:', businessName, 'for Box:', boxId);
 
-    // Close modal
-    cancelBusinessNamePrompt();
+    // Close modal MANUALLY (don't use cancelBusinessNamePrompt - it resolves the promise)
+    const dialog = document.getElementById('businessNameDialog');
+    const backdrop = document.getElementById('businessNameBackdrop');
+    if (dialog) {
+        console.log('   Removing dialog');
+        dialog.remove();
+    }
+    if (backdrop) {
+        console.log('   Removing backdrop');
+        backdrop.remove();
+    }
 
     // Save with business name
+    console.log('   Calling saveAdTemplate for Box:', boxId, 'with name:', businessName);
     saveAdTemplate(boxId, businessName);
 
     // Resolve the promise to continue queue processing
+    console.log('   Resolving promise to continue queue');
     if (window.resolveBusinessNameModal) {
         window.resolveBusinessNameModal();
         window.resolveBusinessNameModal = null;
@@ -2820,14 +2831,23 @@ function confirmBusinessName() {
 }
 
 function cancelBusinessNamePrompt() {
+    console.log('🚫🚫🚫 cancelBusinessNamePrompt CALLED');
+    console.trace('Call stack:');  // This will show WHERE it was called from
+
     const dialog = document.getElementById('businessNameDialog');
     const backdrop = document.getElementById('businessNameBackdrop');
+
+    console.log('   Dialog exists:', !!dialog);
+    console.log('   Backdrop exists:', !!backdrop);
+    console.log('   Current Box ID:', window.currentBoxId);
+    console.log('   Resolve function exists:', !!window.resolveBusinessNameModal);
+
     if (dialog) dialog.remove();
     if (backdrop) backdrop.remove();
 
     // Resolve the promise to continue queue processing (even if cancelled)
     if (window.resolveBusinessNameModal) {
-        console.log('⚠️ User cancelled business name modal');
+        console.log('⚠️ User cancelled business name modal - RESOLVING PROMISE');
         window.resolveBusinessNameModal();
         window.resolveBusinessNameModal = null;
     }
@@ -2886,12 +2906,12 @@ async function processTemplateSaveQueue() {
     console.log('▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓');
     console.log('');
 
-    // CRITICAL FIX: Show modal IMMEDIATELY with loading state
-    console.log(`🔔 [${timestamp}] SHOWING MODAL FOR BOX: ${boxId}`);
-    const modalPromise = showBusinessNameModalAsync(boxId, null); // null = loading state
+    // SHOW MODAL IMMEDIATELY - no loading, no waiting for API
+    console.log(`🔔 [${timestamp}] SHOWING MODAL IMMEDIATELY FOR BOX: ${boxId}`);
+    const modalPromise = showBusinessNameModalAsync(boxId, []); // Empty array = show input field right away
 
     try {
-        console.log(`📤 [${new Date().toISOString()}] SENDING API REQUEST for Box: ${boxId}`);
+        console.log(`📤 [${new Date().toISOString()}] SENDING API REQUEST for Box: ${boxId} (in background)`);
         const response = await fetch(`/api/save_template/${boxId}`, {
             method: 'POST',
             headers: {'Content-Type': 'application/json'},
@@ -2904,43 +2924,25 @@ async function processTemplateSaveQueue() {
         console.log(`   Response for Box ${boxId}:`, data);
         console.log(`   Suggested names for Box ${boxId}:`, data.suggested_names);
 
-        if (data.needs_business_name) {
+        if (data.needs_business_name && data.suggested_names && data.suggested_names.length > 0) {
             console.log('');
-            console.log('🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨');
-            console.log(`🎨 POPULATING MODAL FOR BOX: ${boxId}`);
+            console.log('🎨 OCR SUGGESTIONS RECEIVED - Updating modal with suggestions');
             console.log(`🎨 Suggestions: ${JSON.stringify(data.suggested_names)}`);
-            console.log('🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨🎨');
             console.log('');
-            // Populate the already-visible modal with data
+            // Update the modal with OCR suggestions if available
             populateBusinessNameModal(boxId, data.suggested_names);
-            // Wait for user input before processing next
-            console.log(`⏸️ WAITING for user to complete modal for Box ${boxId}...`);
-            await modalPromise;
-            console.log(`✅ User completed modal for Box ${boxId}`);
-        } else if (data.success) {
-            console.log(`✅ Template saved successfully: ${data.template_id}`);
-            // Close the modal if it's showing
-            cancelBusinessNamePrompt();
-            if (window.resolveBusinessNameModal) {
-                window.resolveBusinessNameModal();
-                window.resolveBusinessNameModal = null;
-            }
-        } else {
-            console.error(`❌ Template save failed for Box ${boxId}:`, data.error);
-            cancelBusinessNamePrompt();
-            if (window.resolveBusinessNameModal) {
-                window.resolveBusinessNameModal();
-                window.resolveBusinessNameModal = null;
-            }
         }
+
+        // Wait for user input before processing next
+        console.log(`⏸️ WAITING for user to complete modal for Box ${boxId}...`);
+        await modalPromise;
+        console.log(`✅ User completed modal for Box ${boxId}`);
+
     } catch (error) {
         console.error(`❌❌❌ FETCH ERROR for Box ${boxId}:`, error);
         console.error('Error stack:', error.stack);
-        cancelBusinessNamePrompt();
-        if (window.resolveBusinessNameModal) {
-            window.resolveBusinessNameModal();
-            window.resolveBusinessNameModal = null;
-        }
+        // Even on error, wait for user to close modal
+        await modalPromise;
     }
 
     // Process next item in queue
@@ -2957,13 +2959,9 @@ function showBusinessNameModalAsync(boxId, suggestedNames) {
         // Store resolve function to call when user submits
         window.resolveBusinessNameModal = resolve;
 
-        if (suggestedNames === null) {
-            // Show modal with loading state
-            promptBusinessNameLoading(boxId);
-        } else {
-            // Show modal with data
-            promptBusinessName(boxId, suggestedNames);
-        }
+        // Always show modal with input field immediately
+        // If we have suggestions, show them; if not, just show empty input
+        promptBusinessName(boxId, suggestedNames || []);
     });
 }
 

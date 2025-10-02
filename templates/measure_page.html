@@ -2815,6 +2815,14 @@ function autoSaveTemplate(boxId, x, y, width, height) {
     })
     .then(data => {
         console.log('>>> Response data:', data);
+
+        // Check if business name confirmation needed
+        if (data.needs_business_name) {
+            console.log('🔔 SHOWING BUSINESS NAME MODAL');
+            promptBusinessName(boxId, data.suggested_names);
+            return; // Don't continue - wait for user input
+        }
+
         if (data.success) {
             console.log('Template saved:', data.template_id);
         } else {

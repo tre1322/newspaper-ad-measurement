@@ -39,7 +39,7 @@ from dotenv import load_dotenv
 from functools import wraps
 from werkzeug.utils import secure_filename
 
-# PIL imports - ImageFilter is optional for template matc
+# PIL imports - ImageFilter is optional for template matching
 try:
     from PIL import Image, ImageDraw, ImageFont, ImageFilter
 except ImportError:

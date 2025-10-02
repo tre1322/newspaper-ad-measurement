@@ -2792,8 +2792,19 @@ function confirmBusinessName() {
         return;
     }
 
+    console.log('✅ User confirmed business name:', businessName);
+
+    // Close modal
     cancelBusinessNamePrompt();
+
+    // Save with business name
     saveAdTemplate(boxId, businessName);
+
+    // Resolve the promise to continue queue processing
+    if (window.resolveBusinessNameModal) {
+        window.resolveBusinessNameModal();
+        window.resolveBusinessNameModal = null;
+    }
 }
 
 function cancelBusinessNamePrompt() {
@@ -2801,62 +2812,82 @@ function cancelBusinessNamePrompt() {
     const backdrop = document.getElementById('businessNameBackdrop');
     if (dialog) dialog.remove();
     if (backdrop) backdrop.remove();
+
+    // Resolve the promise to continue queue processing (even if cancelled)
+    if (window.resolveBusinessNameModal) {
+        console.log('⚠️ User cancelled business name modal');
+        window.resolveBusinessNameModal();
+        window.resolveBusinessNameModal = null;
+    }
 }
 
-function autoSaveTemplate(boxId, x, y, width, height) {
-    console.log('>>> autoSaveTemplate called with:', {boxId, x, y, width, height});
+// Template save queue to prevent race conditions
+let templateSaveQueue = [];
+let currentlySaving = false;
 
-    // Prevent race conditions where multiple template saves overlap
-    if (window.savingTemplate) {
-        console.log('Already saving a template, skipping');
+async function autoSaveTemplate(boxId, x, y, width, height) {
+    console.log('>>> Adding to template save queue:', boxId);
+
+    // Add to queue
+    templateSaveQueue.push({boxId, x, y, width, height});
+
+    // Process queue if not already processing
+    if (!currentlySaving) {
+        processTemplateSaveQueue();
+    }
+}
+
+async function processTemplateSaveQueue() {
+    if (templateSaveQueue.length === 0) {
+        currentlySaving = false;
+        console.log('✅ Template save queue empty');
         return;
     }
-    window.savingTemplate = true;
 
-    const url = `/api/save_template/${boxId}`;
-    console.log('>>> Fetching URL:', url);
+    currentlySaving = true;
+    const {boxId, x, y, width, height} = templateSaveQueue.shift();
 
-    const payload = {
-        x: x,
-        y: y,
-        width: width,
-        height: height,
-        auto_saved: true
-    };
-    console.log('>>> Payload:', payload);
+    console.log('>>> Processing template save for box:', boxId);
+    console.log('>>> Remaining in queue:', templateSaveQueue.length);
 
-    fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-    })
-    .then(response => {
-        console.log('>>> Fetch response received:', response.status);
-        return response.json();
-    })
-    .then(data => {
-        console.log('>>> Response data:', data);
+    try {
+        const response = await fetch(`/api/save_template/${boxId}`, {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({x, y, width, height, auto_saved: true})
+        });
 
-        // Check if business name confirmation needed
+        const data = await response.json();
+        console.log('>>> Response for box', boxId, ':', data);
+
         if (data.needs_business_name) {
             console.log('🔔 SHOWING BUSINESS NAME MODAL');
-            promptBusinessName(boxId, data.suggested_names);
-            window.savingTemplate = false; // Reset flag when waiting for user input
-            return; // Don't continue - wait for user input
-        }
-
-        if (data.success) {
-            console.log('Template saved:', data.template_id);
+            // Show modal and WAIT for user input before processing next
+            await showBusinessNameModalAsync(boxId, data.suggested_names);
+            console.log('✅ User completed business name modal');
+        } else if (data.success) {
+            console.log('✅ Template saved:', data.template_id);
         } else {
-            console.log('Template save failed:', data.error);
+            console.error('❌ Template save failed:', data.error);
         }
-
-        window.savingTemplate = false; // Reset flag after handling response
-    })
-    .catch(error => {
+    } catch (error) {
         console.error('>>> FETCH ERROR:', error);
         console.error('>>> Error stack:', error.stack);
-        window.savingTemplate = false; // Reset flag on error
+    }
+
+    // Process next item in queue
+    processTemplateSaveQueue();
+}
+
+function showBusinessNameModalAsync(boxId, suggestedNames) {
+    return new Promise((resolve) => {
+        console.log('🔔 showBusinessNameModalAsync called:', {boxId, suggestedNames});
+
+        // Store resolve function to call when user submits
+        window.resolveBusinessNameModal = resolve;
+
+        // Show the modal
+        promptBusinessName(boxId, suggestedNames);
     });
 }
 

@@ -10975,13 +10975,29 @@ def match_templates(page_id):
         print(f"📏 Page image shape: {img.shape}")
         page_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
 
-        # Load templates from database
-        templates = Template.query.all()
+        # Load templates from database - only load metadata, not image_data
+        # Only match against templates from the last 6 months to improve performance
+        from datetime import timedelta
+        six_months_ago = datetime.utcnow() - timedelta(days=180)
+
+        # Load only the metadata we need, not the full image_data blob
+        templates = Template.query.filter(
+            Template.created_at >= six_months_ago
+        ).with_entities(
+            Template.id,
+            Template.phash,
+            Template.business_name,
+            Template.x,
+            Template.y,
+            Template.width,
+            Template.height,
+            Template.column_inches
+        ).all()
 
         if not templates:
             return jsonify({'success': True, 'matches': 0, 'message': 'No templates found'})
 
-        print(f"🎯 Total templates to test: {len(templates)}")
+        print(f"🎯 Total templates to test: {len(templates)} (from last 6 months)")
         print(f"{'='*60}\n")
 
         matches_found = []
@@ -10992,8 +11008,17 @@ def match_templates(page_id):
                 print(f"⚠️ Template {template.id} missing hash, skipping")
                 continue
 
-            # Load template image from database bytes
-            template_img = Image.open(io.BytesIO(template.image_data))
+            # Load template image from database bytes (only when needed)
+            # Fetch only the image_data for this specific template
+            template_image_data = db.session.query(Template.image_data).filter(
+                Template.id == template.id
+            ).scalar()
+
+            if not template_image_data:
+                print(f"⚠️ Template {template.id} has no image data, skipping")
+                continue
+
+            template_img = Image.open(io.BytesIO(template_image_data))
 
             # Convert to grayscale
             if template_img.mode != 'L':

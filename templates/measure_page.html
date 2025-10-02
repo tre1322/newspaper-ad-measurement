@@ -2778,6 +2778,12 @@ function promptBusinessName(boxId, suggestedNames) {
     dialog.innerHTML = html;
     dialog.id = 'businessNameDialog';
 
+    // CRITICAL: Stop clicks from propagating through modal
+    dialog.addEventListener('click', function(e) {
+        e.stopPropagation();
+        console.log('🛑 Dialog click stopped propagation');
+    });
+
     console.log('📋 Appending dialog to document.body');
     document.body.appendChild(dialog);
     console.log('✅ Dialog appended - should be visible NOW');
@@ -2794,6 +2800,13 @@ function promptBusinessName(boxId, suggestedNames) {
         background: rgba(0,0,0,0.5);
         z-index: 9999;
     `;
+
+    // CRITICAL: Stop clicks on backdrop from propagating
+    backdrop.addEventListener('click', function(e) {
+        e.stopPropagation();
+        console.log('🛑 Backdrop click stopped propagation');
+    });
+
     document.body.appendChild(backdrop);
 }
 

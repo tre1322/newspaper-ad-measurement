@@ -11055,34 +11055,53 @@ def match_templates(page_id):
                             break
 
                     if match:
-                        # Found the business name - use its position
-                        x = word_data['x']
-                        y = word_data['y']
-                        # Use template dimensions as best guess for box size
-                        width = template.width
-                        height = template.height
+                        # Found the business name at this position
+                        text_x = word_data['x']
+                        text_y = word_data['y']
 
-                        print(f"✅ FOUND at position ({x}, {y})")
+                        print(f"✅ FOUND business name at position ({text_x}, {text_y})")
+                        print(f"🔍 Detecting actual ad boundaries around this text...")
 
-                        # Check overlap with existing boxes
-                        overlaps = False
-                        for existing_box in AdBox.query.filter_by(page_id=page_id).all():
-                            if (abs(x - existing_box.x) < width/2 and
-                                abs(y - existing_box.y) < height/2):
-                                overlaps = True
-                                break
+                        # Use intelligent border detection to find actual ad boundaries
+                        detected_box = IntelligentAdDetector.detect_ad_from_click(
+                            image_path, text_x, text_y, 'open_display'
+                        )
 
-                        if not overlaps:
-                            matches_found.append({
-                                'x': x,
-                                'y': y,
-                                'width': width,
-                                'height': height,
-                                'column_inches': template.column_inches if template.column_inches else 0
-                            })
-                            print(f"✅ MATCH ADDED at ({x}, {y})")
+                        if detected_box:
+                            x = detected_box['x']
+                            y = detected_box['y']
+                            width = detected_box['width']
+                            height = detected_box['height']
+
+                            print(f"✅ Border detection found ad: ({x}, {y}) - {width}x{height}px")
+
+                            # Check overlap with existing boxes
+                            overlaps = False
+                            for existing_box in AdBox.query.filter_by(page_id=page_id).all():
+                                if (abs(x - existing_box.x) < width/2 and
+                                    abs(y - existing_box.y) < height/2):
+                                    overlaps = True
+                                    break
+
+                            if not overlaps:
+                                # Calculate column inches from detected dimensions
+                                dpi = page.pixels_per_inch if page.pixels_per_inch else 72
+                                width_inches = width / dpi
+                                height_inches = height / dpi
+                                column_inches = width_inches * height_inches
+
+                                matches_found.append({
+                                    'x': x,
+                                    'y': y,
+                                    'width': width,
+                                    'height': height,
+                                    'column_inches': column_inches
+                                })
+                                print(f"✅ MATCH ADDED: {width}x{height}px = {column_inches:.2f} col inches")
+                            else:
+                                print(f"⚠️ Match found but overlaps with existing box")
                         else:
-                            print(f"⚠️ Match found but overlaps with existing box")
+                            print(f"⚠️ Border detection failed, skipping this match")
 
                         found = True
                         break

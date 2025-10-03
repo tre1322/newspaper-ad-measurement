@@ -5679,7 +5679,54 @@ class IntelligentAdDetector:
         except Exception as e:
             print(f"Error in intelligent detection: {e}")
             return None
-    
+
+    @staticmethod
+    def check_ad_borders(image_region):
+        """Check if region has clear rectangular borders indicating an ad
+
+        Args:
+            image_region: BGR image region to check
+
+        Returns:
+            bool: True if region has clear ad borders, False otherwise
+        """
+        try:
+            # Convert to grayscale if needed
+            if len(image_region.shape) == 3:
+                gray = cv2.cvtColor(image_region, cv2.COLOR_BGR2GRAY)
+            else:
+                gray = image_region
+
+            # Use edge detection
+            edges = cv2.Canny(gray, 50, 150)
+
+            # Find contours
+            contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+            region_area = image_region.shape[0] * image_region.shape[1]
+
+            # Check if there's a large rectangular contour (ad border)
+            for contour in contours:
+                area = cv2.contourArea(contour)
+                perimeter = cv2.arcLength(contour, True)
+
+                # Must be large (>30% of region) and roughly rectangular
+                if area > (region_area * 0.3):
+                    # Approximate contour to polygon
+                    approx = cv2.approxPolyDP(contour, 0.02 * perimeter, True)
+
+                    # Check if it's rectangular (4 vertices)
+                    if len(approx) == 4:
+                        print(f"✅ Found rectangular border: area={area:.0f} ({area/region_area*100:.1f}% of region)")
+                        return True
+
+            print(f"❌ No clear rectangular borders found")
+            return False
+
+        except Exception as e:
+            print(f"⚠️ Error checking borders: {e}")
+            return False
+
     @staticmethod
     def _detect_display_ad(gray, click_x, click_y):
         """Detect regular display ad with solid borders - simplified approach"""
@@ -10882,6 +10929,19 @@ def save_template(box_id):
 
         template_img = img[y:y+h, x:x+w]
         print(f"📏 Template crop shape: {template_img.shape}")
+
+        # CRITICAL: Check if this region has clear ad borders
+        print(f"🔍 Checking if region has clear ad borders...")
+        has_borders = IntelligentAdDetector.check_ad_borders(template_img)
+
+        if not has_borders:
+            print(f"❌ Template rejected: No clear borders detected")
+            return jsonify({
+                'success': False,
+                'error': 'This region does not appear to be a bordered ad. Only boxed ads with clear borders can be saved as templates. Headers, labels, and text-only regions cannot be used as templates.'
+            })
+
+        print(f"✅ Border check passed - proceeding with template save")
 
         # Convert to PNG bytes
         success, buffer = cv2.imencode('.png', template_img)

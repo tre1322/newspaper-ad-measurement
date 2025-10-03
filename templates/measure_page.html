@@ -2194,9 +2194,9 @@ function intelligentDetectAd(x, y, adType) {
             addDetectedAdBox(data);
             updatePageTotalRegular();
 
-            // Mark this box to have its template saved later
-            pendingTemplateSaves.add(data.box_id);
-            console.log('Left-click box added to pending templates:', data.box_id);
+            // IMMEDIATELY show modal for template save (don't wait)
+            console.log('🚀 IMMEDIATELY calling autoSaveTemplate for box:', data.box_id);
+            autoSaveTemplate(data.box_id, data.x, data.y, data.width, data.height);
 
             // Show success message
             showSuccessMessage(`${adType.replace('_', ' ')} ad detected successfully!`);

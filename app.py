@@ -12327,6 +12327,41 @@ with app.app_context():
     except Exception as e:
         print(f"Schema update error (may be normal): {e}")
 
+
+def _ensure_autodetect_schema():
+    """Guarantee the columns the Claude auto-detect pipeline writes exist.
+
+    Runs on ALL environments (including Railway, where the broad schema block
+    above is skipped to avoid worker timeouts). db.create_all() already creates
+    the new ad_judge_cache and publication_profile tables; this only ensures the
+    ad_box columns the detector populates. Idempotent and fast: one inspect plus
+    at most a couple of ALTERs. Works on both SQLite and PostgreSQL.
+    """
+    try:
+        from sqlalchemy import text, inspect
+        inspector = inspect(db.engine)
+        ad_box_columns = {col['name'] for col in inspector.get_columns('ad_box')}
+        statements = []
+        if 'detected_automatically' not in ad_box_columns:
+            statements.append('ALTER TABLE ad_box ADD COLUMN detected_automatically BOOLEAN DEFAULT FALSE')
+        if 'confidence_score' not in ad_box_columns:
+            statements.append('ALTER TABLE ad_box ADD COLUMN confidence_score FLOAT')
+        for stmt in statements:
+            db.session.execute(text(stmt))
+            db.session.commit()
+            print(f"[schema] {stmt}")
+    except Exception as e:
+        print(f"[schema] auto-detect schema ensure skipped: {e}")
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+
+with app.app_context():
+    _ensure_autodetect_schema()
+
+
 @app.route('/api/test-vision-api', methods=['GET'])
 @login_required
 def test_vision_api():

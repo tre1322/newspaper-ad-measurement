@@ -31,6 +31,7 @@ class PDFStructureAdDetector:
         {
             'bordered': [<candidate>, ...],
             'clusters': [<candidate>, ...],
+            'images':   [<candidate>, ...],
             'page_rect': fitz.Rect,
         }
 
@@ -40,7 +41,7 @@ class PDFStructureAdDetector:
             'y': float,
             'width': float,
             'height': float,
-            'source': 'structure_bordered' | 'structure_cluster',
+            'source': 'structure_bordered' | 'structure_cluster' | 'structure_image',
             'text_preview': str,   # first ~200 chars of interior text, for profile learning
         }
     """
@@ -70,9 +71,11 @@ class PDFStructureAdDetector:
             structure = cls._extract_page_structure(page)
             bordered = cls._find_bordered_candidates(structure)
             clusters = cls._find_cluster_candidates(structure)
+            images = cls._find_image_candidates(structure)
             return {
                 'bordered': bordered,
                 'clusters': clusters,
+                'images': images,
                 'page_rect': structure['page_rect'],
             }
         finally:
@@ -173,19 +176,35 @@ class PDFStructureAdDetector:
     # ---------- Bordered candidates ----------------------------------------
 
     # Geometric filters for candidate bounding boxes (all in PDF points).
-    # Generous on the low end — Claude decides what's actually an ad.
-    MIN_WIDTH_PT = 72          # ~1 inch
-    MIN_HEIGHT_PT = 36         # ~0.5 inch
-    MIN_AREA_PT2 = 8_000
-    MAX_AREA_PT2 = 700_000
-    MAX_ASPECT = 12.0
+    # Deliberately LOOSE / high-recall: Claude Vision is the precision gate, so a
+    # candidate that isn't really an ad gets classified EDITORIAL/FURNITURE and
+    # dropped downstream. Missing a candidate here is unrecoverable — it can never
+    # be judged or marked — so tune toward over-emitting.
+    MIN_WIDTH_PT = 54          # ~0.75 inch (catch narrow single-column ads)
+    MIN_HEIGHT_PT = 30         # ~0.4 inch
+    MIN_AREA_PT2 = 3_000       # catch small classified-line / service ads
+    MAX_AREA_PT2 = 1_600_000   # absolute fallback when page area is unknown
+    MAX_AREA_FRAC = 0.95       # else allow up to 95% of the page (full-page ads),
+                               # excluding only the whole-page border itself
+    MAX_ASPECT = 16.0          # allow tall single-column / skinny banner ads
+
+    @staticmethod
+    def _page_area(structure: Dict):
+        pr = structure.get('page_rect')
+        if pr is None:
+            return None
+        try:
+            return float(pr.width) * float(pr.height)
+        except Exception:
+            return None
 
     @classmethod
     def _find_bordered_candidates(cls, structure: Dict) -> List[Dict]:
         """Any vector drawing whose bounding rect is ad-sized."""
+        page_area = cls._page_area(structure)
         out: List[Dict] = []
         for d in structure['drawings']:
-            if not cls._is_ad_sized(d['width'], d['height'], d['area']):
+            if not cls._is_ad_sized(d['width'], d['height'], d['area'], page_area):
                 continue
             text_preview = cls._text_inside(d['bounds'], structure['text_blocks'], limit=200)
             out.append({
@@ -199,19 +218,52 @@ class PDFStructureAdDetector:
         return out
 
     @classmethod
-    def _is_ad_sized(cls, w: float, h: float, area: float) -> bool:
+    def _is_ad_sized(cls, w: float, h: float, area: float, page_area: float = None) -> bool:
         if w < cls.MIN_WIDTH_PT or h < cls.MIN_HEIGHT_PT:
             return False
-        if area < cls.MIN_AREA_PT2 or area > cls.MAX_AREA_PT2:
+        if area < cls.MIN_AREA_PT2:
+            return False
+        # Cap relative to the page so near-full-page ads pass but the whole-page
+        # border (~100% of page area) is excluded. Fall back to a fixed ceiling
+        # when page dimensions are unknown.
+        max_area = cls.MAX_AREA_FRAC * page_area if page_area else cls.MAX_AREA_PT2
+        if area > max_area:
             return False
         aspect = max(w, h) / max(1.0, min(w, h))
         if aspect > cls.MAX_ASPECT:
             return False
         return True
 
+    # ---------- Standalone image candidates --------------------------------
+
+    @classmethod
+    def _find_image_candidates(cls, structure: Dict) -> List[Dict]:
+        """Each ad-sized raster image becomes its own candidate.
+
+        Catches full-bleed / borderless photo ads that the cluster detector
+        misses (a single image with no neighboring text is one element, below
+        CLUSTER_MIN_ELEMENTS). Overlap with bordered/cluster candidates is
+        resolved by the area-descending dedupe in app.py (the outer frame wins).
+        """
+        page_area = cls._page_area(structure)
+        out: List[Dict] = []
+        for im in structure['images']:
+            if not cls._is_ad_sized(im['width'], im['height'], im['area'], page_area):
+                continue
+            text_preview = cls._text_inside(im['bounds'], structure['text_blocks'], limit=200)
+            out.append({
+                'x': im['bounds'][0],
+                'y': im['bounds'][1],
+                'width': im['width'],
+                'height': im['height'],
+                'source': 'structure_image',
+                'text_preview': text_preview,
+            })
+        return out
+
     # ---------- Cluster candidates -----------------------------------------
 
-    CLUSTER_MERGE_GAP_PT = 20.0   # elements within this distance merge into the same cluster
+    CLUSTER_MERGE_GAP_PT = 32.0   # elements within this distance merge into the same cluster
     CLUSTER_MIN_ELEMENTS = 2      # minimum elements in a cluster (text blocks + images)
 
     @classmethod
@@ -221,6 +273,7 @@ class PDFStructureAdDetector:
         Catches ads with no drawn border (or borders drawn as disconnected
         lines / raster). Uses union-find on bounding-box proximity.
         """
+        page_area = cls._page_area(structure)
         elements: List[Dict] = []
         for t in structure['text_blocks']:
             elements.append({'bounds': t['bounds'], 'is_image': False, 'text': t.get('text_content', '')})
@@ -269,7 +322,7 @@ class PDFStructureAdDetector:
             w = xs_max - xs_min
             h = ys_max - ys_min
             area = w * h
-            if not cls._is_ad_sized(w, h, area):
+            if not cls._is_ad_sized(w, h, area, page_area):
                 continue
             text_preview = " ".join(elements[m]['text'] for m in members if elements[m]['text'])[:200]
             out.append({

@@ -3398,6 +3398,39 @@ def _dedupe_against(candidates, accepted, iou_thresh=0.35, containment_thresh=0.
     return kept
 
 
+def _demote_containers(candidates, min_children=3):
+    """Drop 'container' candidates that enclose many distinct ads.
+
+    A box whose bounds contain the CENTER of >= min_children other candidates
+    is almost always a section/page frame (e.g. the border around a
+    'Business/Service Directory' grid), not a single ad. Left in place, such a
+    frame sorts first in the area-descending dedupe and swallows every distinct
+    ad inside it. We drop the frame and keep its children.
+
+    A single display ad with one or two decorative sub-panels has < min_children
+    children, so it is left intact (and still wins over its sub-panels in
+    _dedupe_against). Returns the surviving candidates in input order.
+    """
+    out = []
+    for i, c in enumerate(candidates):
+        c_area = max(0.0, c.get('width', 0)) * max(0.0, c.get('height', 0))
+        if c_area <= 0:
+            continue
+        children = 0
+        for j, o in enumerate(candidates):
+            if i == j:
+                continue
+            o_area = max(0.0, o.get('width', 0)) * max(0.0, o.get('height', 0))
+            if 0 < o_area < c_area and _center_inside(o, c):
+                children += 1
+                if children >= min_children:
+                    break
+        if children >= min_children:
+            continue  # this is a frame around many ads -> drop it, keep children
+        out.append(c)
+    return out
+
+
 def _suppressed_by_corrections(box, page, publication_type, corrections):
     """True if a similar box was previously marked not-an-ad on the same publication_type."""
     if not corrections:
@@ -3477,7 +3510,7 @@ def _gen_bordered_and_clusters(pdf_path, page_number):
         print(f"  [gen.structure] failed: {e}")
         return []
     out = []
-    for group_key in ('bordered', 'clusters'):
+    for group_key in ('bordered', 'clusters', 'images'):
         for c in result.get(group_key, []):
             out.append({
                 'x': float(c['x']) * RENDER_SCALE,
@@ -3750,7 +3783,7 @@ def _detect_and_save_ads(pub_id):
     stats = JudgeStats()
     total_saved = 0
     non_ad_previews = []
-    layout_counts = {'bordered': 0, 'cluster': 0, 'vision_logo': 0, 'template_match': 0}
+    layout_counts = {'bordered': 0, 'cluster': 0, 'image': 0, 'vision_logo': 0, 'template_match': 0}
     pages = Page.query.filter_by(publication_id=publication.id).order_by(Page.page_number).all()
 
     judge_unavailable_logged = False
@@ -3776,6 +3809,13 @@ def _detect_and_save_ads(pub_id):
         cands.extend(_gen_vision_logos(image_path))
         cands.extend(_gen_templates(image_path))
         print(f"  raw candidates: {len(cands)}")
+
+        # Drop section/page frames that merely enclose many distinct ads, so the
+        # area-descending dedupe doesn't collapse those ads into one big box.
+        before = len(cands)
+        cands = _demote_containers(cands)
+        if before != len(cands):
+            print(f"  after container demotion: {len(cands)} ({before - len(cands)} frames dropped)")
 
         # Dedupe (sort by area desc; outer wins).
         cands = _dedupe_against(cands, existing_boxes)
@@ -3845,6 +3885,8 @@ def _detect_and_save_ads(pub_id):
                         layout_counts['bordered'] += 1
                     elif 'cluster' in src:
                         layout_counts['cluster'] += 1
+                    elif 'image' in src:
+                        layout_counts['image'] += 1
                     elif 'vision_logo' in src:
                         layout_counts['vision_logo'] += 1
                     elif 'template' in src:

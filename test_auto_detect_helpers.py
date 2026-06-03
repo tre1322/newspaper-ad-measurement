@@ -13,7 +13,7 @@ def _box(x, y, w, h):
 
 def run():
     # Import after arg-parse so failures are clearer.
-    from app import _iou, _containment, _dedupe_against
+    from app import _iou, _containment, _dedupe_against, _demote_containers
     from ad_judge import parse_response, VERDICT_AD, VERDICT_EDITORIAL, VERDICT_FURNITURE
     from pdf_structure_analyzer import PDFStructureAdDetector
 
@@ -119,6 +119,30 @@ def run():
     kept = _dedupe_against([left_ad, right_ad], accepted=[])
     check("dedupe: two sibling ads side-by-side both survive",
           len(kept) == 2)
+
+    # --- _demote_containers: section/page frames drop, distinct ads survive ---
+    # A directory frame enclosing 4 small business-card ads must be dropped so
+    # the cards survive dedupe instead of collapsing into the frame.
+    frame = _box(0, 0, 1000, 800)          # big section border
+    card_a = _box(20, 20, 200, 150)
+    card_b = _box(240, 20, 200, 150)
+    card_c = _box(20, 200, 200, 150)
+    card_d = _box(240, 200, 200, 150)
+    demoted = _demote_containers([frame, card_a, card_b, card_c, card_d])
+    check("demote: frame enclosing 4 cards is dropped", frame not in demoted)
+    check("demote: all 4 inner cards survive",
+          all(c in demoted for c in (card_a, card_b, card_c, card_d)))
+
+    # A single display ad with one decorative sub-panel keeps BOTH (only 1 child
+    # < threshold 3), so dedupe can later prefer the outer frame.
+    ad = _box(0, 0, 800, 300)
+    sub = _box(600, 40, 150, 200)
+    demoted2 = _demote_containers([ad, sub])
+    check("demote: ad with single sub-panel is NOT demoted", ad in demoted2 and sub in demoted2)
+
+    # End-to-end: frame + 4 cards through demotion then dedupe -> 4 boxes kept.
+    kept_dc = _dedupe_against(_demote_containers([frame, card_a, card_b, card_c, card_d]), accepted=[])
+    check("demote+dedupe: directory yields 4 card boxes, not 1 frame", len(kept_dc) == 4)
 
     # --- Claude response parser ---
     # Well-formed 2-image response.

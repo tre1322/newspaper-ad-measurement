@@ -16,3 +16,4 @@ scipy==1.11.0
 google-cloud-vision==3.4.5
 imagehash==4.3.2
 pytesseract==0.3.10
+anthropic>=0.40.0

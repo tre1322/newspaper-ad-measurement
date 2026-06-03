@@ -365,99 +365,17 @@ def start_background_processing(pub_id):
                 publication.set_processing_status('ai_detection')
                 db.session.commit()
                 
-                # Run AI ad detection at the end of processing (with robust error handling)
+                # Run tiered automatic ad detection (Tier 1 PDF-structure, Tier 3 templates,
+                # Tier 2 Google Vision). Each tier is wrapped internally; a failure in one
+                # tier will not abort the publication.
                 try:
                     print(f"Starting automatic ad detection for publication {publication.id} ({publication.publication_type})")
-                    
-                    # CONTENT-BASED DETECTION - DISABLED
-                    # try:
-                    #     print(f"Starting CONTENT-BASED ad detection - business information analysis")
-
-                    #     # Run content-based detection that actually works
-                    #     total_detected_ads = 0
-                    #     pages = Page.query.filter_by(publication_id=publication.id).all()
-                    #     file_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
-
-                    #     # Import newspaper domain detector
-                    #     from newspaper_domain_detector import NewspaperDomainDetector
-                    #     detector = NewspaperDomainDetector()
-
-                    #     for page in pages:
-                    #         print(f"Running newspaper domain detection on page {page.page_number}...")
-
-                    #         # Use newspaper domain detector
-                    #         detected_ads = detector.detect_business_ads(file_path, page.page_number)
-
-                    #         # Convert to expected format and process each ad
-                    #         for ad in detected_ads:
-                    #             content_ad = {
-                    #                 'x': ad.x,
-                    #                 'y': ad.y,
-                    #                 'width': ad.width,
-                    #                 'height': ad.height,
-                    #                 'confidence': ad.confidence / 100.0,  # Convert to 0-1 scale
-                    #                 'ad_type': ad.ad_type,
-                    #                 'text': ad.text_snippet,
-                    #                 'indicators': ad.business_indicators
-                    #             }
-                    #             # Calculate measurements
-                    #             dpi = page.pixels_per_inch or 150
-                    #             width_inches_raw = content_ad['width'] / dpi
-                    #             height_inches_raw = content_ad['height'] / dpi
-                    #             column_inches = width_inches_raw * height_inches_raw
-
-                    #             # Create AdBox
-                    #             ad_box = AdBox(
-                    #                 page_id=page.id,
-                    #                 x=float(content_ad['x']),
-                    #                 y=float(content_ad['y']),
-                    #                 width=float(content_ad['width']),
-                    #                 height=float(content_ad['height']),
-                    #                 width_inches_raw=width_inches_raw,
-                    #                 height_inches_raw=height_inches_raw,
-                    #                 width_inches_rounded=round(width_inches_raw * 16) / 16,
-                    #                 height_inches_rounded=round(height_inches_raw * 16) / 16,
-                    #                 column_inches=column_inches,
-                    #                 ad_type=content_ad['ad_type'],
-                    #                 is_ad=True,
-                    #                 detected_automatically=True,
-                    #                 confidence_score=content_ad['confidence'],
-                    #                 user_verified=False
-                    #             )
-                    #             db.session.add(ad_box)
-                    #             total_detected_ads += 1
-
-                    #         print(f"Newspaper domain detection found {len(detected_ads)} ads on page {page.page_number}")
-
-                    #     # Update publication totals
-                    #     total_ad_inches = sum(box.column_inches for box in AdBox.query.join(Page).filter(Page.publication_id == publication.id).all())
-                    #     publication.total_ad_inches = total_ad_inches
-                    #     publication.ad_percentage = (total_ad_inches / publication.total_inches) * 100 if publication.total_inches > 0 else 0
-
-                    #     db.session.commit()
-
-                    #     print(f"SUCCESS: Content-based detection complete: {total_detected_ads} business ads detected")
-                    #     if total_detected_ads > 0:
-                    #         print(f"Next: Review the detected business ads in measurement interface")
-                    #     else:
-                    #         print(f"No business content detected - check PDF content quality")
-
-                    # except Exception as content_error:
-                    #     print(f"Content-based detection failed with error: {content_error}")
-                    #     print(f"Falling back to old detection methods")
-
-                        # FALLBACK DETECTION - DISABLED
-                        # try:
-                        #     simple_result = SimpleAdDetector.detect_bordered_ads(publication.id)
-                        #     if simple_result and simple_result.get('success'):
-                        #         print(f"Fallback detection: {simple_result['detections']} ads detected")
-                        #     else:
-                        #         print(f"All detection methods failed")
-                        # except Exception as fallback_error:
-                        #     print(f"Fallback detection also failed: {fallback_error}")
-
+                    result = _detect_and_save_ads(publication.id)
+                    print(f"Auto-detection complete: saved {result.get('saved', 0)} boxes across {result.get('pages', 0)} pages")
                 except Exception as outer_error:
-                    print(f"WARNING: Hybrid detection phase failed: {outer_error}")
+                    import traceback
+                    traceback.print_exc()
+                    print(f"WARNING: Automatic detection phase failed: {outer_error}")
                     print(f"Publication processed successfully - use manual detection interface")
                 
                 # Mark as completed
@@ -473,6 +391,9 @@ def start_background_processing(pub_id):
                     pass
                 
             except Exception as e:
+                import traceback
+                print(f"Background processing failed for publication {pub_id}: {e}")
+                traceback.print_exc()
                 # Mark as failed
                 try:
                     publication = db.session.get(Publication, pub_id)
@@ -895,6 +816,37 @@ class UserCorrection(db.Model):
     publication_type = db.Column(db.String(50))  # CCCitizen, broadsheet, etc.
     correction_type = db.Column(db.String(20))  # 'added', 'moved', 'deleted'
     created_date = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class AdJudgeCache(db.Model):
+    """Cached Claude Vision verdicts keyed by SHA256 of the cropped PNG bytes.
+
+    Re-uploading the same PDF (or an ad that repeats week over week) hits this
+    cache and skips the Claude API call entirely.
+    """
+    __tablename__ = 'ad_judge_cache'
+    id = db.Column(db.Integer, primary_key=True)
+    crop_hash = db.Column(db.String(64), unique=True, nullable=False, index=True)
+    verdict = db.Column(db.String(20), nullable=False)  # AD | EDITORIAL | FURNITURE
+    reason = db.Column(db.String(500))
+    model_used = db.Column(db.String(50))
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+
+
+class PublicationProfile(db.Model):
+    """Per-publication-type learned profile (masthead phrases, etc.).
+
+    Populated after each run from the OCR text of candidates that Claude
+    classified as EDITORIAL or FURNITURE. Used to pre-filter future
+    candidates before sending them to Claude.
+    """
+    __tablename__ = 'publication_profile'
+    id = db.Column(db.Integer, primary_key=True)
+    publication_type = db.Column(db.String(50), unique=True, nullable=False, index=True)
+    masthead_phrases = db.Column(db.Text)   # JSON list of short phrases
+    section_headers = db.Column(db.Text)    # JSON list of short phrases
+    layout_stats = db.Column(db.Text)       # JSON: counts of bordered / cluster / logo / template
+    updated_date = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 class SimpleAdLearner:
     """
@@ -3353,6 +3305,591 @@ class SmartManualDetection:
             print(f"Error creating manual ad: {e}")
             db.session.rollback()
             return {'success': False, 'error': str(e)}
+
+
+# ============================================================================
+# Auto-detection orchestrator (tiered pipeline run on every PDF upload).
+# Tier 1: PDF vector structure (PyMuPDF, deterministic, zero cost).
+# Tier 2: Google Vision document/logo/text/object analysis.
+# Tier 3: Saved-template matching for repeat advertisers.
+# ============================================================================
+
+def _iou(a, b):
+    """Intersection-over-union for two boxes given as dicts with x,y,width,height."""
+    ax1, ay1 = a['x'], a['y']
+    ax2, ay2 = a['x'] + a['width'], a['y'] + a['height']
+    bx1, by1 = b['x'], b['y']
+    bx2, by2 = b['x'] + b['width'], b['y'] + b['height']
+    ix1, iy1 = max(ax1, bx1), max(ay1, by1)
+    ix2, iy2 = min(ax2, bx2), min(ay2, by2)
+    iw, ih = max(0.0, ix2 - ix1), max(0.0, iy2 - iy1)
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(0.0, a['width']) * max(0.0, a['height'])
+    area_b = max(0.0, b['width']) * max(0.0, b['height'])
+    union = area_a + area_b - inter
+    return inter / union if union > 0 else 0.0
+
+
+def _containment(a, b):
+    """Fraction of the smaller box that sits inside the larger one."""
+    ax1, ay1 = a['x'], a['y']
+    ax2, ay2 = a['x'] + a['width'], a['y'] + a['height']
+    bx1, by1 = b['x'], b['y']
+    bx2, by2 = b['x'] + b['width'], b['y'] + b['height']
+    iw = max(0.0, min(ax2, bx2) - max(ax1, bx1))
+    ih = max(0.0, min(ay2, by2) - max(ay1, by1))
+    inter = iw * ih
+    if inter <= 0:
+        return 0.0
+    area_a = max(1.0, a['width'] * a['height'])
+    area_b = max(1.0, b['width'] * b['height'])
+    return inter / min(area_a, area_b)
+
+
+def _center_inside(inner, outer):
+    """True if the CENTER POINT of `inner` lies inside `outer`'s bbox.
+
+    Catches decorative sub-panels of a larger ad that slip past pure
+    containment thresholds — e.g. an inner icon box that juts slightly
+    above the parent frame but is clearly a child region.
+    """
+    cx = inner['x'] + inner['width'] / 2.0
+    cy = inner['y'] + inner['height'] / 2.0
+    return (outer['x'] <= cx <= outer['x'] + outer['width']
+            and outer['y'] <= cy <= outer['y'] + outer['height'])
+
+
+def _dedupe_against(candidates, accepted, iou_thresh=0.35, containment_thresh=0.80):
+    """Drop overlapping candidates, preferring the OUTER (larger) box.
+
+    Sort-by-area-desc ensures the full-ad frame lands first; inner panels
+    check against it and are rejected. Three rejection rules combine:
+
+        1. IoU > 0.35               -- typical overlap (sibling ads)
+        2. containment > 0.80       -- smaller box is ~80%+ inside larger
+        3. smaller's center inside  -- decorative sub-panel of larger
+           AND smaller's area < 50% -- parent ad
+           of larger's area
+    """
+    def _area(c):
+        return max(0.0, c.get('width', 0)) * max(0.0, c.get('height', 0))
+
+    sorted_c = sorted(candidates, key=_area, reverse=True)
+    kept = []
+    for c in sorted_c:
+        if c['width'] <= 1 or c['height'] <= 1:
+            continue
+        c_area = _area(c)
+        conflict = False
+        for a in list(accepted) + kept:
+            a_area = _area(a)
+            if _iou(c, a) > iou_thresh or _containment(c, a) > containment_thresh:
+                conflict = True
+                break
+            # Sub-panel rule: c's center sits inside a, and c is meaningfully
+            # smaller -> treat as a decorative sub-region of a, drop c.
+            if a_area > 0 and c_area < 0.5 * a_area and _center_inside(c, a):
+                conflict = True
+                break
+        if not conflict:
+            kept.append(c)
+    return kept
+
+
+def _suppressed_by_corrections(box, page, publication_type, corrections):
+    """True if a similar box was previously marked not-an-ad on the same publication_type."""
+    if not corrections:
+        return False
+    page_w = max(1, page.width_pixels)
+    page_h = max(1, page.height_pixels)
+    cx_ratio = (box['x'] + box['width'] / 2.0) / page_w
+    cy_ratio = (box['y'] + box['height'] / 2.0) / page_h
+    for corr in corrections:
+        corr_w = max(1, corr.width)
+        corr_h = max(1, corr.height)
+        corr_box = {'x': corr.x, 'y': corr.y, 'width': corr_w, 'height': corr_h}
+        if _iou(box, corr_box) > 0.6:
+            return True
+        # position-ratio fallback (image size may differ slightly across uploads)
+        ccx = (corr.x + corr_w / 2.0) / page_w
+        ccy = (corr.y + corr_h / 2.0) / page_h
+        if abs(ccx - cx_ratio) < 0.05 and abs(ccy - cy_ratio) < 0.05:
+            ratio_a = box['width'] / max(1.0, box['height'])
+            ratio_b = corr_w / max(1.0, corr_h)
+            if abs(ratio_a - ratio_b) / max(ratio_a, ratio_b) < 0.2:
+                return True
+    return False
+
+
+def _make_ad_box(page, publication, config, cand, source_tag):
+    """Build an AdBox row from a candidate dict (pixel-space coords)."""
+    x = float(cand['x'])
+    y = float(cand['y'])
+    w = float(cand['width'])
+    h = float(cand['height'])
+    if page.pixels_per_inch:
+        width_inches_raw = w / page.pixels_per_inch
+        height_inches_raw = h / page.pixels_per_inch
+    else:
+        width_inches_raw = MeasurementCalculator.pixels_to_inches(
+            w, page.width_pixels, config['width_units']
+        )
+        height_inches_raw = MeasurementCalculator.pixels_to_inches(
+            h, page.height_pixels, config['total_inches_per_page'] / config['width_units']
+        )
+    w_rounded = MeasurementCalculator.round_measurement(width_inches_raw)
+    h_rounded = MeasurementCalculator.round_measurement(height_inches_raw)
+    return AdBox(
+        page_id=page.id,
+        x=x, y=y, width=w, height=h,
+        width_inches_raw=width_inches_raw,
+        height_inches_raw=height_inches_raw,
+        width_inches_rounded=w_rounded,
+        height_inches_rounded=h_rounded,
+        column_inches=width_inches_raw * height_inches_raw,
+        ad_type=source_tag,
+        is_ad=True,
+        user_verified=False,
+        detected_automatically=True,
+        confidence_score=float(cand.get('confidence', 0.0)),
+    )
+
+
+# ============================================================================
+# Layer 1 candidate generators.
+# Each returns a list of dicts with keys: x, y, width, height (image-pixel
+# space), source (str tag), text_preview (str, used for profile learning).
+# Claude Vision decides AD/EDITORIAL/FURNITURE in Layer 2 — generators do NOT
+# filter on content; they only emit geometric candidates.
+# ============================================================================
+
+RENDER_SCALE = 1.5  # matches fitz.Matrix(1.5, 1.5) used in process_in_background
+
+
+def _gen_bordered_and_clusters(pdf_path, page_number):
+    """Run the PDF-structure extractor; return bordered + cluster candidates
+    in image-pixel space (scaled by RENDER_SCALE)."""
+    try:
+        result = PDFStructureAdDetector.extract_candidates(pdf_path, page_number)
+    except Exception as e:
+        print(f"  [gen.structure] failed: {e}")
+        return []
+    out = []
+    for group_key in ('bordered', 'clusters'):
+        for c in result.get(group_key, []):
+            out.append({
+                'x': float(c['x']) * RENDER_SCALE,
+                'y': float(c['y']) * RENDER_SCALE,
+                'width': float(c['width']) * RENDER_SCALE,
+                'height': float(c['height']) * RENDER_SCALE,
+                'source': c.get('source', 'structure'),
+                'text_preview': c.get('text_preview', ''),
+            })
+    return out
+
+
+def _gen_vision_logos(image_path):
+    """Google Vision logo detections. Coordinates already in image-pixel space."""
+    try:
+        if not is_vision_api_available():
+            return []
+        raw = GoogleVisionAdDetector.detect_ads(image_path, 'broadsheet')
+    except Exception as e:
+        print(f"  [gen.vision_logo] failed: {e}")
+        return []
+    out = []
+    for ad in raw:
+        if 'logo' not in ad.get('detection_method', ''):
+            continue
+        out.append({
+            'x': float(ad['x']),
+            'y': float(ad['y']),
+            'width': float(ad['width']),
+            'height': float(ad['height']),
+            'source': 'vision_logo',
+            'text_preview': ad.get('content', '')[:200],
+        })
+    return out
+
+
+def _gen_templates(image_path):
+    """Template matches (repeat-advertiser OCR). Image-pixel space."""
+    if not TEMPLATE_MATCHING_AVAILABLE:
+        return []
+    try:
+        img = cv2.imread(image_path)
+        if img is None:
+            return []
+        page_pil = Image.fromarray(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
+        ocr_data = pytesseract.image_to_data(
+            page_pil, config='--psm 6', output_type=pytesseract.Output.DICT
+        )
+        words_data = []
+        for i in range(len(ocr_data['text'])):
+            word = ocr_data['text'][i].strip()
+            if word:
+                words_data.append({'text': word.upper(),
+                                   'x': ocr_data['left'][i],
+                                   'y': ocr_data['top'][i]})
+        six_months_ago = datetime.utcnow() - timedelta(days=180)
+        templates = Template.query.filter(
+            Template.created_at >= six_months_ago
+        ).with_entities(Template.id, Template.business_name).all()
+        if not templates:
+            return []
+        out = []
+        seen_name = set()
+        for tpl in templates:
+            if not tpl.business_name or tpl.business_name in seen_name:
+                continue
+            name_words = tpl.business_name.strip().split()
+            for i, w in enumerate(words_data):
+                if w['text'] != name_words[0].upper():
+                    continue
+                if any(i + j >= len(words_data) or words_data[i + j]['text'] != nw.upper()
+                       for j, nw in enumerate(name_words[1:], 1)):
+                    continue
+                detected = IntelligentAdDetector.detect_ad_from_click(
+                    image_path, w['x'], w['y'], 'open_display'
+                )
+                if detected:
+                    out.append({
+                        'x': float(detected['x']),
+                        'y': float(detected['y']),
+                        'width': float(detected['width']),
+                        'height': float(detected['height']),
+                        'source': 'template_match',
+                        'text_preview': tpl.business_name,
+                    })
+                    seen_name.add(tpl.business_name)
+                break
+        return out
+    except Exception as e:
+        print(f"  [gen.templates] failed: {e}")
+        return []
+
+
+# ============================================================================
+# Layer 2/3 helpers: cropping, profile learning.
+# ============================================================================
+
+def _crop_png_bytes(image_path, cand):
+    """Return PNG bytes of the candidate's region from the page image.
+
+    Returns None if the crop is trivially small or the image can't be opened.
+    """
+    try:
+        from io import BytesIO
+        with Image.open(image_path) as im:
+            iw, ih = im.size
+            x1 = max(0, int(cand['x']))
+            y1 = max(0, int(cand['y']))
+            x2 = min(iw, int(cand['x'] + cand['width']))
+            y2 = min(ih, int(cand['y'] + cand['height']))
+            if x2 - x1 < 40 or y2 - y1 < 40:
+                return None
+            region = im.crop((x1, y1, x2, y2))
+            # Downscale very large crops to keep Claude payload + latency sane.
+            max_side = 1200
+            if max(region.size) > max_side:
+                scale = max_side / max(region.size)
+                region = region.resize(
+                    (int(region.size[0] * scale), int(region.size[1] * scale)),
+                    Image.LANCZOS,
+                )
+            buf = BytesIO()
+            region.convert("RGB").save(buf, format="PNG", optimize=True)
+            return buf.getvalue()
+    except Exception as e:
+        print(f"  crop failed for {cand.get('source')}: {e}")
+        return None
+
+
+def _load_profile_signatures(publication_type):
+    """Return a list of short text prefixes known to mark non-ads for this paper.
+
+    Phrases are bound to the PROMPT_VERSION they were learned under — a prompt
+    rewrite can flip AD/EDITORIAL verdicts, so phrases from a prior rubric
+    must not suppress candidates under the new rubric. If the stored version
+    doesn't match ad_judge.PROMPT_VERSION, return [] (forces re-learning).
+    """
+    try:
+        from ad_judge import PROMPT_VERSION
+        prof = PublicationProfile.query.filter_by(publication_type=publication_type).first()
+        if not prof or not prof.masthead_phrases:
+            return []
+        stats = {}
+        try:
+            stats = json.loads(prof.layout_stats) if prof.layout_stats else {}
+        except Exception:
+            stats = {}
+        if stats.get('prompt_version') != PROMPT_VERSION:
+            print(f"  profile prompt_version mismatch "
+                  f"(stored={stats.get('prompt_version')!r} current={PROMPT_VERSION!r}); "
+                  f"ignoring {len(json.loads(prof.masthead_phrases) or [])} stale phrases")
+            return []
+        return json.loads(prof.masthead_phrases) or []
+    except Exception as e:
+        print(f"  profile load failed: {e}")
+        return []
+
+
+def _profile_matches(text_preview, signatures):
+    if not text_preview or not signatures:
+        return False
+    t = text_preview.strip().lower()
+    for sig in signatures:
+        if not sig:
+            continue
+        s = sig.strip().lower()
+        if len(s) < 8:
+            continue
+        if t.startswith(s) or s in t:
+            return True
+    return False
+
+
+def _update_profile(publication_type, non_ad_previews, layout_counts):
+    """Merge non-ad text-preview prefixes into the PublicationProfile.
+
+    Phrases are stamped with the current PROMPT_VERSION so a prompt rewrite
+    forces re-learning. Stats from prior prompt versions are preserved but
+    phrases are reset.
+    """
+    try:
+        from ad_judge import PROMPT_VERSION
+        prof = PublicationProfile.query.filter_by(publication_type=publication_type).first()
+        existing_phrases = []
+        existing_stats = {}
+        if prof:
+            try:
+                existing_stats = json.loads(prof.layout_stats) if prof.layout_stats else {}
+            except Exception:
+                existing_stats = {}
+            # Only carry forward phrases from the same prompt version.
+            if existing_stats.get('prompt_version') == PROMPT_VERSION:
+                try:
+                    existing_phrases = json.loads(prof.masthead_phrases) if prof.masthead_phrases else []
+                except Exception:
+                    existing_phrases = []
+
+        phrase_set = set(existing_phrases)
+        for preview in non_ad_previews:
+            if not preview:
+                continue
+            prefix = preview.strip()[:60]
+            if len(prefix) >= 12:
+                phrase_set.add(prefix)
+        merged_phrases = sorted(phrase_set)[:500]
+
+        for k, v in layout_counts.items():
+            existing_stats[k] = int(existing_stats.get(k, 0)) + int(v)
+        existing_stats['prompt_version'] = PROMPT_VERSION
+
+        if prof is None:
+            prof = PublicationProfile(publication_type=publication_type)
+            db.session.add(prof)
+        prof.masthead_phrases = json.dumps(merged_phrases)
+        prof.layout_stats = json.dumps(existing_stats)
+        prof.updated_date = datetime.utcnow()
+        db.session.commit()
+        print(f"[profile] {publication_type}: {len(merged_phrases)} phrases "
+              f"(prompt_version={PROMPT_VERSION})")
+    except Exception as e:
+        print(f"  profile update failed: {e}")
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+
+# ============================================================================
+# Orchestrator: Layer 1 generators -> dedupe -> profile/correction pre-filter
+# -> Layer 2 Claude judge -> persist AD verdicts -> Layer 3 profile update.
+# ============================================================================
+
+def _detect_and_save_ads(pub_id):
+    """Run the LLM-judge detection pipeline on every page of the publication.
+
+    Flow per page:
+      1. Collect candidates from Layer 1 generators (bordered, clusters,
+         vision logos, templates).
+      2. Dedupe (sort by area desc; outer frames beat inner panels).
+      3. Drop candidates that overlap any existing AdBox on the page
+         (respects manual draws and prior runs).
+      4. Drop candidates matching UserCorrection false-positive memory.
+      5. Drop candidates whose text_preview matches PublicationProfile signatures.
+      6. Crop page PNG to each candidate region.
+      7. Call Claude Vision judge; persist only AD verdicts as AdBox rows.
+      8. Collect EDITORIAL/FURNITURE text previews for profile update.
+    """
+    from ad_judge import judge_candidates, JudgeStats, JudgeUnavailable, VERDICT_AD
+
+    publication = db.session.get(Publication, pub_id)
+    if not publication:
+        return {'saved': 0, 'pages': 0, 'error': 'publication not found'}
+
+    pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
+    config = PUBLICATION_CONFIGS.get(publication.publication_type, PUBLICATION_CONFIGS['broadsheet'])
+    pub_type = publication.publication_type
+
+    # Pull suppression memory + profile signatures for this publication type.
+    since = datetime.utcnow() - timedelta(days=365)
+    corrections = UserCorrection.query.filter(
+        UserCorrection.publication_type == pub_type,
+        UserCorrection.is_ad == False,  # noqa: E712
+        UserCorrection.created_date >= since,
+    ).all()
+    profile_sigs = _load_profile_signatures(pub_type)
+    print(f"[auto-detect] pub={pub_id} type={pub_type} "
+          f"corrections={len(corrections)} profile_sigs={len(profile_sigs)} "
+          f"mock={os.environ.get('AD_JUDGE_MOCK', '0')}")
+
+    stats = JudgeStats()
+    total_saved = 0
+    non_ad_previews = []
+    layout_counts = {'bordered': 0, 'cluster': 0, 'vision_logo': 0, 'template_match': 0}
+    pages = Page.query.filter_by(publication_id=publication.id).order_by(Page.page_number).all()
+
+    judge_unavailable_logged = False
+
+    for page in pages:
+        print(f"\n[auto-detect] --- page {page.page_number} (id={page.id}) ---")
+        image_filename = f"{publication.filename}_page_{page.page_number}.png"
+        image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
+        if not os.path.exists(image_path):
+            print(f"  page image missing, skipping: {image_path}")
+            continue
+
+        # Seed accepted list with existing AdBoxes (manual drawings, prior runs).
+        existing = AdBox.query.filter_by(page_id=page.id).all()
+        existing_boxes = [
+            {'x': b.x, 'y': b.y, 'width': b.width, 'height': b.height}
+            for b in existing
+        ]
+
+        # Layer 1: collect candidates from all generators.
+        cands = []
+        cands.extend(_gen_bordered_and_clusters(pdf_path, page.page_number))
+        cands.extend(_gen_vision_logos(image_path))
+        cands.extend(_gen_templates(image_path))
+        print(f"  raw candidates: {len(cands)}")
+
+        # Dedupe (sort by area desc; outer wins).
+        cands = _dedupe_against(cands, existing_boxes)
+        print(f"  after dedupe vs existing: {len(cands)}")
+
+        # Drop candidates matching prior false-positive corrections.
+        before = len(cands)
+        cands = [c for c in cands
+                 if not _suppressed_by_corrections(c, page, pub_type, corrections)]
+        if before != len(cands):
+            print(f"  after corrections filter: {len(cands)} ({before - len(cands)} suppressed)")
+
+        # Drop candidates matching the paper's profile signatures (mastheads etc.).
+        before = len(cands)
+        cands = [c for c in cands if not _profile_matches(c.get('text_preview', ''), profile_sigs)]
+        if before != len(cands):
+            print(f"  after profile filter: {len(cands)} ({before - len(cands)} pre-judged)")
+
+        if not cands:
+            continue
+
+        # Layer 2: crop each candidate and send to Claude.
+        crops = []
+        keep_idx = []
+        for i, c in enumerate(cands):
+            png = _crop_png_bytes(image_path, c)
+            if png is None:
+                print(f"  crop dropped: {c.get('source')} "
+                      f"at ({c['x']:.0f},{c['y']:.0f}) {c['width']:.0f}x{c['height']:.0f}")
+                continue
+            crops.append(png)
+            keep_idx.append(i)
+        print(f"  crops ready: {len(crops)}/{len(cands)}")
+        if not crops:
+            continue
+
+        try:
+            verdicts = judge_candidates(
+                crops=crops,
+                page_context=f"Page {page.page_number} of {pub_type} newspaper",
+                cache_model=AdJudgeCache,
+                db_session=db.session,
+                stats=stats,
+            )
+        except JudgeUnavailable as e:
+            if not judge_unavailable_logged:
+                print(f"[auto-detect] judge unavailable: {e} -- skipping Layer 2 for remainder of paper")
+                judge_unavailable_logged = True
+            continue
+
+        # Layer 3: persist AD verdicts; collect non-AD text for profile update.
+        for idx_in_keep, verdict in enumerate(verdicts):
+            cand = cands[keep_idx[idx_in_keep]]
+            if verdict.verdict == VERDICT_AD:
+                try:
+                    # Tag the source with the underlying generator so the UI label is informative.
+                    source_tag = f"auto_{cand['source']}"
+                    if len(source_tag) > 50:
+                        source_tag = source_tag[:50]
+                    ad_box = _make_ad_box(page, publication, config, cand, source_tag)
+                    ad_box.confidence_score = 0.9 if verdict.cache_hit else 0.95
+                    db.session.add(ad_box)
+                    total_saved += 1
+                    # Count by source for layout stats.
+                    src = cand['source']
+                    if 'bordered' in src:
+                        layout_counts['bordered'] += 1
+                    elif 'cluster' in src:
+                        layout_counts['cluster'] += 1
+                    elif 'vision_logo' in src:
+                        layout_counts['vision_logo'] += 1
+                    elif 'template' in src:
+                        layout_counts['template_match'] += 1
+                except Exception as e:
+                    print(f"  failed to build AdBox: {e}")
+            else:
+                # EDITORIAL or FURNITURE -- learn from it.
+                preview = cand.get('text_preview', '').strip()
+                if preview:
+                    non_ad_previews.append(preview)
+
+        # Commit per-page.
+        try:
+            db.session.commit()
+        except Exception as e:
+            db.session.rollback()
+            print(f"  commit failed on page {page.page_number}: {e}")
+        try:
+            update_totals(page.id)
+        except Exception as e:
+            print(f"  update_totals failed: {e}")
+
+    # Layer 3: update profile with non-AD previews + layout counts.
+    if non_ad_previews or any(layout_counts.values()):
+        _update_profile(pub_type, non_ad_previews, layout_counts)
+
+    print(f"\n[auto-detect] DONE pub={pub_id} saved={total_saved} over {len(pages)} pages")
+    print(f"[auto-detect] judge stats: total={stats.total} cache_hits={stats.cache_hits} "
+          f"api_calls={stats.api_calls} AD={stats.ad_count} "
+          f"EDITORIAL={stats.editorial_count} FURNITURE={stats.furniture_count} "
+          f"errors={stats.errors}")
+    return {
+        'saved': total_saved,
+        'pages': len(pages),
+        'judge_stats': {
+            'total': stats.total,
+            'cache_hits': stats.cache_hits,
+            'api_calls': stats.api_calls,
+            'ad': stats.ad_count,
+            'editorial': stats.editorial_count,
+            'furniture': stats.furniture_count,
+            'errors': stats.errors,
+        },
+    }
 
 
 class HybridDetectionPipeline:

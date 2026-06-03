@@ -61,6 +61,29 @@
         background: rgba(40, 167, 69, 0.2) !important;
     }
 
+    /* Auto-detected boxes: dashed orange outline to distinguish from manual/verified */
+    .ad-box.auto-detected {
+        border: 2px dashed #fd7e14 !important;
+        background: rgba(253, 126, 20, 0.08) !important;
+    }
+    .ad-box.auto-detected:hover {
+        border-color: #c55a00 !important;
+        background: rgba(253, 126, 20, 0.18) !important;
+    }
+    .auto-chip {
+        position: absolute;
+        top: 2px;
+        right: 22px;
+        background: #fd7e14;
+        color: white;
+        padding: 1px 5px;
+        font-size: 10px;
+        font-weight: bold;
+        border-radius: 3px;
+        pointer-events: none;
+        letter-spacing: 0.5px;
+    }
+
     .ad-label {
         position: absolute;
         top: 2px;
@@ -462,11 +485,14 @@
                         {% if publication.publication_type == 'broadsheet' %}
                         <!-- Broadsheet ad boxes with intelligent detection -->
                         {% for box in ad_boxes %}
-                        <div class="ad-box" 
+                        <div class="ad-box{% if box.detected_automatically and not box.user_verified %} auto-detected{% endif %}"
                              data-box-id="{{ box.id }}"
-                             style="position: absolute; left: {{ box.x }}px; top: {{ box.y }}px; width: {{ box.width }}px; height: {{ box.height }}px; border: 2px solid #28a745; background: rgba(40, 167, 69, 0.1); cursor: move;">
-                            
+                             style="position: absolute; left: {{ box.x }}px; top: {{ box.y }}px; width: {{ box.width }}px; height: {{ box.height }}px; cursor: move;">
+
                             <div class="ad-label">{{ "%.1f"|format(box.column_inches) }}" {% if box.ad_type and box.ad_type != 'manual' %}({{ box.ad_type.replace('_', ' ') }}){% endif %}</div>
+                            {% if box.detected_automatically and not box.user_verified %}
+                            <div class="auto-chip">AUTO</div>
+                            {% endif %}
                             <button class="delete-btn" onclick="deleteAdBox({{ box.id }})" style="position: absolute; top: -5px; right: -5px; background: #dc3545; color: white; border: none; border-radius: 50%; width: 20px; height: 20px; font-size: 12px; cursor: pointer;">×</button>
                         </div>
                         {% endfor %}

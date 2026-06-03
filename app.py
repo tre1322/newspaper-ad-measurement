@@ -10647,6 +10647,48 @@ def delete_box(box_id):
             'error': 'Database transaction error. Please refresh the page and try again.'
         })
 
+@app.route('/api/verify_page_auto/<int:page_id>', methods=['POST'])
+def verify_page_auto(page_id):
+    """Accept all auto-detected boxes on a page (flip user_verified=True).
+
+    Auto boxes already count toward page totals; this is the explicit
+    "I reviewed this page" confirmation that clears the AUTO styling.
+    Per-box rejection is handled separately by deleting the box, which
+    records a not-an-ad UserCorrection for the learning loop. Verifying
+    a whole page is purely a state flip, so totals don't change.
+    """
+    try:
+        db.session.rollback()  # clear any failed transaction
+        page = db.session.get(Page, page_id)
+        if not page:
+            return jsonify({'success': False, 'error': 'Page not found'})
+
+        pending = AdBox.query.filter_by(
+            page_id=page_id,
+            detected_automatically=True,
+            user_verified=False,
+        ).all()
+        verified_ids = []
+        for b in pending:
+            b.user_verified = True
+            verified_ids.append(b.id)
+        db.session.commit()
+
+        print(f"Verified {len(verified_ids)} auto-detected boxes on page {page_id}")
+        return jsonify({
+            'success': True,
+            'verified': len(verified_ids),
+            'verified_ids': verified_ids,
+        })
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error verifying auto boxes on page {page_id}: {e}")
+        return jsonify({
+            'success': False,
+            'error': 'Database transaction error. Please refresh the page and try again.',
+        })
+
+
 @app.route('/api/db_health', methods=['GET'])
 def db_health_check():
     """Check database connection and transaction state"""

@@ -148,6 +148,15 @@
         transform: translate(-50%, -50%) scale(1.1);
     }
 
+    /* Auto-detected special-edition markers: orange + dashed ring, until accepted */
+    .ad-marker.auto-marker {
+        background-color: #fd7e14;
+        border: 2px dashed #c55a00;
+    }
+    .ad-marker.auto-marker:hover {
+        background-color: #c55a00;
+    }
+
     /* Manual box specific styles */
     .manual-box {
         border: 2px solid #6f42c1 !important;
@@ -520,10 +529,10 @@
                         {% else %}
                         <!-- Special edition markers -->
                         {% for box in ad_boxes %}
-                        <div class="ad-marker" 
+                        <div class="ad-marker{% if box.detected_automatically and not box.user_verified %} auto-marker{% endif %}"
                              data-box-id="{{ box.id }}"
                              style="left: {{ box.x + (box.width / 2) }}px; top: {{ box.y + (box.height / 2) }}px;"
-                             title="Click to delete">
+                             title="{% if box.detected_automatically and not box.user_verified %}Auto-detected — click to reject{% else %}Click to delete{% endif %}">
                             {{ loop.index }}
                         </div>
                         {% endfor %}
@@ -577,9 +586,22 @@
                                 <small><strong>Left-click:</strong> Auto-detect ads<br><strong>Right-click:</strong> Place manual box<br><strong>Full-page button:</strong> Complete coverage</small>
                             </div>
                             {% endif %}
-                            
+
+                            {# Accept-all: confirm every pending auto-detected box on this page #}
+                            {% set pending_auto = ad_boxes | selectattr('detected_automatically') | rejectattr('user_verified') | list %}
+                            {% if (publication.publication_type == 'broadsheet' or publication.publication_type == 'special_edition') and pending_auto|length > 0 %}
+                            <div class="d-grid mb-3" id="acceptAllWrap">
+                                <button class="btn btn-warning" id="acceptAllBtn" onclick="verifyPageAuto()">
+                                    <i class="fas fa-check-double"></i> Accept all <span id="acceptAllCount">{{ pending_auto|length }}</span> auto-marked
+                                </button>
+                                <small class="text-muted text-center mt-1">
+                                    Orange = auto-detected. Reject a wrong one ({% if publication.publication_type == 'special_edition' %}click its marker{% else %}click ✕{% endif %}) before accepting the rest.
+                                </small>
+                            </div>
+                            {% endif %}
+
                             <hr>
-                            
+
                             <h6>Advertisement List</h6>
                             <div id="adBoxesList" style="max-height: 400px; overflow-y: auto;">
                                 {% for box in ad_boxes %}
@@ -1970,16 +1992,18 @@ function attemptDeleteSpecialEditionAd(boxId, attempt) {
         if (data.success) {
             // Remove marker
             const marker = document.querySelector(`[data-box-id="${boxId}"]`);
+            const wasAuto = marker && marker.classList.contains('auto-marker');
             if (marker) {
                 marker.remove();
             }
-            
+            if (wasAuto) decrementAutoCount();
+
             // Remove list item
             const listItem = document.querySelector(`.ad-item[data-box-id="${boxId}"]`);
             if (listItem) {
                 listItem.remove();
             }
-            
+
             updatePageTotal();
         } else {
             if (data.error && data.error.includes('Database transaction error') && attempt < maxAttempts) {
@@ -2487,16 +2511,18 @@ function attemptDeleteAdBox(boxId, attempt) {
         if (data.success) {
             // Remove visual element
             const boxElement = document.querySelector(`[data-box-id="${boxId}"]`);
+            const wasAuto = boxElement && boxElement.classList.contains('auto-detected');
             if (boxElement) {
                 boxElement.remove();
             }
-            
+            if (wasAuto) decrementAutoCount();
+
             // Remove from measurements list
             const listItem = document.querySelector(`.ad-item[data-box-id="${boxId}"]`);
             if (listItem) {
                 listItem.remove();
             }
-            
+
             updatePageTotalRegular();
             showSuccessMessage('Ad deleted successfully');
         } else {
@@ -2527,6 +2553,68 @@ function attemptDeleteAdBox(boxId, attempt) {
             showErrorMessage('Network error occurred. Please check your connection and try again.');
         }
     });
+}
+
+// Accept all pending auto-detected boxes on this page (flip user_verified).
+function verifyPageAuto() {
+    const btn = document.getElementById('acceptAllBtn');
+    if (btn) { btn.disabled = true; }
+    fetch(`/api/verify_page_auto/{{ page.id }}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{}'
+    })
+    .then(response => response.json())
+    .then(data => {
+        if (data.success) {
+            (data.verified_ids || []).forEach(id => {
+                // Clear AUTO styling on the box / marker.
+                const el = document.querySelector(`[data-box-id="${id}"]`);
+                if (el) {
+                    el.classList.remove('auto-detected');
+                    el.classList.remove('auto-marker');
+                    const chip = el.querySelector('.auto-chip');
+                    if (chip) chip.remove();
+                    if (el.classList.contains('ad-marker')) el.title = 'Click to delete';
+                }
+                // Flip the sidebar robot icon to a verified check.
+                const item = document.querySelector(`.ad-item[data-box-id="${id}"]`);
+                if (item) {
+                    const ic = item.querySelector('.fa-robot');
+                    if (ic) {
+                        ic.classList.remove('fa-robot', 'text-info');
+                        ic.classList.add('fa-check-circle', 'text-success');
+                        ic.title = 'User verified';
+                    }
+                }
+            });
+            const wrap = document.getElementById('acceptAllWrap');
+            if (wrap) wrap.style.display = 'none';
+            showSuccessMessage(`Accepted ${data.verified} auto-detected ad${data.verified === 1 ? '' : 's'}`);
+        } else {
+            if (btn) btn.disabled = false;
+            showErrorMessage('Error accepting ads: ' + (data.error || 'unknown error'));
+        }
+    })
+    .catch(error => {
+        console.error('Error accepting auto detections:', error);
+        if (btn) btn.disabled = false;
+        showErrorMessage('Network error accepting ads. Please try again.');
+    });
+}
+
+// Keep the "Accept all N" counter honest when an auto box is rejected (deleted).
+// Hides the button once nothing pending remains.
+function decrementAutoCount() {
+    const countEl = document.getElementById('acceptAllCount');
+    if (!countEl) return;
+    let n = parseInt(countEl.textContent, 10) || 0;
+    n = Math.max(0, n - 1);
+    countEl.textContent = n;
+    if (n === 0) {
+        const wrap = document.getElementById('acceptAllWrap');
+        if (wrap) wrap.style.display = 'none';
+    }
 }
 
 // Regular interface (for non-special editions) - button-triggered box creation

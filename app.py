@@ -10886,6 +10886,68 @@ def ad_judge_health():
     return jsonify(info)
 
 
+@app.route('/api/publication_boxes/<int:pub_id>', methods=['GET'])
+def publication_boxes(pub_id):
+    """Export every box + correction for a publication, for offline tuning.
+
+    Returns the boxes that REMAIN (auto-detected, auto-accepted, and
+    hand-drawn) AND the UserCorrection records — including deletions
+    (correction_type='deleted'), which are gone from the rendered page but are
+    the key false-positive signal. No secrets; safe to fetch.
+    """
+    pub = db.session.get(Publication, pub_id)
+    if not pub:
+        return jsonify({'error': 'publication not found'}), 404
+    pages = {p.id: p.page_number for p in Page.query.filter_by(publication_id=pub_id).all()}
+
+    boxes = []
+    rows = (AdBox.query.join(Page, AdBox.page_id == Page.id)
+            .filter(Page.publication_id == pub_id).all())
+    for b in rows:
+        boxes.append({
+            'id': b.id, 'page': pages.get(b.page_id),
+            'x': round(b.x, 1), 'y': round(b.y, 1),
+            'width': round(b.width, 1), 'height': round(b.height, 1),
+            'column_inches': round(b.column_inches, 1) if b.column_inches else 0,
+            'ad_type': b.ad_type, 'is_ad': b.is_ad,
+            'detected_automatically': bool(b.detected_automatically),
+            'user_verified': bool(b.user_verified),
+        })
+
+    corrections = []
+    try:
+        for c in UserCorrection.query.filter_by(publication_id=pub_id).all():
+            corrections.append({
+                'page': pages.get(c.page_id),
+                'x': round(c.x, 1), 'y': round(c.y, 1),
+                'width': round(c.width, 1), 'height': round(c.height, 1),
+                'is_ad': bool(c.is_ad),
+                'correction_type': c.correction_type,
+            })
+    except Exception as e:
+        corrections = [{'error': str(e)}]
+
+    auto = sum(1 for b in boxes if b['detected_automatically'])
+    accepted = sum(1 for b in boxes if b['detected_automatically'] and b['user_verified'])
+    manual = sum(1 for b in boxes if not b['detected_automatically'])
+    deletes = sum(1 for c in corrections if c.get('correction_type') == 'deleted')
+    adds = sum(1 for c in corrections if c.get('correction_type') == 'added')
+    return jsonify({
+        'publication': {
+            'id': pub.id, 'file': pub.original_filename,
+            'type': pub.publication_type, 'pages': pub.total_pages,
+            'processed': pub.processed,
+        },
+        'summary': {
+            'boxes': len(boxes), 'auto_detected': auto, 'auto_accepted': accepted,
+            'manual_or_drawn': manual,
+            'corrections_added': adds, 'corrections_deleted': deletes,
+        },
+        'boxes': boxes,
+        'corrections': corrections,
+    })
+
+
 @app.route('/api/db_health', methods=['GET'])
 def db_health_check():
     """Check database connection and transaction state"""

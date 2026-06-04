@@ -106,8 +106,14 @@ app.config['SESSION_COOKIE_SECURE'] = os.environ.get('RAILWAY_ENVIRONMENT') is n
 app.config['SESSION_COOKIE_HTTPONLY'] = True  # Prevent XSS attacks
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'  # CSRF protection
 
-# Upload configuration
-app.config['UPLOAD_FOLDER'] = 'static/uploads'
+# Upload configuration.
+# UPLOAD_FOLDER must point at a PERSISTENT location in production. On Railway
+# the container filesystem is ephemeral (wiped every redeploy/restart), so a
+# Railway volume must back this path or uploaded PDFs and rendered page images
+# disappear on the next deploy. Set UPLOAD_FOLDER env to a volume-mounted dir
+# (e.g. /tmp/uploads when the volume is mounted at /tmp). Defaults to the local
+# relative path for dev.
+app.config['UPLOAD_FOLDER'] = os.environ.get('UPLOAD_FOLDER', 'static/uploads')
 app.config['MAX_CONTENT_LENGTH'] = 500 * 1024 * 1024  # 500MB max file size
 
 # Security configuration for file uploads

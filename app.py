@@ -11212,7 +11212,20 @@ def intelligent_detect_ad(page_id):
         
         db.session.add(ad_box)
         db.session.commit()
-        
+
+        # Capture as a positive correction (you marked this region as an ad), so
+        # the markup is recorded as training signal alongside deletions.
+        try:
+            SimpleAdLearner.save_user_correction(
+                publication_id=publication.id, page_id=page_id,
+                x=detected_box['x'], y=detected_box['y'],
+                width=detected_box['width'], height=detected_box['height'],
+                is_ad=True, correction_type='added',
+                publication_type=publication.publication_type,
+            )
+        except Exception as e:
+            print(f"Warning: could not save positive correction: {e}")
+
         # Automatically extract features for ML training
         try:
             box_coords = {'x': detected_box['x'], 'y': detected_box['y'], 'width': detected_box['width'], 'height': detected_box['height']}
@@ -11702,10 +11715,22 @@ def add_manual_box(page_id):
         
         db.session.add(ad_box)
         db.session.commit()
-        
+
+        # Capture as a positive correction (you drew this ad), recording the
+        # markup as training signal alongside deletions.
+        try:
+            SimpleAdLearner.save_user_correction(
+                publication_id=publication.id, page_id=page_id,
+                x=data['x'], y=data['y'], width=data['width'], height=data['height'],
+                is_ad=True, correction_type='added',
+                publication_type=publication.publication_type,
+            )
+        except Exception as e:
+            print(f"Warning: could not save positive correction: {e}")
+
         # Recalculate totals
         update_totals(page_id)
-        
+
         return jsonify({
             'success': True,
             'box_id': ad_box.id,

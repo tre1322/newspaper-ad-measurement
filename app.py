@@ -10873,6 +10873,19 @@ def ad_judge_health():
         info['verdict_cache_rows'] = AdJudgeCache.query.count()
     except Exception as e:
         info['verdict_cache_rows'] = f'err: {e}'
+    # Upload storage diagnostics — confirms the persistent-volume fix. If
+    # pdf_count survives a redeploy, the volume is working.
+    try:
+        uf = app.config['UPLOAD_FOLDER']
+        info['upload_folder'] = uf
+        info['upload_folder_exists'] = os.path.isdir(uf)
+        info['upload_writable'] = os.access(uf, os.W_OK) if os.path.isdir(uf) else False
+        pdfs_dir = os.path.join(uf, 'pdfs')
+        pages_dir = os.path.join(uf, 'pages')
+        info['pdf_count'] = len(os.listdir(pdfs_dir)) if os.path.isdir(pdfs_dir) else 0
+        info['page_image_count'] = len(os.listdir(pages_dir)) if os.path.isdir(pages_dir) else 0
+    except Exception as e:
+        info['upload_folder'] = f'err: {e}'
     try:
         recent = Publication.query.order_by(Publication.id.desc()).limit(5).all()
         pubs = []

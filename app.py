@@ -3461,6 +3461,71 @@ def _demote_containers(candidates, min_children=3):
     return out
 
 
+def _merge_overlapping_boxes(boxes, iou_thresh=0.1, containment_thresh=0.5):
+    """Merge boxes that cover the SAME ad into one (run after judging).
+
+    Two boxes merge if they overlap meaningfully (IoU > iou_thresh), one is
+    half-inside the other (containment > containment_thresh), or one's center
+    lies inside the other. This collapses the common case where the bordered
+    detector and the image/cluster detector each box the same ad (e.g. an
+    anniversary ad's frame plus its inset photo) into a single box.
+
+    It deliberately does NOT merge merely-adjacent boxes (IoU ~ 0, centers
+    outside each other), so side-by-side directory/sponsor cards stay separate.
+    Returns merged dicts; each keeps the source + text_preview of its largest
+    component and the max confidence.
+    """
+    items = [dict(b) for b in boxes
+             if b.get('width', 0) > 0 and b.get('height', 0) > 0]
+    n = len(items)
+    if n <= 1:
+        return items
+
+    parent = list(range(n))
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra != rb:
+            parent[ra] = rb
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a, b = items[i], items[j]
+            if (_iou(a, b) > iou_thresh
+                    or _containment(a, b) > containment_thresh
+                    or _center_inside(a, b) or _center_inside(b, a)):
+                union(i, j)
+
+    groups = {}
+    for i in range(n):
+        groups.setdefault(find(i), []).append(i)
+
+    merged = []
+    for members in groups.values():
+        if len(members) == 1:
+            merged.append(items[members[0]])
+            continue
+        x1 = min(items[m]['x'] for m in members)
+        y1 = min(items[m]['y'] for m in members)
+        x2 = max(items[m]['x'] + items[m]['width'] for m in members)
+        y2 = max(items[m]['y'] + items[m]['height'] for m in members)
+        largest = max(members, key=lambda m: items[m]['width'] * items[m]['height'])
+        conf = max(items[m].get('confidence', 0.0) for m in members)
+        merged.append({
+            'x': x1, 'y': y1, 'width': x2 - x1, 'height': y2 - y1,
+            'source': items[largest].get('source', 'merged'),
+            'text_preview': items[largest].get('text_preview', ''),
+            'confidence': conf,
+        })
+    return merged
+
+
 def _suppressed_by_corrections(box, page, publication_type, corrections):
     """True if a similar box was previously marked not-an-ad on the same publication_type."""
     if not corrections:
@@ -3896,38 +3961,51 @@ def _detect_and_save_ads(pub_id):
                 judge_unavailable_logged = True
             continue
 
-        # Layer 3: persist AD verdicts; collect non-AD text for profile update.
+        # Layer 3: collect AD verdicts, merge same-ad duplicates, persist;
+        # learn from the non-ADs.
+        ad_cands = []
         for idx_in_keep, verdict in enumerate(verdicts):
             cand = cands[keep_idx[idx_in_keep]]
             if verdict.verdict == VERDICT_AD:
-                try:
-                    # Tag the source with the underlying generator so the UI label is informative.
-                    source_tag = f"auto_{cand['source']}"
-                    if len(source_tag) > 50:
-                        source_tag = source_tag[:50]
-                    ad_box = _make_ad_box(page, publication, config, cand, source_tag)
-                    ad_box.confidence_score = 0.9 if verdict.cache_hit else 0.95
-                    db.session.add(ad_box)
-                    total_saved += 1
-                    # Count by source for layout stats.
-                    src = cand['source']
-                    if 'bordered' in src:
-                        layout_counts['bordered'] += 1
-                    elif 'cluster' in src:
-                        layout_counts['cluster'] += 1
-                    elif 'image' in src:
-                        layout_counts['image'] += 1
-                    elif 'vision_logo' in src:
-                        layout_counts['vision_logo'] += 1
-                    elif 'template' in src:
-                        layout_counts['template_match'] += 1
-                except Exception as e:
-                    print(f"  failed to build AdBox: {e}")
+                c = dict(cand)
+                c['confidence'] = 0.9 if verdict.cache_hit else 0.95
+                ad_cands.append(c)
             else:
                 # EDITORIAL or FURNITURE -- learn from it.
                 preview = cand.get('text_preview', '').strip()
                 if preview:
                     non_ad_previews.append(preview)
+
+        # Collapse boxes that cover the same ad (bordered frame + inset photo,
+        # etc.) so each ad is one box; adjacent distinct ads stay separate.
+        before_merge = len(ad_cands)
+        ad_cands = _merge_overlapping_boxes(ad_cands)
+        if before_merge != len(ad_cands):
+            print(f"  merged {before_merge} -> {len(ad_cands)} ad boxes (overlaps collapsed)")
+
+        for cand in ad_cands:
+            try:
+                # Tag the source with the underlying generator so the UI label is informative.
+                source_tag = f"auto_{cand['source']}"
+                if len(source_tag) > 50:
+                    source_tag = source_tag[:50]
+                ad_box = _make_ad_box(page, publication, config, cand, source_tag)
+                db.session.add(ad_box)
+                total_saved += 1
+                # Count by source for layout stats.
+                src = cand['source']
+                if 'bordered' in src:
+                    layout_counts['bordered'] += 1
+                elif 'cluster' in src:
+                    layout_counts['cluster'] += 1
+                elif 'image' in src:
+                    layout_counts['image'] += 1
+                elif 'vision_logo' in src:
+                    layout_counts['vision_logo'] += 1
+                elif 'template' in src:
+                    layout_counts['template_match'] += 1
+            except Exception as e:
+                print(f"  failed to build AdBox: {e}")
 
         # Commit per-page.
         try:

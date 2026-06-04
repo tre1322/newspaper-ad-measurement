@@ -13,7 +13,7 @@ def _box(x, y, w, h):
 
 def run():
     # Import after arg-parse so failures are clearer.
-    from app import _iou, _containment, _dedupe_against, _demote_containers
+    from app import _iou, _containment, _dedupe_against, _demote_containers, _merge_overlapping_boxes
     from ad_judge import parse_response, VERDICT_AD, VERDICT_EDITORIAL, VERDICT_FURNITURE
     from pdf_structure_analyzer import PDFStructureAdDetector
 
@@ -143,6 +143,36 @@ def run():
     # End-to-end: frame + 4 cards through demotion then dedupe -> 4 boxes kept.
     kept_dc = _dedupe_against(_demote_containers([frame, card_a, card_b, card_c, card_d]), accepted=[])
     check("demote+dedupe: directory yields 4 card boxes, not 1 frame", len(kept_dc) == 4)
+
+    # --- _merge_overlapping_boxes: collapse same-ad duplicates, keep neighbors ---
+    # Bordered frame for the whole ad + an image box for the inset photo that
+    # partially overlaps it (the anniversary-ad case) -> one box.
+    frame_ad = _box(100, 100, 600, 300)
+    inset_photo = _box(450, 120, 280, 260)  # overlaps the right half of frame_ad
+    m = _merge_overlapping_boxes([frame_ad, inset_photo])
+    check("merge: overlapping frame+photo collapse to 1", len(m) == 1)
+    if len(m) == 1:
+        # union must cover both
+        check("merge: union box covers both components",
+              m[0]['x'] <= 100 and m[0]['y'] <= 100
+              and m[0]['x'] + m[0]['width'] >= 730 and m[0]['y'] + m[0]['height'] >= 400)
+
+    # Two side-by-side sponsor cards with a real gap must NOT merge.
+    card_l = _box(0, 0, 200, 150)
+    card_r = _box(230, 0, 200, 150)  # 30px gap, no overlap
+    m2 = _merge_overlapping_boxes([card_l, card_r])
+    check("merge: adjacent distinct cards stay separate", len(m2) == 2)
+
+    # A small box whose center sits inside a larger one merges (nested photo).
+    big = _box(0, 0, 500, 400)
+    nested = _box(300, 250, 180, 120)  # center inside big
+    m3 = _merge_overlapping_boxes([big, nested])
+    check("merge: nested box folds into parent", len(m3) == 1)
+
+    # Three boxes, two overlap + one far away -> 2 groups.
+    far = _box(1000, 1000, 100, 100)
+    m4 = _merge_overlapping_boxes([frame_ad, inset_photo, far])
+    check("merge: far box untouched while overlap pair merges", len(m4) == 2)
 
     # --- Claude response parser ---
     # Well-formed 2-image response.

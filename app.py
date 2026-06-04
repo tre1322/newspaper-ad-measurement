@@ -238,8 +238,16 @@ def validate_pdf_file(file_path):
 _processing_publications = set()
 _processing_lock = None
 
-def start_background_processing(pub_id):
-    """Start background processing for a publication"""
+def start_background_processing(pub_id, run_async=True):
+    """Start background processing for a publication.
+
+    By default runs in a daemon thread so the web request returns immediately
+    (the processing_status page polls /api/processing_status for progress).
+    This is required on Railway: detection renders every page and makes Claude
+    Opus calls — a few minutes — and a synchronous request would be killed by
+    the gunicorn worker timeout. Pass run_async=False for tests/CLI that need
+    to block until processing finishes.
+    """
     global _processing_publications, _processing_lock
     
     try:
@@ -416,19 +424,41 @@ def start_background_processing(pub_id):
                     except:
                         pass
     
-    # FIXED: Run processing synchronously instead of threading (ensures completion)
-    try:
-        print(f"Running processing synchronously for publication {pub_id}")
-        process_in_background()
-        print(f"Synchronous processing completed for publication {pub_id}")
-    except Exception as e:
-        print(f"Failed to run synchronous processing: {e}")
-        # Remove from processing set on failure
+    if run_async:
+        # Run in a daemon thread so the HTTP request returns immediately and the
+        # gunicorn worker is never blocked by the multi-minute render+judge job.
         try:
-            with _processing_lock:
-                _processing_publications.discard(pub_id)
-        except:
-            pass
+            worker = threading.Thread(
+                target=process_in_background,
+                name=f"process-pub-{pub_id}",
+                daemon=True,
+            )
+            worker.start()
+            print(f"Spawned background processing thread for publication {pub_id}")
+        except Exception as e:
+            print(f"Failed to spawn processing thread ({e}); running synchronously")
+            try:
+                process_in_background()
+            except Exception as e2:
+                print(f"Synchronous fallback failed: {e2}")
+                try:
+                    with _processing_lock:
+                        _processing_publications.discard(pub_id)
+                except Exception:
+                    pass
+    else:
+        # Synchronous path for tests / CLI that must block until done.
+        try:
+            print(f"Running processing synchronously for publication {pub_id}")
+            process_in_background()
+            print(f"Synchronous processing completed for publication {pub_id}")
+        except Exception as e:
+            print(f"Failed to run synchronous processing: {e}")
+            try:
+                with _processing_lock:
+                    _processing_publications.discard(pub_id)
+            except:
+                pass
 
 def process_publication_sync(pub_id):
     """Synchronous processing fallback - does basic setup only"""

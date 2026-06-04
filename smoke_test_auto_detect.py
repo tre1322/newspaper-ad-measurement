@@ -71,7 +71,7 @@ def main():
         import traceback as _tb
         t0 = time.time()
         try:
-            start_background_processing(pub_id)
+            start_background_processing(pub_id, run_async=False)
         except Exception as _e:
             print(f"start_background_processing raised: {_e}")
             _tb.print_exc()

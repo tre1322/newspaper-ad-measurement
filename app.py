@@ -10761,6 +10761,53 @@ def verify_page_auto(page_id):
         })
 
 
+@app.route('/api/ad_judge_health', methods=['GET'])
+def ad_judge_health():
+    """Diagnostic for the auto-detect pipeline.
+
+    Reports whether the LIVE process can see the Anthropic SDK + key, the active
+    model, mock mode, the verdict-cache size, and the detection results of recent
+    uploads. NEVER returns the key value itself (only present/absent + length).
+    """
+    info = {}
+    try:
+        import importlib.util
+        info['anthropic_sdk_installed'] = importlib.util.find_spec('anthropic') is not None
+    except Exception as e:
+        info['anthropic_sdk_installed'] = f'check-failed: {e}'
+    try:
+        from ad_judge import resolve_judge_model, _resolve_api_key
+        key = _resolve_api_key()
+        info['api_key_present'] = bool(key)
+        info['api_key_length'] = len(key) if key else 0
+        info['model'] = resolve_judge_model()
+    except Exception as e:
+        info['api_key_present'] = f'check-failed: {e}'
+    info['mock_mode'] = os.environ.get('AD_JUDGE_MOCK', '0')
+    info['railway_env'] = bool(os.environ.get('RAILWAY_ENVIRONMENT'))
+    try:
+        info['verdict_cache_rows'] = AdJudgeCache.query.count()
+    except Exception as e:
+        info['verdict_cache_rows'] = f'err: {e}'
+    try:
+        recent = Publication.query.order_by(Publication.id.desc()).limit(5).all()
+        pubs = []
+        for p in recent:
+            auto = (AdBox.query.join(Page, AdBox.page_id == Page.id)
+                    .filter(Page.publication_id == p.id, AdBox.detected_automatically == True).count())  # noqa: E712
+            total = (AdBox.query.join(Page, AdBox.page_id == Page.id)
+                     .filter(Page.publication_id == p.id).count())
+            pubs.append({
+                'id': p.id, 'file': p.original_filename,
+                'processed': p.processed, 'status': p.safe_processing_status,
+                'auto_boxes': auto, 'total_boxes': total,
+            })
+        info['recent_publications'] = pubs
+    except Exception as e:
+        info['recent_publications'] = f'err: {e}'
+    return jsonify(info)
+
+
 @app.route('/api/db_health', methods=['GET'])
 def db_health_check():
     """Check database connection and transaction state"""

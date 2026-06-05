@@ -32,6 +32,7 @@ import base64
 import hashlib
 import os
 import re
+import time
 from dataclasses import dataclass
 from datetime import datetime
 from typing import List, Optional
@@ -373,16 +374,34 @@ def _call_claude(crops: List[bytes], page_context: Optional[str], model: str):
             },
         })
 
-    resp = client.messages.create(
-        model=model,
-        max_tokens=600,
-        system=[{
-            "type": "text",
-            "text": SYSTEM_PROMPT,
-            "cache_control": {"type": "ephemeral"},
-        }],
-        messages=[{"role": "user", "content": content}],
-    )
+    # Retry transient server-side conditions (529 overloaded, 429 rate-limit,
+    # 5xx) with exponential backoff. Without this a brief Anthropic overload
+    # makes EVERY batch error -> all candidates default to EDITORIAL -> the whole
+    # paper comes back with ~0 ads. Backoff: 2,4,8,16s across 5 attempts.
+    resp = None
+    for attempt in range(5):
+        try:
+            resp = client.messages.create(
+                model=model,
+                max_tokens=600,
+                system=[{
+                    "type": "text",
+                    "text": SYSTEM_PROMPT,
+                    "cache_control": {"type": "ephemeral"},
+                }],
+                messages=[{"role": "user", "content": content}],
+            )
+            break
+        except Exception as e:
+            status = getattr(e, "status_code", None)
+            retryable = status in (429, 500, 502, 503, 529) or "overloaded" in str(e).lower()
+            if retryable and attempt < 4:
+                wait = 2 ** (attempt + 1)  # 2, 4, 8, 16
+                print(f"[ad_judge] transient API error ({status or 'overloaded'}); "
+                      f"retry {attempt + 1}/4 in {wait}s")
+                time.sleep(wait)
+                continue
+            raise
     text = next((b.text for b in resp.content if getattr(b, "type", None) == "text"), "")
     usage = getattr(resp, "usage", None)
     if usage is not None:

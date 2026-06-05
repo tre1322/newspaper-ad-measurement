@@ -409,9 +409,6 @@
                     <button type="button" class="btn btn-info" id="copyAdBtn" title="Copy last measured ad box" disabled>
                         <i class="fas fa-copy"></i> Copy Ad Measurement
                     </button>
-                    <button type="button" class="btn btn-primary" id="matchTemplatesBtn" title="Find ads matching saved templates">
-                        <i class="fas fa-search"></i> Match Templates
-                    </button>
                     {% endif %}
                     <a href="{{ url_for('publication_report', pub_id=publication.id) }}" class="btn btn-success" title="Generate comprehensive report">
                         <i class="fas fa-chart-bar"></i> Generate Report
@@ -657,7 +654,6 @@ let minZoom = 0.25;
 let maxZoom = 3.0;
 let zoomStep = 0.25;
 let lastMeasuredAd = null; // Store the last measured ad for copying
-let pendingTemplateSaves = new Set(); // Track boxes that need templates saved
 
 // Auto-scroll function for when resizing ad boxes near viewport edges
 function autoScrollDuringResize(boxX, boxY, boxWidth, boxHeight, mouseX, mouseY) {
@@ -732,9 +728,6 @@ document.addEventListener('DOMContentLoaded', function() {
     
     // Initialize copy ad functionality
     setupCopyAdButton();
-
-    // Initialize template matching functionality
-    setupMatchTemplatesButton();
 
     // Initialize copy button based on existing ad boxes
     initializeCopyButtonState();
@@ -837,62 +830,6 @@ function setupCopyAdButton() {
             }
         });
     }
-}
-
-// Template Matching functionality
-function setupMatchTemplatesButton() {
-    const matchTemplatesBtn = document.getElementById('matchTemplatesBtn');
-
-    if (matchTemplatesBtn) {
-        matchTemplatesBtn.addEventListener('click', function() {
-            matchTemplates();
-        });
-    }
-}
-
-function matchTemplates() {
-    // Show loading indicator
-    const matchTemplatesBtn = document.getElementById('matchTemplatesBtn');
-    const originalText = matchTemplatesBtn.innerHTML;
-    matchTemplatesBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Matching...';
-    matchTemplatesBtn.disabled = true;
-
-    console.log('🔍 Starting template matching...');
-
-    fetch(`/api/match_templates/{{ page.id }}`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        }
-    })
-    .then(response => response.json())
-    .then(data => {
-        console.log('📊 Template matching response:', data);
-
-        // Reset button
-        matchTemplatesBtn.innerHTML = originalText;
-        matchTemplatesBtn.disabled = false;
-
-        if (data.success) {
-            if (data.matches && data.matches > 0) {
-                showSuccessMessage(`✅ Found ${data.matches} template matches! New ad boxes have been added.`);
-                // Refresh the page to show new ad boxes
-                window.location.reload();
-            } else {
-                showSuccessMessage('ℹ️ No template matches found on this page.');
-            }
-        } else {
-            showErrorMessage('❌ Error matching templates: ' + (data.error || 'Unknown error'));
-        }
-    })
-    .catch(error => {
-        console.error('❌ Template matching error:', error);
-        showErrorMessage('❌ Network error occurred while matching templates');
-
-        // Reset button
-        matchTemplatesBtn.innerHTML = originalText;
-        matchTemplatesBtn.disabled = false;
-    });
 }
 
 function addFullPageAd() {
@@ -1709,9 +1646,6 @@ function updateManualBoxInDatabase(boxId, boxData) {
             updateManualBoxInSidebar(boxId, data);
             updatePageTotalRegular();
 
-            // Mark this box to have its template saved later
-            pendingTemplateSaves.add(boxId);
-
             // Update last measured ad for copying (this was missing!)
             updateLastMeasuredAd(data);
         } else {
@@ -2203,10 +2137,6 @@ function createManualBoxAtPosition(x, y) {
             // Update page total
             updatePageTotalRegular();
 
-            // Auto-save template
-            console.log('🎯 Calling autoSaveTemplate for box_id:', data.box_id);
-            autoSaveTemplate(data.box_id, data.x, data.y, data.width, data.height);
-
             // Show success message
             showSuccessMessage('Manual box created! Drag and resize to fit.');
 
@@ -2243,10 +2173,6 @@ function intelligentDetectAd(x, y, adType) {
             // Add detected ad box to the page
             addDetectedAdBox(data);
             updatePageTotalRegular();
-
-            // IMMEDIATELY show modal for template save (don't wait)
-            console.log('🚀 IMMEDIATELY calling autoSaveTemplate for box:', data.box_id);
-            autoSaveTemplate(data.box_id, data.x, data.y, data.width, data.height);
 
             // Show success message
             showSuccessMessage(`${adType.replace('_', ' ')} ad detected successfully!`);
@@ -2774,8 +2700,6 @@ function createNewBox(x, y, width, height) {
             // Make it immediately interactive
             initializeBoxInteraction(boxElement);
 
-            // Check for template learning opportunity
-            checkForTemplatePrompt(data);
         } else {
             alert('Error creating box: ' + data.error);
         }
@@ -2786,453 +2710,11 @@ function createNewBox(x, y, width, height) {
     });
 }
 
-function checkForTemplatePrompt(response) {
-    if (response.success) {
-        // Wait a moment for the ad box to be drawn
-        setTimeout(() => {
-            const businessName = prompt("Save this ad as a template for automatic detection?\n\nEnter business name (or Cancel to skip):");
-
-            if (businessName && businessName.trim()) {
-                saveAdTemplate(response.box_id, businessName.trim());
-            }
-        }, 500);
-    }
-}
-
-function saveAdTemplate(boxId, businessName = null) {
-    fetch(`/api/save_template/${boxId}`, {
-        method: 'POST',
-        headers: {
-            'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-            business_name: businessName
-        })
-    })
-    .then(response => response.json())
-    .then(data => {
-        if (data.success && data.needs_business_name) {
-            // Show business name selection dialog
-            promptBusinessName(boxId, data.suggested_names);
-        } else if (data.success) {
-            showSuccessMessage(data.message);
-        } else {
-            showErrorMessage('Template save failed: ' + data.error);
-        }
-    })
-    .catch(error => {
-        console.error('Template save error:', error);
-        showErrorMessage('Error saving template');
-    });
-}
-
-function promptBusinessName(boxId, suggestedNames) {
-    console.log('🔔 promptBusinessName called:', {boxId, suggestedNames});
-
-    // CRITICAL: Clear any previous dialog WITHOUT resolving the promise
-    const oldDialog = document.getElementById('businessNameDialog');
-    const oldBackdrop = document.getElementById('businessNameBackdrop');
-    if (oldDialog) {
-        console.log('⚠️ Removing old dialog element (without resolving promise)');
-        oldDialog.remove();
-    }
-    if (oldBackdrop) {
-        oldBackdrop.remove();
-    }
-
-    // Store current box ID for submission
-    window.currentBoxId = boxId;
-
-    const dialog = document.createElement('div');
-    dialog.style.cssText = `
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: white;
-        padding: 20px;
-        border-radius: 8px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-        z-index: 10000;
-        min-width: 400px;
-    `;
-
-    let html = `
-        <h3>Select Business Name for Template</h3>
-        <p style="font-size: 12px; color: #666;">Box ID: ${boxId}</p>
-        <div id="modalContent">
-    `;
-
-    if (suggestedNames && suggestedNames.length > 0) {
-        html += '<p>Detected text from ad:</p>';
-        html += '<div style="margin: 10px 0;">';
-        suggestedNames.forEach((name, idx) => {
-            html += `
-                <label style="display: block; padding: 8px; cursor: pointer; border: 1px solid #ddd; margin: 5px 0; border-radius: 4px;">
-                    <input type="radio" name="businessName" value="${name}" ${idx === 0 ? 'checked' : ''}>
-                    ${name}
-                </label>
-            `;
-        });
-        html += '</div>';
-    } else {
-        html += '<p style="color: #666; font-style: italic;">Enter business name below (OCR suggestions loading...)</p>';
-    }
-
-    html += `
-            <p>Or enter custom name:</p>
-            <input type="text" id="customBusinessName" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin: 10px 0;">
-            <div style="margin-top: 15px; text-align: right;">
-                <button onclick="cancelBusinessNamePrompt()" style="padding: 8px 16px; margin-right: 10px; background: #ccc; border: none; border-radius: 4px; cursor: pointer;">Cancel</button>
-                <button onclick="confirmBusinessName()" style="padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">Save Template</button>
-            </div>
-        </div>
-    `;
-
-    dialog.innerHTML = html;
-    dialog.id = 'businessNameDialog';
-
-    // CRITICAL: Stop clicks from propagating through modal
-    dialog.addEventListener('click', function(e) {
-        e.stopPropagation();
-        console.log('🛑 Dialog click stopped propagation');
-    });
-
-    console.log('📋 Appending dialog to document.body');
-    document.body.appendChild(dialog);
-    console.log('✅ Dialog appended - should be visible NOW');
-
-    // Add backdrop
-    const backdrop = document.createElement('div');
-    backdrop.id = 'businessNameBackdrop';
-    backdrop.style.cssText = `
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0,0,0,0.5);
-        z-index: 9999;
-    `;
-
-    // CRITICAL: Stop clicks on backdrop from propagating
-    backdrop.addEventListener('click', function(e) {
-        e.stopPropagation();
-        console.log('🛑 Backdrop click stopped propagation');
-    });
-
-    document.body.appendChild(backdrop);
-}
-
-function confirmBusinessName() {
-    const customName = document.getElementById('customBusinessName').value.trim();
-    const selectedRadio = document.querySelector('input[name="businessName"]:checked');
-
-    const businessName = customName || (selectedRadio ? selectedRadio.value : null);
-
-    if (!businessName) {
-        alert('Please select or enter a business name');
-        return;
-    }
-
-    const boxId = window.currentBoxId;
-    if (!boxId) {
-        alert('Error: Box ID not found');
-        return;
-    }
-
-    console.log('✅✅✅ User confirmed business name:', businessName, 'for Box:', boxId);
-
-    // Close modal MANUALLY (don't use cancelBusinessNamePrompt - it resolves the promise)
-    const dialog = document.getElementById('businessNameDialog');
-    const backdrop = document.getElementById('businessNameBackdrop');
-    if (dialog) {
-        console.log('   Removing dialog');
-        dialog.remove();
-    }
-    if (backdrop) {
-        console.log('   Removing backdrop');
-        backdrop.remove();
-    }
-
-    // Save with business name
-    console.log('   Calling saveAdTemplate for Box:', boxId, 'with name:', businessName);
-    saveAdTemplate(boxId, businessName);
-
-    // Resolve the promise to continue queue processing
-    console.log('   Resolving promise to continue queue');
-    if (window.resolveBusinessNameModal) {
-        window.resolveBusinessNameModal();
-        window.resolveBusinessNameModal = null;
-    }
-}
-
-function cancelBusinessNamePrompt() {
-    console.log('🚫🚫🚫 cancelBusinessNamePrompt CALLED');
-    console.trace('Call stack:');  // This will show WHERE it was called from
-
-    const dialog = document.getElementById('businessNameDialog');
-    const backdrop = document.getElementById('businessNameBackdrop');
-
-    console.log('   Dialog exists:', !!dialog);
-    console.log('   Backdrop exists:', !!backdrop);
-    console.log('   Current Box ID:', window.currentBoxId);
-    console.log('   Resolve function exists:', !!window.resolveBusinessNameModal);
-
-    if (dialog) dialog.remove();
-    if (backdrop) backdrop.remove();
-
-    // Resolve the promise to continue queue processing (even if cancelled)
-    if (window.resolveBusinessNameModal) {
-        console.log('⚠️ User cancelled business name modal - RESOLVING PROMISE');
-        window.resolveBusinessNameModal();
-        window.resolveBusinessNameModal = null;
-    }
-}
-
-// Template save queue to prevent race conditions
-let templateSaveQueue = [];
-let currentlySaving = false;
-
-async function autoSaveTemplate(boxId, x, y, width, height) {
-    const timestamp = new Date().toISOString();
-    console.log('');
-    console.log('═══════════════════════════════════════════════════════════');
-    console.log(`🎯 [${timestamp}] ADDING TO QUEUE`);
-    console.log(`   Box ID: ${boxId}`);
-    console.log(`   Coordinates: (${x}, ${y}) - ${width}x${height}`);
-    console.log(`   Currently saving: ${currentlySaving}`);
-    console.log(`   Queue length before: ${templateSaveQueue.length}`);
-    console.log('═══════════════════════════════════════════════════════════');
-    console.log('');
-
-    // Add to queue
-    templateSaveQueue.push({boxId, x, y, width, height});
-
-    console.log(`   Queue length after: ${templateSaveQueue.length}`);
-    console.log(`   Queue contents: ${JSON.stringify(templateSaveQueue.map(item => item.boxId))}`);
-
-    // Process queue if not already processing
-    if (!currentlySaving) {
-        console.log(`   ✅ Starting queue processing NOW for Box ${boxId}`);
-        processTemplateSaveQueue();
-    } else {
-        console.log(`   ⏸️ Queue is already processing, Box ${boxId} will be processed later`);
-    }
-}
-
-async function processTemplateSaveQueue() {
-    if (templateSaveQueue.length === 0) {
-        currentlySaving = false;
-        console.log('');
-        console.log('✅✅✅ QUEUE EMPTY - All templates processed ✅✅✅');
-        console.log('');
-        return;
-    }
-
-    currentlySaving = true;
-    const {boxId, x, y, width, height} = templateSaveQueue.shift();
-
-    const timestamp = new Date().toISOString();
-    console.log('');
-    console.log('▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓');
-    console.log(`📋 [${timestamp}] PROCESSING FROM QUEUE`);
-    console.log(`   Box ID: ${boxId}`);
-    console.log(`   Remaining in queue: ${templateSaveQueue.length}`);
-    console.log(`   Queue contents: ${JSON.stringify(templateSaveQueue.map(item => item.boxId))}`);
-    console.log('▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓');
-    console.log('');
-
-    // SHOW MODAL IMMEDIATELY - no loading, no waiting for API
-    console.log(`🔔 [${timestamp}] SHOWING MODAL IMMEDIATELY FOR BOX: ${boxId}`);
-    const modalPromise = showBusinessNameModalAsync(boxId, []); // Empty array = show input field right away
-
-    try {
-        console.log(`📤 [${new Date().toISOString()}] SENDING API REQUEST for Box: ${boxId} (in background)`);
-        const response = await fetch(`/api/save_template/${boxId}`, {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({x, y, width, height, auto_saved: true})
-        });
-
-        const receiveTimestamp = new Date().toISOString();
-        console.log(`📥 [${receiveTimestamp}] RECEIVED API RESPONSE for Box: ${boxId}`);
-        const data = await response.json();
-        console.log(`   Response for Box ${boxId}:`, data);
-        console.log(`   Suggested names for Box ${boxId}:`, data.suggested_names);
-
-        if (data.needs_business_name && data.suggested_names && data.suggested_names.length > 0) {
-            console.log('');
-            console.log('🎨 OCR SUGGESTIONS RECEIVED - Updating modal with suggestions');
-            console.log(`🎨 Suggestions: ${JSON.stringify(data.suggested_names)}`);
-            console.log('');
-            // Update the modal with OCR suggestions if available
-            populateBusinessNameModal(boxId, data.suggested_names);
-        }
-
-        // Wait for user input before processing next
-        console.log(`⏸️ WAITING for user to complete modal for Box ${boxId}...`);
-        await modalPromise;
-        console.log(`✅ User completed modal for Box ${boxId}`);
-
-    } catch (error) {
-        console.error(`❌❌❌ FETCH ERROR for Box ${boxId}:`, error);
-        console.error('Error stack:', error.stack);
-        // Even on error, wait for user to close modal
-        await modalPromise;
-    }
-
-    // Process next item in queue
-    console.log('');
-    console.log(`➡️ Moving to next item in queue...`);
-    console.log('');
-    processTemplateSaveQueue();
-}
-
-function showBusinessNameModalAsync(boxId, suggestedNames) {
-    return new Promise((resolve) => {
-        console.log('🔔 showBusinessNameModalAsync called:', {boxId, suggestedNames});
-
-        // Store resolve function to call when user submits
-        window.resolveBusinessNameModal = resolve;
-
-        // Always show modal with input field immediately
-        // If we have suggestions, show them; if not, just show empty input
-        promptBusinessName(boxId, suggestedNames || []);
-    });
-}
-
-function promptBusinessNameLoading(boxId) {
-    console.log('🔔 promptBusinessNameLoading called for box:', boxId);
-    console.log('🔔 This modal will show data for BOX ID:', boxId);
-
-    // CRITICAL: Clear any previous dialog WITHOUT resolving the promise
-    const oldDialog = document.getElementById('businessNameDialog');
-    const oldBackdrop = document.getElementById('businessNameBackdrop');
-    if (oldDialog) {
-        console.log('⚠️ Removing old dialog element (without resolving promise)');
-        oldDialog.remove();
-    }
-    if (oldBackdrop) {
-        oldBackdrop.remove();
-    }
-
-    // Store current box ID for submission
-    window.currentBoxId = boxId;
-    console.log('🔔 Stored window.currentBoxId =', window.currentBoxId);
-
-    const dialog = document.createElement('div');
-    dialog.style.cssText = `
-        position: fixed;
-        top: 50%;
-        left: 50%;
-        transform: translate(-50%, -50%);
-        background: white;
-        padding: 20px;
-        border-radius: 8px;
-        box-shadow: 0 4px 6px rgba(0,0,0,0.3);
-        z-index: 10000;
-        min-width: 400px;
-    `;
-
-    dialog.innerHTML = `
-        <h3>Select Business Name for Template</h3>
-        <p style="font-size: 12px; color: #666;">Box ID: ${boxId}</p>
-        <div id="modalContent" style="padding: 20px; text-align: center;">
-            <p>Loading ad text for Box ${boxId}...</p>
-            <div style="margin: 20px 0;">⏳</div>
-        </div>
-    `;
-
-    dialog.id = 'businessNameDialog';
-    document.body.appendChild(dialog);
-
-    // Add backdrop
-    const backdrop = document.createElement('div');
-    backdrop.id = 'businessNameBackdrop';
-    backdrop.style.cssText = `
-        position: fixed;
-        top: 0;
-        left: 0;
-        width: 100%;
-        height: 100%;
-        background: rgba(0,0,0,0.5);
-        z-index: 9999;
-    `;
-    document.body.appendChild(backdrop);
-}
-
-function populateBusinessNameModal(boxId, suggestedNames) {
-    console.log('📝 populateBusinessNameModal called for BOX ID:', boxId);
-    console.log('📝 Suggested names:', suggestedNames);
-
-    const modalContent = document.getElementById('modalContent');
-    if (!modalContent) {
-        console.error('❌ Modal content element not found!');
-        return;
-    }
-
-    // Update box ID
-    window.currentBoxId = boxId;
-    console.log('📝 Updated window.currentBoxId to:', boxId);
-
-    let html = `<p><strong>Box ID: ${boxId}</strong></p>`;
-    html += '<p>Detected text from ad:</p>';
-
-    if (suggestedNames && suggestedNames.length > 0) {
-        html += '<div style="margin: 10px 0;">';
-        suggestedNames.forEach((name, idx) => {
-            html += `
-                <label style="display: block; padding: 8px; cursor: pointer; border: 1px solid #ddd; margin: 5px 0; border-radius: 4px;">
-                    <input type="radio" name="businessName" value="${name}" ${idx === 0 ? 'checked' : ''}>
-                    ${name}
-                </label>
-            `;
-        });
-        html += '</div>';
-    } else {
-        html += '<p style="color: #999;">No text detected</p>';
-    }
-
-    html += `
-        <p>Or enter custom name:</p>
-        <input type="text" id="customBusinessName" style="width: 100%; padding: 8px; border: 1px solid #ddd; border-radius: 4px; margin: 10px 0;">
-        <div style="margin-top: 15px; text-align: right;">
-            <button onclick="cancelBusinessNamePrompt()" style="padding: 8px 16px; margin-right: 10px; background: #ccc; border: none; border-radius: 4px; cursor: pointer;">Cancel</button>
-            <button onclick="confirmBusinessName()" style="padding: 8px 16px; background: #4CAF50; color: white; border: none; border-radius: 4px; cursor: pointer;">Save Template</button>
-        </div>
-    `;
-
-    modalContent.innerHTML = html;
-}
-
-function savePendingTemplates() {
-    console.log('=== savePendingTemplates CALLED ===');
-    console.log('Pending count:', pendingTemplateSaves.size);
-    console.log('Pending IDs:', Array.from(pendingTemplateSaves));
-
-    if (pendingTemplateSaves.size === 0) {
-        console.log('No pending templates, returning early');
-        return;
-    }
-
-    // Get all boxes that need templates saved
-    const boxesToSave = Array.from(pendingTemplateSaves);
-    pendingTemplateSaves.clear();
-
-    // Save template for each box
-    boxesToSave.forEach(boxId => {
-        const boxElement = document.querySelector(`[data-box-id="${boxId}"]`);
-        if (boxElement) {
-            const x = parseInt(boxElement.style.left);
-            const y = parseInt(boxElement.style.top);
-            const width = parseInt(boxElement.style.width);
-            const height = parseInt(boxElement.style.height);
-
-            autoSaveTemplate(boxId, x, y, width, height);
-        }
-    });
-}
+// Template / business-name modal feature removed (2026-06-04).
+// The Claude Vision judge is the primary detector; the exact-OCR-text template
+// matcher added friction on every manual correction for little payoff.
+// savePendingTemplates kept as a no-op so existing callers don't throw.
+function savePendingTemplates() {}
 
 function createBoxElement(boxId, x, y, width, height) {
     const box = document.createElement('div');

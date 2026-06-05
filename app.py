@@ -3997,7 +3997,7 @@ def _detect_and_save_ads(pub_id):
         UserCorrection.created_date >= since,
     ).all()
     profile_sigs = _load_profile_signatures(pub_type)
-    shared_headers = _load_shared_headers(_masthead(publication.filename))
+    shared_headers = _load_shared_headers(_masthead(publication.original_filename))
     print(f"[auto-detect] pub={pub_id} type={pub_type} "
           f"corrections={len(corrections)} profile_sigs={len(profile_sigs)} "
           f"shared_headers={len(shared_headers)} "
@@ -10900,7 +10900,7 @@ def update_box(box_id):
                     (ad_box.x, ad_box.y, ad_box.width, ad_box.height),
                     page.width_pixels, page.height_pixels)
                 if strip:
-                    _record_shared_header(publication.filename, strip)
+                    _record_shared_header(publication.original_filename, strip)
         except Exception as _e:
             print(f"[shared-header] learn skipped: {_e}")
 

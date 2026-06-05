@@ -120,29 +120,37 @@ def run():
     check("dedupe: two sibling ads side-by-side both survive",
           len(kept) == 2)
 
-    # --- _demote_containers: section/page frames drop, distinct ads survive ---
-    # A directory frame enclosing 4 small business-card ads must be dropped so
-    # the cards survive dedupe instead of collapsing into the frame.
-    frame = _box(0, 0, 1000, 800)          # big section border
-    card_a = _box(20, 20, 200, 150)
-    card_b = _box(240, 20, 200, 150)
-    card_c = _box(20, 200, 200, 150)
-    card_d = _box(240, 200, 200, 150)
-    demoted = _demote_containers([frame, card_a, card_b, card_c, card_d])
-    check("demote: frame enclosing 4 cards is dropped", frame not in demoted)
-    check("demote: all 4 inner cards survive",
-          all(c in demoted for c in (card_a, card_b, card_c, card_d)))
+    # --- _demote_containers: many-tile frames drop, display ads survive ---
+    # A real directory frame enclosing a 3x3 grid of 9 tiles must be dropped so
+    # the tiles survive dedupe instead of collapsing into it.
+    frame = _box(0, 0, 1000, 900)          # big section border
+    grid = []
+    for gy in (20, 320, 620):
+        for gx in (20, 350, 680):
+            grid.append(_box(gx, gy, 280, 250))   # 9 tiles, centers inside frame
+    demoted = _demote_containers([frame] + grid)
+    check("demote: frame over a 9-tile directory is dropped", frame not in demoted)
+    check("demote: all 9 directory tiles survive", all(t in demoted for t in grid))
 
-    # A single display ad with one decorative sub-panel keeps BOTH (only 1 child
-    # < threshold 3), so dedupe can later prefer the outer frame.
-    ad = _box(0, 0, 800, 300)
+    # A display ad with a handful (4) of internal elements must NOT be demoted at
+    # the default threshold (8): the CCCitizen fix -- don't fragment an ad just
+    # because it has a few internal text/image blocks.
+    ad = _box(0, 0, 800, 600)
+    inners = [_box(20, 20, 300, 200), _box(360, 20, 300, 200),
+              _box(20, 260, 300, 200), _box(360, 260, 300, 200)]
+    demoted_ad = _demote_containers([ad] + inners)
+    check("demote: display ad with 4 internal elements is NOT demoted (threshold 8)",
+          ad in demoted_ad)
+
+    # A single decorative sub-panel never demotes its parent.
+    parent = _box(0, 0, 800, 300)
     sub = _box(600, 40, 150, 200)
-    demoted2 = _demote_containers([ad, sub])
-    check("demote: ad with single sub-panel is NOT demoted", ad in demoted2 and sub in demoted2)
+    demoted2 = _demote_containers([parent, sub])
+    check("demote: ad with single sub-panel is NOT demoted", parent in demoted2 and sub in demoted2)
 
-    # End-to-end: frame + 4 cards through demotion then dedupe -> 4 boxes kept.
-    kept_dc = _dedupe_against(_demote_containers([frame, card_a, card_b, card_c, card_d]), accepted=[])
-    check("demote+dedupe: directory yields 4 card boxes, not 1 frame", len(kept_dc) == 4)
+    # End-to-end: 9-tile directory through demotion then dedupe -> 9 tile boxes.
+    kept_dc = _dedupe_against(_demote_containers([frame] + grid), accepted=[])
+    check("demote+dedupe: 9-tile directory yields the tiles, not 1 frame", len(kept_dc) == 9)
 
     # --- _merge_overlapping_boxes: collapse same-ad duplicates, keep neighbors ---
     # Bordered frame for the whole ad + an image box for the inset photo that

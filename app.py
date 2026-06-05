@@ -3434,18 +3434,21 @@ def _dedupe_against(candidates, accepted, iou_thresh=0.35, containment_thresh=0.
     return kept
 
 
-def _demote_containers(candidates, min_children=3):
+def _demote_containers(candidates, min_children=8):
     """Drop 'container' candidates that enclose many distinct ads.
 
     A box whose bounds contain the CENTER of >= min_children other candidates
     is almost always a section/page frame (e.g. the border around a
-    'Business/Service Directory' grid), not a single ad. Left in place, such a
-    frame sorts first in the area-descending dedupe and swallows every distinct
-    ad inside it. We drop the frame and keep its children.
+    'Business/Service Directory' grid of 10-30 tiles), not a single ad. Left in
+    place, such a frame sorts first in the area-descending dedupe and swallows
+    every distinct ad inside it. We drop the frame and keep its children.
 
-    A single display ad with one or two decorative sub-panels has < min_children
-    children, so it is left intact (and still wins over its sub-panels in
-    _dedupe_against). Returns the surviving candidates in input order.
+    The threshold is 8 (not 3) on purpose: a single DISPLAY ad commonly contains
+    3-7 internal text/image elements, and demoting those fragments the ad and
+    loses its area. Only genuine multi-tile directories (>= 8 tiles) demote.
+    Validated by ad-area agreement on real Observer + CCCitizen papers: raising
+    3 -> 8 improved coverage on both (Observer 51->64%, CCCitizen 56->66%).
+    Returns the surviving candidates in input order.
     """
     out = []
     for i, c in enumerate(candidates):

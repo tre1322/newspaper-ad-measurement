@@ -9875,11 +9875,15 @@ def get_processing_status(pub_id):
         
         # Start background processing if not started
         if status == 'uploaded':
-            # Trigger background processing
+            # Trigger background processing. Do NOT persist 'processing' here:
+            # process_in_background reads the DB status and skips if it's already
+            # in {'processing','extracting_pages',...}. Committing 'processing'
+            # races the just-spawned thread and makes it no-op — which silently
+            # broke the restart / re-trigger path. Let the thread set its own
+            # 'extracting_pages' (it does so within a second); the in-flight set
+            # guard already prevents duplicate spawns from subsequent polls.
             start_background_processing(pub_id)
-            publication.set_processing_status('processing')
-            db.session.commit()
-            status = 'processing'
+            status = 'processing'  # reported to the client; thread owns the DB value
         
         # Handle basic_completed status (when synchronous processing was used)
         if status == 'basic_completed':

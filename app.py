@@ -3717,6 +3717,13 @@ def _load_profile_signatures(publication_type):
 
 
 def _profile_matches(text_preview, signatures):
+    # Suppress only when the candidate's text STARTS WITH a learned furniture /
+    # masthead prefix. The old `s in t` substring rule over-matched badly: with
+    # many accumulated signatures, an 8-char fragment appearing ANYWHERE in a
+    # real ad's OCR text wrongly suppressed the ad before it reached the judge
+    # (observed driving AD->0 on pub 327). Prefix-only + a 16-char floor keeps
+    # the legitimate "this candidate begins with the masthead/section header"
+    # case while making a false suppression of a real ad very unlikely.
     if not text_preview or not signatures:
         return False
     t = text_preview.strip().lower()
@@ -3724,9 +3731,9 @@ def _profile_matches(text_preview, signatures):
         if not sig:
             continue
         s = sig.strip().lower()
-        if len(s) < 8:
+        if len(s) < 16:
             continue
-        if t.startswith(s) or s in t:
+        if t.startswith(s):
             return True
     return False
 

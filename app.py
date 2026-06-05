@@ -133,10 +133,13 @@ def check_processing_columns():
     if PROCESSING_COLUMNS_EXIST is not None:
         return PROCESSING_COLUMNS_EXIST
     
-    # Skip column checks in production to prevent hanging
+    # The processing columns are mapped on the Publication model and exist in
+    # every environment (created by db.create_all on fresh DBs; present in prod
+    # Postgres). They're known-good, so skip the information_schema probe (which
+    # historically risked hanging in production) and report True directly.
     if os.environ.get('RAILWAY_ENVIRONMENT'):
-        PROCESSING_COLUMNS_EXIST = False
-        return False
+        PROCESSING_COLUMNS_EXIST = True
+        return True
     
     try:
         with db.engine.connect() as conn:
@@ -596,7 +599,13 @@ class Publication(db.Model):
     ad_percentage = db.Column(db.Float, default=0.0)
     upload_date = db.Column(db.DateTime, default=datetime.utcnow)
     processed = db.Column(db.Boolean, default=False)
-    
+    # Progress-tracking columns. These exist in prod Postgres (added via the
+    # ALTER-TABLE migration block below) and are created by db.create_all on
+    # fresh DBs. They MUST be mapped here or SQLAlchemy silently drops writes,
+    # which is why the processing bar was permanently frozen at 'uploaded'.
+    processing_status = db.Column(db.String(50), default='uploaded')
+    processing_error = db.Column(db.Text)
+
     def __init__(self, **kwargs):
         # Only set processing columns if they exist in the database
         if check_processing_columns():
@@ -3779,7 +3788,7 @@ def _detect_and_save_ads(pub_id):
 
     Flow per page:
       1. Collect candidates from Layer 1 generators (bordered, clusters,
-         vision logos, templates).
+         vision logos).
       2. Dedupe (sort by area desc; outer frames beat inner panels).
       3. Drop candidates that overlap any existing AdBox on the page
          (respects manual draws and prior runs).
@@ -3819,8 +3828,18 @@ def _detect_and_save_ads(pub_id):
 
     judge_unavailable_logged = False
 
-    for page in pages:
+    total_pages = len(pages)
+    for page_idx, page in enumerate(pages, 1):
         print(f"\n[auto-detect] --- page {page.page_number} (id={page.id}) ---")
+        # Surface per-page progress so the bar advances through the (longest)
+        # AI phase instead of sitting at a static 80%. Best-effort; never let a
+        # status-commit failure abort detection.
+        try:
+            publication.set_processing_status(
+                f'ai_detection_page_{page_idx}_of_{total_pages}')
+            db.session.commit()
+        except Exception:
+            db.session.rollback()
         image_filename = f"{publication.filename}_page_{page.page_number}.png"
         image_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pages', image_filename)
         if not os.path.exists(image_path):

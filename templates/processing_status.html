@@ -190,6 +190,20 @@ document.addEventListener('DOMContentLoaded', function() {
             }
         }
         
+        // Per-page AI detection progress (the longest phase) — advance 80→99%
+        if (status.startsWith('ai_detection_page_')) {
+            const m = status.match(/ai_detection_page_(\d+)_of_(\d+)/);
+            if (m) {
+                const cur = parseInt(m[1]), tot = parseInt(m[2]) || 1;
+                const statusInfo = {
+                    step: 4,
+                    message: `Running AI ad detection (page ${cur} of ${tot})`,
+                    progress: Math.min(80 + Math.round((cur / tot) * 19), 99)
+                };
+                return updateStatusDisplay(statusInfo, status, error, redirectUrl);
+            }
+        }
+
         const statusInfo = statusSteps[status] || statusSteps['processing'];
         return updateStatusDisplay(statusInfo, status, error, redirectUrl);
     }

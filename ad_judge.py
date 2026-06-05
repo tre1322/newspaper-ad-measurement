@@ -55,7 +55,7 @@ def resolve_judge_model() -> str:
 # (crop + prompt-version) pair. Old entries become unreachable (no lookup will
 # match), but they're harmless and will age out. Never silently reuse verdicts
 # from a prior prompt — a reworded rubric can flip AD/EDITORIAL decisions.
-PROMPT_VERSION = "v3_2026-06-04_legal_notices_strengthened"
+PROMPT_VERSION = "v4_2026-06-05_ad_bbox_refinement"
 
 VERDICT_AD = "AD"
 VERDICT_EDITORIAL = "EDITORIAL"
@@ -106,12 +106,24 @@ SYSTEM_PROMPT = (
     "- A decorative sub-panel of a larger ad (a single headline block, an icon panel,\n"
     "  an inset quote box) that's clearly part of a parent ad = AD (it's still paid\n"
     "  space), but note in REASON that it's a sub-region.\n"
+    "- BOUNDING BOX (for AD verdicts): if the crop is a paid ad but ALSO contains\n"
+    "  decorative chrome that is NOT part of the ad -- a SHARED section header / banner\n"
+    "  spanning a group of ads (e.g. 'Shop Local for Mother's Day', an 'Entertainment'\n"
+    "  or 'Dining Guide' feature header), a shaded feature-section background, or a\n"
+    "  title strip -- return the TIGHT bounding box of JUST the advertisement so the\n"
+    "  shared header/banner is excluded. Give it as four decimals 0-1 of THIS crop:\n"
+    "  left,top,right,bottom (e.g. '0.42,0,1,1' = the ad is the right ~58%; '0,0.25,1,1'\n"
+    "  = the ad is the bottom 75%, below a top banner). If the ENTIRE crop is the\n"
+    "  advertisement, answer 'full'. Only tighten when you are confident the excluded\n"
+    "  part is shared/editorial chrome -- NOT the ad's own logo, headline, or border.\n"
+    "  When unsure, answer 'full'.\n"
     "\n"
     "For each image in order, respond in this exact format, one stanza per image,\n"
     "stanzas separated by a blank line:\n"
     "IMAGE <n>\n"
     "VERDICT: AD|EDITORIAL|FURNITURE\n"
     "REASON: one short sentence.\n"
+    "BOX: full   (or  left,top,right,bottom  -- only meaningful for AD; else 'full')\n"
 )
 
 
@@ -122,6 +134,10 @@ class Verdict:
     model_used: str
     cache_hit: bool
     crop_hash: str
+    # Tight ad bounds WITHIN the crop, as (left, top, right, bottom) fractions
+    # 0..1, when the crop also contains shared header/chrome that isn't the ad.
+    # None means "use the whole candidate region" (the common case).
+    crop_box: Optional[tuple] = None
 
     @property
     def is_ad(self) -> bool:
@@ -169,12 +185,14 @@ def _cached_verdict(crop_hash: str, cache_model, db_session) -> Optional[Verdict
         return None
     if not row:
         return None
+    reason, box = _decode_reason(row.reason)
     return Verdict(
         verdict=row.verdict,
-        reason=row.reason or "",
+        reason=reason,
         model_used=row.model_used or resolve_judge_model(),
         cache_hit=True,
         crop_hash=crop_hash,
+        crop_box=box,
     )
 
 
@@ -188,7 +206,7 @@ def _persist_verdict(v: Verdict, cache_model, db_session) -> None:
         row = cache_model(
             crop_hash=v.crop_hash,
             verdict=v.verdict,
-            reason=v.reason[:500] if v.reason else None,
+            reason=_encode_reason(v.reason, v.crop_box)[:500] if (v.reason or v.crop_box) else None,
             model_used=v.model_used,
             created_date=datetime.utcnow(),
         )
@@ -202,31 +220,105 @@ def _persist_verdict(v: Verdict, cache_model, db_session) -> None:
             pass
 
 
-# IMAGE N stanza matcher. Tolerates extra whitespace and optional punctuation.
-_STANZA_RE = re.compile(
-    r"IMAGE\s*(\d+).*?VERDICT:\s*(AD|EDITORIAL|FURNITURE).*?REASON:\s*([^\n]+)",
-    re.IGNORECASE | re.DOTALL,
-)
+_IMAGE_RE = re.compile(r"IMAGE\s*(\d+)", re.IGNORECASE)
+_VERDICT_RE = re.compile(r"VERDICT:\s*(AD|EDITORIAL|FURNITURE)", re.IGNORECASE)
+_REASON_RE = re.compile(r"REASON:\s*([^\n]+)", re.IGNORECASE)
+_BOX_RE = re.compile(r"BOX:\s*([^\n]+)", re.IGNORECASE)
+_NUM_RE = re.compile(r"[0-9]*\.?[0-9]+")
+
+# A box this close to the full crop isn't worth tightening; smaller than this
+# is almost certainly a parse error or a mis-crop, so ignore it (keep full box).
+_BOX_MAX_AREA = 0.92
+_BOX_MIN_AREA = 0.04
 
 
-def parse_response(text: str, expected_count: int) -> List[tuple[str, str]]:
-    """Return a list of (verdict, reason) tuples of length expected_count.
+def _parse_box(val: Optional[str]):
+    """Parse a BOX value into (l,t,r,b) fractions, or None for full/invalid.
 
-    Parser is permissive: if the model returns fewer stanzas than expected,
-    missing entries default to EDITORIAL (safer: we'd rather drop an ad than
-    persist an editorial false positive). If it returns more, we truncate.
+    Conservative on purpose: returns None (=> keep the whole candidate region)
+    unless the model gave a well-formed sub-rectangle that meaningfully — but
+    not absurdly — tightens the crop. This guarantees refinement can only ever
+    SHRINK a box toward a real sub-region, never enlarge or corrupt it.
     """
-    out: List[tuple[str, str]] = [(VERDICT_EDITORIAL, "unparsed: no stanza found")] * expected_count
-    for m in _STANZA_RE.finditer(text):
+    if not val:
+        return None
+    v = val.strip().lower()
+    if not v or v.startswith("full") or v.startswith("none") or v.startswith("n/a"):
+        return None
+    nums = _NUM_RE.findall(v)
+    if len(nums) < 4:
+        return None
+    try:
+        l, t, r, b = (float(x) for x in nums[:4])
+    except ValueError:
+        return None
+    l, t = max(0.0, min(1.0, l)), max(0.0, min(1.0, t))
+    r, b = max(0.0, min(1.0, r)), max(0.0, min(1.0, b))
+    if r <= l or b <= t:
+        return None
+    area = (r - l) * (b - t)
+    if area >= _BOX_MAX_AREA or area < _BOX_MIN_AREA:
+        return None
+    return (l, t, r, b)
+
+
+def parse_response(text: str, expected_count: int):
+    """Return a list of (verdict, reason, box) tuples of length expected_count.
+
+    box is (l,t,r,b) fractions of the crop or None. Parser is permissive: if the
+    model returns fewer stanzas than expected, missing entries default to
+    EDITORIAL (safer: we'd rather drop an ad than persist an editorial false
+    positive). Stanzas are split on IMAGE markers so an optional BOX line can't
+    leak across images.
+    """
+    out = [(VERDICT_EDITORIAL, "unparsed: no stanza found", None)
+           for _ in range(expected_count)]
+    marks = list(_IMAGE_RE.finditer(text))
+    for k, m in enumerate(marks):
         try:
             idx = int(m.group(1)) - 1
-            verdict = m.group(2).upper()
-            reason = m.group(3).strip()
-            if 0 <= idx < expected_count and verdict in _VALID_VERDICTS:
-                out[idx] = (verdict, reason)
-        except Exception:
+        except ValueError:
             continue
+        if not (0 <= idx < expected_count):
+            continue
+        chunk = text[m.end(): marks[k + 1].start() if k + 1 < len(marks) else len(text)]
+        vm = _VERDICT_RE.search(chunk)
+        if not vm:
+            continue
+        verdict = vm.group(1).upper()
+        if verdict not in _VALID_VERDICTS:
+            continue
+        rm = _REASON_RE.search(chunk)
+        reason = rm.group(1).strip() if rm else ""
+        box = _parse_box(_BOX_RE.search(chunk).group(1)) if _BOX_RE.search(chunk) else None
+        out[idx] = (verdict, reason, box if verdict == VERDICT_AD else None)
     return out
+
+
+# The crop_box rides along in the cache's reason column (no schema change). The
+# tag is appended so a plain reason round-trips unchanged when there's no box.
+_BOX_TAG = " ::BOX="
+
+
+def _encode_reason(reason: str, box) -> str:
+    reason = (reason or "")[:440]
+    if not box:
+        return reason
+    l, t, r, b = box
+    return f"{reason}{_BOX_TAG}{l:.4f},{t:.4f},{r:.4f},{b:.4f}"
+
+
+def _decode_reason(stored: Optional[str]):
+    if not stored or _BOX_TAG not in stored:
+        return (stored or "", None)
+    reason, _, tag = stored.partition(_BOX_TAG)
+    nums = _NUM_RE.findall(tag)
+    if len(nums) < 4:
+        return (reason, None)
+    try:
+        return (reason, _parse_box(",".join(nums[:4])))
+    except ValueError:
+        return (reason, None)
 
 
 def _resolve_api_key() -> Optional[str]:
@@ -251,7 +343,7 @@ def _resolve_api_key() -> Optional[str]:
     return None
 
 
-def _call_claude(crops: List[bytes], page_context: Optional[str], model: str) -> List[tuple[str, str]]:
+def _call_claude(crops: List[bytes], page_context: Optional[str], model: str):
     """Issue a single Claude Messages call classifying all crops in the list.
 
     Returns a list of (verdict, reason) aligned to `crops`. On any API error
@@ -410,13 +502,14 @@ def judge_candidates(
             continue
 
         for pos, i in enumerate(batch):
-            verdict_str, reason = pairs[pos]
+            verdict_str, reason, box = pairs[pos]
             v = Verdict(
                 verdict=verdict_str,
                 reason=reason,
                 model_used=model,
                 cache_hit=False,
                 crop_hash=hashes[i],
+                crop_box=box,
             )
             results[i] = v
             stats.total += 1

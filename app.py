@@ -3936,6 +3936,21 @@ def _detect_and_save_ads(pub_id):
             cand = cands[keep_idx[idx_in_keep]]
             if verdict.verdict == VERDICT_AD:
                 c = dict(cand)
+                # If the judge flagged that the ad is only a sub-region of the
+                # crop (the rest being a shared section header / shaded feature
+                # banner), tighten the box to just the ad. Fractions are relative
+                # to the candidate region, so translate straight into page px.
+                box = getattr(verdict, 'crop_box', None)
+                if box:
+                    l, t, r, b = box
+                    ox, oy, ow, oh = c['x'], c['y'], c['width'], c['height']
+                    c['x'] = ox + l * ow
+                    c['y'] = oy + t * oh
+                    c['width'] = (r - l) * ow
+                    c['height'] = (b - t) * oh
+                    print(f"  refined box [{cand.get('source')}]: "
+                          f"{ow:.0f}x{oh:.0f} -> {c['width']:.0f}x{c['height']:.0f} "
+                          f"(crop frac {l:.2f},{t:.2f},{r:.2f},{b:.2f})")
                 c['confidence'] = 0.9 if verdict.cache_hit else 0.95
                 ad_cands.append(c)
             else:

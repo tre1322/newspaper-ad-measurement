@@ -869,6 +869,29 @@ class AdJudgeCache(db.Model):
     created_date = db.Column(db.DateTime, default=datetime.utcnow)
 
 
+class SharedHeaderRegion(db.Model):
+    """A feature-section header strip a user trimmed off an auto-detected ad box.
+
+    'Learn-once per publication': when a user shrinks an auto box to drop a
+    shared section header (e.g. 'Shop Dine & Celebrate Local for Mother's Day'
+    beside an A&W ad), we record the trimmed strip as a relative-position band
+    keyed by masthead (the upload filename's leading token, e.g. 'oa'). On
+    future editions of the same paper, candidate boxes that contain that band as
+    a clean edge are cropped to exclude it. Stored relative (fractions of page)
+    so it survives slight render-size differences.
+    """
+    __tablename__ = 'shared_header_region'
+    id = db.Column(db.Integer, primary_key=True)
+    masthead = db.Column(db.String(40), index=True)   # 'oa', 'ccc'
+    side = db.Column(db.String(6))                     # left|right|top|bottom
+    x0 = db.Column(db.Float)                           # relative rect, 0..1 of page
+    y0 = db.Column(db.Float)
+    x1 = db.Column(db.Float)
+    y1 = db.Column(db.Float)
+    hits = db.Column(db.Integer, default=1)            # times re-observed
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+
+
 class PublicationProfile(db.Model):
     """Per-publication-type learned profile (masthead phrases, etc.).
 
@@ -3560,6 +3583,143 @@ def _suppressed_by_corrections(box, page, publication_type, corrections):
     return False
 
 
+def _masthead(filename):
+    """Leading alpha token of an upload filename, lowercased.
+    'OA-2024-05-08.pdf' -> 'oa'; 'ccc-2023-10-11.pdf' -> 'ccc'; '' if none."""
+    base = os.path.basename(filename or '')
+    out = []
+    for ch in base:
+        if ch.isalpha():
+            out.append(ch)
+        else:
+            break
+    return ''.join(out).lower()
+
+
+def _header_trim_strip(old, new, page_w, page_h, min_frac=0.20, edge_tol_frac=0.04):
+    """If `new` is `old` trimmed on exactly ONE edge by >= min_frac of that
+    dimension (other three edges ~unchanged), return (side, (x0,y0,x1,y1)) of the
+    removed strip in RELATIVE page fractions; else None.
+
+    This fires on a deliberate band-trim (user dropping a shared header), not an
+    arbitrary reshape or move — so it won't learn noise from minor tweaks.
+    old/new are (x, y, w, h) in page pixels.
+    """
+    ox, oy, ow, oh = old
+    nx, ny, nw, nh = new
+    if min(ow, oh, nw, nh) <= 1:
+        return None
+    # new must sit inside old (a trim, not a grow/move-out)
+    if nx < ox - 1 or ny < oy - 1 or nx + nw > ox + ow + 1 or ny + nh > oy + oh + 1:
+        return None
+    tw, th = max(1.0, float(page_w)), max(1.0, float(page_h))
+    extol, eytol = edge_tol_frac * tw, edge_tol_frac * th
+    left_trim, right_trim = nx - ox, (ox + ow) - (nx + nw)
+    top_trim, bottom_trim = ny - oy, (oy + oh) - (ny + nh)
+    same_l, same_r = abs(left_trim) <= extol, abs(right_trim) <= extol
+    same_t, same_b = abs(top_trim) <= eytol, abs(bottom_trim) <= eytol
+    if same_t and same_b:
+        if left_trim >= min_frac * ow and same_r:
+            return ('left', (ox / tw, oy / th, nx / tw, (oy + oh) / th))
+        if right_trim >= min_frac * ow and same_l:
+            return ('right', ((nx + nw) / tw, oy / th, (ox + ow) / tw, (oy + oh) / th))
+    if same_l and same_r:
+        if top_trim >= min_frac * oh and same_b:
+            return ('top', (ox / tw, oy / th, (ox + ow) / tw, ny / th))
+        if bottom_trim >= min_frac * oh and same_t:
+            return ('bottom', (ox / tw, (ny + nh) / th, (ox + ow) / tw, (oy + oh) / th))
+    return None
+
+
+def _apply_shared_headers(cand, regions, page_w, page_h, cover_frac=0.6, min_remain=0.4):
+    """Crop a candidate to exclude any learned shared-header band it contains.
+
+    A region applies only as a CLEAN edge band: its perpendicular extent must
+    span >= cover_frac of the candidate, it must sit at the matching edge, and
+    cropping it must leave >= min_remain of the candidate. Conservative by
+    design — it can only shrink toward the real ad, never enlarge. Returns
+    (cropped_copy, changed_bool).
+    """
+    x, y, w, h = float(cand['x']), float(cand['y']), float(cand['width']), float(cand['height'])
+    tw, th = max(1.0, float(page_w)), max(1.0, float(page_h))
+    changed = False
+    for r in regions:
+        rx0, ry0, rx1, ry1 = r['x0'] * tw, r['y0'] * th, r['x1'] * tw, r['y1'] * th
+        side = r.get('side')
+        if side in ('left', 'right'):
+            if (min(y + h, ry1) - max(y, ry0)) < cover_frac * h:
+                continue
+            if side == 'left':
+                cut = rx1
+                if not (x < cut < x + w) or abs(rx0 - x) > 0.20 * w:
+                    continue
+                if (x + w) - cut < min_remain * w:
+                    continue
+                w = (x + w) - cut; x = cut; changed = True
+            else:
+                cut = rx0
+                if not (x < cut < x + w) or abs(rx1 - (x + w)) > 0.20 * w:
+                    continue
+                if cut - x < min_remain * w:
+                    continue
+                w = cut - x; changed = True
+        elif side in ('top', 'bottom'):
+            if (min(x + w, rx1) - max(x, rx0)) < cover_frac * w:
+                continue
+            if side == 'top':
+                cut = ry1
+                if not (y < cut < y + h) or abs(ry0 - y) > 0.20 * h:
+                    continue
+                if (y + h) - cut < min_remain * h:
+                    continue
+                h = (y + h) - cut; y = cut; changed = True
+            else:
+                cut = ry0
+                if not (y < cut < y + h) or abs(ry1 - (y + h)) > 0.20 * h:
+                    continue
+                if cut - y < min_remain * h:
+                    continue
+                h = cut - y; changed = True
+    if not changed:
+        return cand, False
+    out = dict(cand)
+    out['x'], out['y'], out['width'], out['height'] = x, y, w, h
+    return out, True
+
+
+def _load_shared_headers(masthead):
+    """Learned shared-header bands for a masthead, as relative-rect dicts."""
+    if not masthead:
+        return []
+    try:
+        rows = SharedHeaderRegion.query.filter_by(masthead=masthead).all()
+        return [{'side': r.side, 'x0': r.x0, 'y0': r.y0, 'x1': r.x1, 'y1': r.y1}
+                for r in rows]
+    except Exception as e:
+        print(f"  shared-header load failed: {e}")
+        return []
+
+
+def _record_shared_header(filename, strip, tol=0.03):
+    """Persist (or reinforce) a learned shared-header band for a masthead."""
+    mh = _masthead(filename)
+    if not mh:
+        return
+    side, (x0, y0, x1, y1) = strip
+    for r in SharedHeaderRegion.query.filter_by(masthead=mh, side=side).all():
+        if (abs((r.x0 or 0) - x0) < tol and abs((r.y0 or 0) - y0) < tol and
+                abs((r.x1 or 0) - x1) < tol and abs((r.y1 or 0) - y1) < tol):
+            r.hits = (r.hits or 1) + 1
+            db.session.commit()
+            print(f"[shared-header] reinforced {mh}/{side} (hits={r.hits})")
+            return
+    db.session.add(SharedHeaderRegion(masthead=mh, side=side,
+                                      x0=x0, y0=y0, x1=x1, y1=y1, hits=1))
+    db.session.commit()
+    print(f"[shared-header] learned {mh}/{side} "
+          f"{x0:.3f},{y0:.3f},{x1:.3f},{y1:.3f}")
+
+
 def _make_ad_box(page, publication, config, cand, source_tag):
     """Build an AdBox row from a candidate dict (pixel-space coords)."""
     x = float(cand['x'])
@@ -3837,8 +3997,10 @@ def _detect_and_save_ads(pub_id):
         UserCorrection.created_date >= since,
     ).all()
     profile_sigs = _load_profile_signatures(pub_type)
+    shared_headers = _load_shared_headers(_masthead(publication.filename))
     print(f"[auto-detect] pub={pub_id} type={pub_type} "
           f"corrections={len(corrections)} profile_sigs={len(profile_sigs)} "
+          f"shared_headers={len(shared_headers)} "
           f"mock={os.environ.get('AD_JUDGE_MOCK', '0')}")
 
     stats = JudgeStats()
@@ -3903,6 +4065,21 @@ def _detect_and_save_ads(pub_id):
         cands = [c for c in cands if not _profile_matches(c.get('text_preview', ''), profile_sigs)]
         if before != len(cands):
             print(f"  after profile filter: {len(cands)} ({before - len(cands)} pre-judged)")
+
+        # Learn-once: crop off any shared section-header band the user trimmed on
+        # a prior edition of this masthead, so the judge sees (and we persist)
+        # just the business ad. Applied before judging so the crop is clean.
+        if shared_headers:
+            new_cands = []
+            for c in cands:
+                nc, ch = _apply_shared_headers(
+                    c, shared_headers, page.width_pixels, page.height_pixels)
+                if ch:
+                    print(f"  shared-header crop [{c.get('source')}]: "
+                          f"{c['width']:.0f}x{c['height']:.0f} -> "
+                          f"{nc['width']:.0f}x{nc['height']:.0f}")
+                new_cands.append(nc)
+            cands = new_cands
 
         if not cands:
             continue
@@ -10626,10 +10803,13 @@ def update_box(box_id):
         db.session.rollback()
         
         ad_box = AdBox.query.get_or_404(box_id)
+        # Capture pre-edit box so we can learn a trimmed shared-header strip.
+        _old_box = (ad_box.x, ad_box.y, ad_box.width, ad_box.height,
+                    bool(ad_box.detected_automatically))
         data = request.json
         # Update coordinates
         ad_box.x = data['x']
-        ad_box.y = data['y'] 
+        ad_box.y = data['y']
         ad_box.width = data['width']
         ad_box.height = data['height']
         
@@ -10705,10 +10885,25 @@ def update_box(box_id):
         
         # Commit all changes together
         db.session.commit()
-        
+
         # Recalculate page and publication totals
         update_totals(ad_box.page_id)
-        
+
+        # Learn-once: if the user trimmed a shared header off an AUTO-detected
+        # box, record the removed strip for this masthead so future editions
+        # auto-exclude it. Best-effort; never fails the resize.
+        try:
+            ox, oy, ow, oh, was_auto = _old_box
+            if was_auto:
+                strip = _header_trim_strip(
+                    (ox, oy, ow, oh),
+                    (ad_box.x, ad_box.y, ad_box.width, ad_box.height),
+                    page.width_pixels, page.height_pixels)
+                if strip:
+                    _record_shared_header(publication.filename, strip)
+        except Exception as _e:
+            print(f"[shared-header] learn skipped: {_e}")
+
         return jsonify({
             'success': True,
             'x': int(data['x']),

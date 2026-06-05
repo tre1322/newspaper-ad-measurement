@@ -883,12 +883,17 @@ class SharedHeaderRegion(db.Model):
     __tablename__ = 'shared_header_region'
     id = db.Column(db.Integer, primary_key=True)
     masthead = db.Column(db.String(40), index=True)   # 'oa', 'ccc'
-    side = db.Column(db.String(6))                     # left|right|top|bottom
-    x0 = db.Column(db.Float)                           # relative rect, 0..1 of page
-    y0 = db.Column(db.Float)
-    x1 = db.Column(db.Float)
-    y1 = db.Column(db.Float)
-    hits = db.Column(db.Integer, default=1)            # times re-observed
+    # Original auto box the user trimmed, and the trimmed/kept box — both as
+    # relative page rects (0..1). A future candidate is only cropped if it
+    # matches the ORIGINAL footprint (IoU), then it's replaced by the trimmed
+    # footprint. Footprint-matching (not edge-matching) stops the band from
+    # wrongly cropping unrelated boxes that merely share an edge position.
+    ox0 = db.Column(db.Float); oy0 = db.Column(db.Float)
+    ox1 = db.Column(db.Float); oy1 = db.Column(db.Float)
+    tx0 = db.Column(db.Float); ty0 = db.Column(db.Float)
+    tx1 = db.Column(db.Float); ty1 = db.Column(db.Float)
+    side = db.Column(db.String(6))                     # which edge was trimmed
+    hits = db.Column(db.Integer, default=1)
     created_date = db.Column(db.DateTime, default=datetime.utcnow)
 
 
@@ -3596,128 +3601,102 @@ def _masthead(filename):
     return ''.join(out).lower()
 
 
-def _header_trim_strip(old, new, page_w, page_h, min_frac=0.20, edge_tol_frac=0.04):
-    """If `new` is `old` trimmed on exactly ONE edge by >= min_frac of that
-    dimension (other three edges ~unchanged), return (side, (x0,y0,x1,y1)) of the
-    removed strip in RELATIVE page fractions; else None.
-
-    This fires on a deliberate band-trim (user dropping a shared header), not an
-    arbitrary reshape or move — so it won't learn noise from minor tweaks.
-    old/new are (x, y, w, h) in page pixels.
+def _header_trim_side(old, new, page_w, page_h, min_frac=0.20, edge_tol_frac=0.04):
+    """Return the trimmed side ('left'|'right'|'top'|'bottom') if `new` is `old`
+    trimmed on exactly ONE edge by >= min_frac of that dimension (other three
+    edges ~unchanged), else None. Fires on a deliberate band-trim (user dropping
+    a shared header), not a reshape/move. old/new are (x, y, w, h) page pixels.
     """
     ox, oy, ow, oh = old
     nx, ny, nw, nh = new
     if min(ow, oh, nw, nh) <= 1:
         return None
-    # new must sit inside old (a trim, not a grow/move-out)
     if nx < ox - 1 or ny < oy - 1 or nx + nw > ox + ow + 1 or ny + nh > oy + oh + 1:
         return None
-    tw, th = max(1.0, float(page_w)), max(1.0, float(page_h))
-    extol, eytol = edge_tol_frac * tw, edge_tol_frac * th
+    extol, eytol = edge_tol_frac * max(1.0, page_w), edge_tol_frac * max(1.0, page_h)
     left_trim, right_trim = nx - ox, (ox + ow) - (nx + nw)
     top_trim, bottom_trim = ny - oy, (oy + oh) - (ny + nh)
     same_l, same_r = abs(left_trim) <= extol, abs(right_trim) <= extol
     same_t, same_b = abs(top_trim) <= eytol, abs(bottom_trim) <= eytol
     if same_t and same_b:
         if left_trim >= min_frac * ow and same_r:
-            return ('left', (ox / tw, oy / th, nx / tw, (oy + oh) / th))
+            return 'left'
         if right_trim >= min_frac * ow and same_l:
-            return ('right', ((nx + nw) / tw, oy / th, (ox + ow) / tw, (oy + oh) / th))
+            return 'right'
     if same_l and same_r:
         if top_trim >= min_frac * oh and same_b:
-            return ('top', (ox / tw, oy / th, (ox + ow) / tw, ny / th))
+            return 'top'
         if bottom_trim >= min_frac * oh and same_t:
-            return ('bottom', (ox / tw, (ny + nh) / th, (ox + ow) / tw, (oy + oh) / th))
+            return 'bottom'
     return None
 
 
-def _apply_shared_headers(cand, regions, page_w, page_h, cover_frac=0.6, min_remain=0.4):
-    """Crop a candidate to exclude any learned shared-header band it contains.
-
-    A region applies only as a CLEAN edge band: its perpendicular extent must
-    span >= cover_frac of the candidate, it must sit at the matching edge, and
-    cropping it must leave >= min_remain of the candidate. Conservative by
-    design — it can only shrink toward the real ad, never enlarge. Returns
-    (cropped_copy, changed_bool).
-    """
-    x, y, w, h = float(cand['x']), float(cand['y']), float(cand['width']), float(cand['height'])
-    tw, th = max(1.0, float(page_w)), max(1.0, float(page_h))
-    changed = False
-    for r in regions:
-        rx0, ry0, rx1, ry1 = r['x0'] * tw, r['y0'] * th, r['x1'] * tw, r['y1'] * th
-        side = r.get('side')
-        if side in ('left', 'right'):
-            if (min(y + h, ry1) - max(y, ry0)) < cover_frac * h:
-                continue
-            if side == 'left':
-                cut = rx1
-                if not (x < cut < x + w) or abs(rx0 - x) > 0.20 * w:
-                    continue
-                if (x + w) - cut < min_remain * w:
-                    continue
-                w = (x + w) - cut; x = cut; changed = True
-            else:
-                cut = rx0
-                if not (x < cut < x + w) or abs(rx1 - (x + w)) > 0.20 * w:
-                    continue
-                if cut - x < min_remain * w:
-                    continue
-                w = cut - x; changed = True
-        elif side in ('top', 'bottom'):
-            if (min(x + w, rx1) - max(x, rx0)) < cover_frac * w:
-                continue
-            if side == 'top':
-                cut = ry1
-                if not (y < cut < y + h) or abs(ry0 - y) > 0.20 * h:
-                    continue
-                if (y + h) - cut < min_remain * h:
-                    continue
-                h = (y + h) - cut; y = cut; changed = True
-            else:
-                cut = ry0
-                if not (y < cut < y + h) or abs(ry1 - (y + h)) > 0.20 * h:
-                    continue
-                if cut - y < min_remain * h:
-                    continue
-                h = cut - y; changed = True
-    if not changed:
-        return cand, False
-    out = dict(cand)
-    out['x'], out['y'], out['width'], out['height'] = x, y, w, h
-    return out, True
-
-
 def _load_shared_headers(masthead):
-    """Learned shared-header bands for a masthead, as relative-rect dicts."""
+    """Learned header trims for a masthead: original + trimmed footprints (rel)."""
     if not masthead:
         return []
     try:
         rows = SharedHeaderRegion.query.filter_by(masthead=masthead).all()
-        return [{'side': r.side, 'x0': r.x0, 'y0': r.y0, 'x1': r.x1, 'y1': r.y1}
-                for r in rows]
+        return [{'side': r.side,
+                 'o': (r.ox0, r.oy0, r.ox1, r.oy1),
+                 't': (r.tx0, r.ty0, r.tx1, r.ty1)} for r in rows]
     except Exception as e:
         print(f"  shared-header load failed: {e}")
         return []
 
 
-def _record_shared_header(filename, strip, tol=0.03):
-    """Persist (or reinforce) a learned shared-header band for a masthead."""
+def _record_shared_header(filename, old_px, new_px, page_w, page_h, tol=0.03):
+    """Persist (or reinforce) a header trim: original + trimmed footprint (rel)."""
     mh = _masthead(filename)
     if not mh:
         return
-    side, (x0, y0, x1, y1) = strip
-    for r in SharedHeaderRegion.query.filter_by(masthead=mh, side=side).all():
-        if (abs((r.x0 or 0) - x0) < tol and abs((r.y0 or 0) - y0) < tol and
-                abs((r.x1 or 0) - x1) < tol and abs((r.y1 or 0) - y1) < tol):
+    side = _header_trim_side(old_px, new_px, page_w, page_h)
+    if not side:
+        return
+    tw, th = max(1.0, float(page_w)), max(1.0, float(page_h))
+    ox, oy, ow, oh = old_px
+    nx, ny, nw, nh = new_px
+    o = (ox / tw, oy / th, (ox + ow) / tw, (oy + oh) / th)
+    t = (nx / tw, ny / th, (nx + nw) / tw, (ny + nh) / th)
+    for r in SharedHeaderRegion.query.filter_by(masthead=mh).all():
+        if (abs((r.ox0 or 0) - o[0]) < tol and abs((r.oy0 or 0) - o[1]) < tol and
+                abs((r.ox1 or 0) - o[2]) < tol and abs((r.oy1 or 0) - o[3]) < tol):
             r.hits = (r.hits or 1) + 1
+            r.tx0, r.ty0, r.tx1, r.ty1 = t
+            r.side = side
             db.session.commit()
             print(f"[shared-header] reinforced {mh}/{side} (hits={r.hits})")
             return
-    db.session.add(SharedHeaderRegion(masthead=mh, side=side,
-                                      x0=x0, y0=y0, x1=x1, y1=y1, hits=1))
+    db.session.add(SharedHeaderRegion(
+        masthead=mh, side=side,
+        ox0=o[0], oy0=o[1], ox1=o[2], oy1=o[3],
+        tx0=t[0], ty0=t[1], tx1=t[2], ty1=t[3], hits=1))
     db.session.commit()
     print(f"[shared-header] learned {mh}/{side} "
-          f"{x0:.3f},{y0:.3f},{x1:.3f},{y1:.3f}")
+          f"orig={o[0]:.3f},{o[1]:.3f},{o[2]:.3f},{o[3]:.3f}")
+
+
+def _apply_shared_headers(cand, regions, page_w, page_h, iou_thresh=0.6):
+    """If a candidate matches a learned ORIGINAL footprint (IoU > thresh),
+    replace it with the trimmed footprint — reproducing the user's header trim
+    on the recurring feature box, and only that box (footprint match avoids
+    cropping unrelated boxes that merely share an edge). Returns (cand, changed).
+    """
+    tw, th = max(1.0, float(page_w)), max(1.0, float(page_h))
+    cbox = {'x': float(cand['x']), 'y': float(cand['y']),
+            'width': float(cand['width']), 'height': float(cand['height'])}
+    for r in regions:
+        ox0, oy0, ox1, oy1 = r['o']
+        obox = {'x': ox0 * tw, 'y': oy0 * th,
+                'width': (ox1 - ox0) * tw, 'height': (oy1 - oy0) * th}
+        if _iou(cbox, obox) <= iou_thresh:
+            continue
+        tx0, ty0, tx1, ty1 = r['t']
+        out = dict(cand)
+        out['x'], out['y'] = tx0 * tw, ty0 * th
+        out['width'], out['height'] = (tx1 - tx0) * tw, (ty1 - ty0) * th
+        return out, True
+    return cand, False
 
 
 def _make_ad_box(page, publication, config, cand, source_tag):
@@ -10895,12 +10874,11 @@ def update_box(box_id):
         try:
             ox, oy, ow, oh, was_auto = _old_box
             if was_auto:
-                strip = _header_trim_strip(
+                _record_shared_header(
+                    publication.original_filename,
                     (ox, oy, ow, oh),
                     (ad_box.x, ad_box.y, ad_box.width, ad_box.height),
                     page.width_pixels, page.height_pixels)
-                if strip:
-                    _record_shared_header(publication.original_filename, strip)
         except Exception as _e:
             print(f"[shared-header] learn skipped: {_e}")
 

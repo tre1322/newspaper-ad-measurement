@@ -3815,10 +3815,17 @@ def _detect_and_save_ads(pub_id):
     config = PUBLICATION_CONFIGS.get(publication.publication_type, PUBLICATION_CONFIGS['broadsheet'])
     pub_type = publication.publication_type
 
-    # Pull suppression memory + profile signatures for this publication type.
+    # Pull suppression memory + profile signatures.
+    # Scope false-positive deletions to THIS publication only. Every paper is
+    # publication_type='broadsheet', so filtering by type pooled ~1000 deletions
+    # from 30+ unrelated papers and — via the loose position-ratio match in
+    # _suppressed_by_corrections — blanket-suppressed real ads on every new
+    # paper (the "missed 90% of ads" report). It also fought the over-mark /
+    # delete-extras workflow. A paper's deletions now only suppress on re-runs
+    # of that same paper; the Vision judge handles cross-paper classification.
     since = datetime.utcnow() - timedelta(days=365)
     corrections = UserCorrection.query.filter(
-        UserCorrection.publication_type == pub_type,
+        UserCorrection.publication_id == pub_id,
         UserCorrection.is_ad == False,  # noqa: E712
         UserCorrection.created_date >= since,
     ).all()

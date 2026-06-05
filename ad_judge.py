@@ -506,12 +506,17 @@ def judge_candidates(
         except Exception as e:
             print(f"[ad_judge] API call failed: {e}")
             stats.errors += 1
-            # stamp this batch as EDITORIAL (safer: drop unknown)
+            # OVER-MARK on judge outage: when the API can't classify (e.g. a
+            # sustained 529 overload that outlasts the retries), KEEP the
+            # candidates as ads rather than dropping them. A review-and-delete
+            # paper beats a near-empty one, and matches the over-mark workflow.
+            # These verdicts are deliberately NOT cached, so a later healthy
+            # re-run will properly judge (and box-refine) the same crops.
             for i in batch:
                 v = Verdict(
-                    verdict=VERDICT_EDITORIAL,
-                    reason=f"API error: {e}",
-                    model_used=model,
+                    verdict=VERDICT_AD,
+                    reason=f"judge unavailable (API error); kept unjudged for review: {e}",
+                    model_used=f"unjudged-fallback ({model})",
                     cache_hit=False,
                     crop_hash=hashes[i],
                 )

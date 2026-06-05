@@ -3951,7 +3951,12 @@ def _detect_and_save_ads(pub_id):
                     print(f"  refined box [{cand.get('source')}]: "
                           f"{ow:.0f}x{oh:.0f} -> {c['width']:.0f}x{c['height']:.0f} "
                           f"(crop frac {l:.2f},{t:.2f},{r:.2f},{b:.2f})")
-                c['confidence'] = 0.9 if verdict.cache_hit else 0.95
+                # Unjudged over-marks (judge was down) get low confidence so
+                # they read as "review me" rather than a confident detection.
+                if 'unjudged' in (verdict.model_used or ''):
+                    c['confidence'] = 0.3
+                else:
+                    c['confidence'] = 0.9 if verdict.cache_hit else 0.95
                 ad_cands.append(c)
             else:
                 # EDITORIAL or FURNITURE -- learn from it.

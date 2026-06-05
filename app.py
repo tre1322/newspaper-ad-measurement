@@ -616,16 +616,23 @@ class Publication(db.Model):
         
         super().__init__(**kwargs)
     
-    @property 
+    @property
     def safe_processing_status(self):
         """Get processing status with fallback"""
+        # A finished publication is always 'completed' — authoritative over any
+        # stale processing_status left from before the column actually persisted
+        # (otherwise old pubs whose column still reads 'uploaded' never redirect).
+        if self.processed:
+            return 'completed'
         if check_processing_columns():
             try:
-                return getattr(self, 'processing_status', 'completed' if self.processed else 'uploaded')
+                val = getattr(self, 'processing_status', None)
+                if val:
+                    return val
             except (AttributeError, Exception):
                 pass
-        # Fallback based on processed status
-        return 'completed' if self.processed else 'uploaded'
+        # In-progress with no persisted status yet
+        return 'uploaded'
     
     @property
     def safe_processing_error(self):

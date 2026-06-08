@@ -52,80 +52,9 @@ try:
 except Exception:
     pass
 
-import numpy as np
-
-
-# ---------------------------------------------------------------------------
-# The scorer — pure geometry, no DB, no images. This is the reusable heart and
-# the part that must be exactly right, so it has analytic self-tests below.
-# ---------------------------------------------------------------------------
-
-def _mask_for(boxes, W, H):
-    """Paint boxes onto a full-resolution boolean page mask (clipped to bounds).
-
-    boxes: iterable of (x, y, w, h) in page pixels. Overlapping boxes simply OR
-    together, so the painted area is the UNION — which is what makes the metric
-    indifferent to how finely a human (or the detector) chopped a region up.
-    """
-    m = np.zeros((H, W), dtype=bool)
-    for x, y, w, h in boxes:
-        x0 = max(0, int(round(x)))
-        y0 = max(0, int(round(y)))
-        x1 = min(W, int(round(x + w)))
-        y1 = min(H, int(round(y + h)))
-        if x1 > x0 and y1 > y0:
-            m[y0:y1, x0:x1] = True
-    return m
-
-
-def page_area_scores(gt_boxes, pred_boxes, W, H):
-    """Area-coverage scores for one page. Returns raw pixel areas + ratios.
-
-    Ratios are None when their denominator is zero (e.g. recall is undefined on
-    a page with no ground-truth ads). Raw areas are returned too so callers can
-    aggregate area-weighted (micro) totals across many pages correctly.
-    """
-    gt = _mask_for(gt_boxes, W, H)
-    pr = _mask_for(pred_boxes, W, H)
-    inter = int(np.logical_and(gt, pr).sum())
-    union = int(np.logical_or(gt, pr).sum())
-    gta = int(gt.sum())
-    pra = int(pr.sum())
-    return {
-        "gt_area": gta,
-        "pred_area": pra,
-        "inter": inter,
-        "union": union,
-        "recall": (inter / gta) if gta else None,
-        "precision": (inter / pra) if pra else None,
-        "iou": (inter / union) if union else None,
-    }
-
-
-def gt_boxes_found(gt_boxes, pred_boxes, W, H, thresh=0.5):
-    """Per-ad breakdown: how many individual GT ad boxes the detector covered.
-
-    A GT box counts as 'found' if at least `thresh` of ITS OWN area is painted by
-    the prediction mask. This complements the area metric with a human-readable
-    "caught 18 of 21 ads" — and surfaces the specific ads that were missed.
-    Returns (found_count, total_count, missed_boxes).
-    """
-    pr = _mask_for(pred_boxes, W, H)
-    found = 0
-    missed = []
-    for box in gt_boxes:
-        x, y, w, h = box
-        x0, y0 = max(0, int(round(x))), max(0, int(round(y)))
-        x1, y1 = min(W, int(round(x + w))), min(H, int(round(y + h)))
-        if x1 <= x0 or y1 <= y0:
-            continue
-        sub = pr[y0:y1, x0:x1]
-        covered = sub.sum() / sub.size if sub.size else 0.0
-        if covered >= thresh:
-            found += 1
-        else:
-            missed.append({"box": [round(v, 1) for v in box], "covered": round(covered, 3)})
-    return found, len(gt_boxes), missed
+# The pure scorer lives in area_score.py so the live app can import it without
+# pulling in this CLI script. Re-exported here for the harness's callers.
+from area_score import _mask_for, page_area_scores, gt_boxes_found  # noqa: F401
 
 
 def _pct(v):

@@ -37,7 +37,7 @@ except Exception:
 import fitz
 
 from app import (app, db, Publication, Page, AdBox, PUBLICATION_CONFIGS,
-                 _detect_and_save_ads)
+                 DetectorSnapshot, _detect_and_save_ads)
 from ground_truth_eval import page_area_scores, gt_boxes_found, _pct
 
 ZOOM = 1.5  # must match the production render (fitz.Matrix(1.5, 1.5)) so the
@@ -114,6 +114,7 @@ def cleanup_shadow(shadow_id, staged_name, upload_folder):
         AdBox.query.filter_by(page_id=pg.id).delete()
     for pg in pages:
         db.session.delete(pg)
+    DetectorSnapshot.query.filter_by(publication_id=shadow_id).delete()
     pub = db.session.get(Publication, shadow_id)
     if pub:
         db.session.delete(pub)

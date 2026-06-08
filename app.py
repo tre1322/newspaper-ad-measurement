@@ -912,6 +912,28 @@ class PublicationProfile(db.Model):
     layout_stats = db.Column(db.Text)       # JSON: counts of bordered / cluster / logo / template
     updated_date = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
+
+class DetectorSnapshot(db.Model):
+    """The auto-detector's output for a publication, captured right AFTER
+    detection runs and BEFORE any human review.
+
+    At processing time there are no human marks yet (the detector runs first,
+    the user corrects after), so we can't score accuracy live. Instead we freeze
+    the detector's prediction here; once the user has reviewed/corrected the
+    paper, /api/detector_accuracy scores this frozen prediction against the
+    final human-corrected boxes by ad-area. The snapshot deliberately keeps the
+    false positives the user will later delete (they're gone from ad_box but are
+    the precision signal). One row per publication; a re-run replaces it.
+    """
+    __tablename__ = 'detector_snapshot'
+    id = db.Column(db.Integer, primary_key=True)
+    publication_id = db.Column(db.Integer, db.ForeignKey('publication.id'),
+                               unique=True, index=True, nullable=False)
+    boxes_json = db.Column(db.Text)   # {"pages": {"6": {"w":1332,"h":2340,"boxes":[[x,y,w,h],...]}}}
+    box_count = db.Column(db.Integer, default=0)
+    prompt_version = db.Column(db.String(80))
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+
 class SimpleAdLearner:
     """
     Simple AI learning system that improves detection from user corrections
@@ -3936,6 +3958,109 @@ def _update_profile(publication_type, non_ad_previews, layout_counts):
 # -> Layer 2 Claude judge -> persist AD verdicts -> Layer 3 profile update.
 # ============================================================================
 
+def _snapshot_detector_output(pub_id):
+    """Freeze the detector's current auto boxes as the prediction snapshot for
+    later accuracy scoring. Best-effort: a failure here must NEVER break the
+    detection path, so everything is wrapped."""
+    try:
+        from ad_judge import PROMPT_VERSION
+        pages = Page.query.filter_by(publication_id=pub_id).all()
+        data = {}
+        count = 0
+        for pg in pages:
+            autos = [b for b in AdBox.query.filter_by(page_id=pg.id).all()
+                     if b.detected_automatically]
+            if not autos:
+                continue
+            data[str(pg.page_number)] = {
+                'w': int(pg.width_pixels or 0), 'h': int(pg.height_pixels or 0),
+                'boxes': [[round(b.x, 1), round(b.y, 1), round(b.width, 1), round(b.height, 1)]
+                          for b in autos],
+            }
+            count += len(autos)
+        payload = json.dumps({'pages': data})
+        row = DetectorSnapshot.query.filter_by(publication_id=pub_id).first()
+        if row:
+            row.boxes_json = payload
+            row.box_count = count
+            row.prompt_version = PROMPT_VERSION
+            row.created_date = datetime.utcnow()
+        else:
+            db.session.add(DetectorSnapshot(
+                publication_id=pub_id, boxes_json=payload, box_count=count,
+                prompt_version=PROMPT_VERSION, created_date=datetime.utcnow()))
+        db.session.commit()
+        print(f"[snapshot] pub={pub_id} froze {count} detector boxes for accuracy scoring")
+    except Exception as e:
+        print(f"[snapshot] failed for pub {pub_id}: {e}")
+        try:
+            db.session.rollback()
+        except Exception:
+            pass
+
+
+def _detector_accuracy(pub_id):
+    """Score the detector snapshot (prediction) vs the current human-corrected
+    boxes (ground truth) by ad-area coverage. Returns a JSON-able scorecard.
+
+    Ground truth = every box that exists NOW (auto boxes the user kept + boxes
+    the user drew). Prediction = the frozen snapshot (incl. auto boxes the user
+    later deleted, which is why precision can see false positives). Meaningful
+    only once the paper has been reviewed; we flag that with 'reviewed'.
+    """
+    from area_score import page_area_scores, gt_boxes_found
+    snap = DetectorSnapshot.query.filter_by(publication_id=pub_id).first()
+    if not snap:
+        return {'available': False,
+                'reason': 'no detector snapshot yet (re-process the paper to create one)'}
+    try:
+        pred_pages = (json.loads(snap.boxes_json or '{}') or {}).get('pages', {})
+    except Exception:
+        pred_pages = {}
+
+    manual_boxes = (AdBox.query.join(Page, AdBox.page_id == Page.id)
+                    .filter(Page.publication_id == pub_id,
+                            AdBox.detected_automatically == False).count())  # noqa: E712
+    corrections = UserCorrection.query.filter_by(publication_id=pub_id).count()
+    reviewed = manual_boxes > 0 or corrections > 0
+
+    tot = {'inter': 0, 'union': 0, 'gt_area': 0, 'pred_area': 0}
+    found_sum = total_sum = 0
+    page_rows = []
+    pages = Page.query.filter_by(publication_id=pub_id).order_by(Page.page_number).all()
+    for pg in pages:
+        W, H = int(pg.width_pixels or 0), int(pg.height_pixels or 0)
+        if W <= 0 or H <= 0:
+            continue
+        gt = [(b.x, b.y, b.width, b.height) for b in AdBox.query.filter_by(page_id=pg.id).all()]
+        pred = [tuple(b) for b in pred_pages.get(str(pg.page_number), {}).get('boxes', [])]
+        s = page_area_scores(gt, pred, W, H)
+        f, t, _ = gt_boxes_found(gt, pred, W, H)
+        for k in tot:
+            tot[k] += s[k]
+        found_sum += f
+        total_sum += t
+        page_rows.append({'page': pg.page_number, 'recall': s['recall'],
+                          'precision': s['precision'], 'iou': s['iou'],
+                          'ads_found': f, 'ads_total': t})
+
+    return {
+        'available': True,
+        'reviewed': reviewed,
+        'note': ('detector vs your corrected marks' if reviewed
+                 else 'not reviewed yet — score compares the detector to itself until you correct the paper'),
+        'snapshot': {'boxes': snap.box_count, 'prompt_version': snap.prompt_version,
+                     'created': snap.created_date.isoformat() if snap.created_date else None},
+        'overall': {
+            'recall': tot['inter'] / tot['gt_area'] if tot['gt_area'] else None,
+            'precision': tot['inter'] / tot['pred_area'] if tot['pred_area'] else None,
+            'iou': tot['inter'] / tot['union'] if tot['union'] else None,
+            'ads_found': found_sum, 'ads_total': total_sum,
+        },
+        'pages': page_rows,
+    }
+
+
 def _detect_and_save_ads(pub_id):
     """Run the LLM-judge detection pipeline on every page of the publication.
 
@@ -4172,6 +4297,10 @@ def _detect_and_save_ads(pub_id):
     # Layer 3: update profile with non-AD previews + layout counts.
     if non_ad_previews or any(layout_counts.values()):
         _update_profile(pub_type, non_ad_previews, layout_counts)
+
+    # Freeze the detector's prediction so we can score it against the human's
+    # corrections later (see /api/detector_accuracy). Best-effort.
+    _snapshot_detector_output(pub_id)
 
     print(f"\n[auto-detect] DONE pub={pub_id} saved={total_saved} over {len(pages)} pages")
     print(f"[auto-detect] judge stats: total={stats.total} cache_hits={stats.cache_hits} "
@@ -11069,6 +11198,21 @@ def ad_judge_health():
     except Exception as e:
         info['recent_publications'] = f'err: {e}'
     return jsonify(info)
+
+
+@app.route('/api/detector_accuracy/<int:pub_id>', methods=['GET'])
+def detector_accuracy(pub_id):
+    """Score the detector's frozen prediction vs the current human-corrected
+    boxes by ad-area. Becomes meaningful once the paper has been reviewed.
+    No secrets; safe to fetch."""
+    pub = db.session.get(Publication, pub_id)
+    if not pub:
+        return jsonify({'error': 'publication not found'}), 404
+    result = _detector_accuracy(pub_id)
+    result['publication'] = {'id': pub.id, 'file': pub.original_filename,
+                             'type': pub.publication_type, 'pages': pub.total_pages,
+                             'processed': pub.processed}
+    return jsonify(result)
 
 
 @app.route('/api/publication_boxes/<int:pub_id>', methods=['GET'])

@@ -67,7 +67,8 @@ def _gt_boxes(gt_pub_id, page_number):
     return [(b.x, b.y, b.width, b.height) for b in rows]
 
 
-def build_shadow(src_pdf, gt_pub, pages, upload_folder):
+def build_shadow(src_pdf, original_filename, publication_type, total_pages,
+                 pages, upload_folder):
     """Stage the PDF + render the GT pages into a fresh, box-free publication."""
     pdf_dir = os.path.join(upload_folder, "pdfs")
     png_dir = os.path.join(upload_folder, "pages")
@@ -77,16 +78,16 @@ def build_shadow(src_pdf, gt_pub, pages, upload_folder):
     staged_name = f"shadow_{uuid.uuid4().hex[:8]}.pdf"
     shutil.copyfile(src_pdf, os.path.join(pdf_dir, staged_name))
 
-    cfg = PUBLICATION_CONFIGS.get(gt_pub.publication_type,
+    cfg = PUBLICATION_CONFIGS.get(publication_type,
                                   PUBLICATION_CONFIGS["broadsheet"])
     shadow = Publication(
         filename=staged_name,
-        # original_filename drives the masthead ('oa') for shared-header parity,
-        # so a fresh-upload of this paper would behave the same way.
-        original_filename=gt_pub.original_filename,
-        publication_type=gt_pub.publication_type,
-        total_pages=gt_pub.total_pages,
-        total_inches=cfg["total_inches_per_page"] * gt_pub.total_pages,
+        # original_filename drives the masthead ('ccc'/'oa') for shared-header
+        # parity, so a fresh-upload of this paper would behave the same way.
+        original_filename=original_filename,
+        publication_type=publication_type,
+        total_pages=total_pages,
+        total_inches=cfg["total_inches_per_page"] * total_pages,
         processed=False,
     )
     db.session.add(shadow)
@@ -132,8 +133,9 @@ def cleanup_shadow(shadow_id, staged_name, upload_folder):
 
 def main():
     ap = argparse.ArgumentParser(description="Run the real detector blind and score it vs human marks.")
-    ap.add_argument("--gt-pub", type=int, default=26, help="publication id holding the human marks")
-    ap.add_argument("--pdf", default="OA-2025-01-01.pdf", help="source PDF (same paper as --gt-pub)")
+    ap.add_argument("--gt-pub", type=int, default=26, help="publication id holding the human marks (DB mode)")
+    ap.add_argument("--gt-json", help="JSON of ground truth pulled from another DB (e.g. prod). Overrides --gt-pub.")
+    ap.add_argument("--pdf", default="OA-2025-01-01.pdf", help="source PDF (same paper as the ground truth)")
     ap.add_argument("--pages", type=int, nargs="*", help="limit to these page numbers (default: all marked pages)")
     ap.add_argument("--found-thresh", type=float, default=0.5)
     ap.add_argument("--keep", action="store_true", help="do not delete the shadow publication afterward")
@@ -143,22 +145,44 @@ def main():
         print(f"Source PDF not found: {args.pdf}")
         sys.exit(1)
 
+    only = set(args.pages) if args.pages else None
+
     with app.app_context():
         upload_folder = app.config["UPLOAD_FOLDER"]
-        gt_pub = db.session.get(Publication, args.gt_pub)
-        if not gt_pub:
-            print(f"GT publication {args.gt_pub} not found")
-            sys.exit(1)
 
-        pages = _gt_pages(args.gt_pub, set(args.pages) if args.pages else None)
+        if args.gt_json:
+            # Ground truth carried in from another database (read-only prod pull).
+            # The shadow + detection run entirely in the LOCAL db; we only score
+            # against these imported boxes. This is how we measure a prod paper
+            # whose PDF we have locally without ever writing to prod.
+            import json
+            data = json.load(open(args.gt_json, encoding="utf-8"))
+            orig = data["original_filename"]
+            ptype = data.get("publication_type", "broadsheet")
+            total = int(data.get("total_pages", len(data["pages"])))
+            gt_map = {int(k): [tuple(b) for b in v["gt"]] for k, v in data["pages"].items()}
+            pages = sorted(p for p in gt_map if (only is None or p in only))
+            gt_lookup = lambda pn: gt_map.get(pn, [])
+            label = f"{orig} (from {args.gt_json})"
+        else:
+            gt_pub = db.session.get(Publication, args.gt_pub)
+            if not gt_pub:
+                print(f"GT publication {args.gt_pub} not found")
+                sys.exit(1)
+            orig, ptype, total = (gt_pub.original_filename,
+                                  gt_pub.publication_type, gt_pub.total_pages)
+            pages = _gt_pages(args.gt_pub, only)
+            gt_lookup = lambda pn: _gt_boxes(args.gt_pub, pn)
+            label = f"pub {args.gt_pub} ({orig})"
+
         if not pages:
-            print(f"GT pub {args.gt_pub} has no human-marked pages "
+            print(f"GT {label} has no human-marked pages "
                   f"{'in '+str(args.pages) if args.pages else ''}. Nothing to score.")
             sys.exit(1)
 
-        print(f"GT pub {args.gt_pub} ({gt_pub.original_filename}) — marked pages: {pages}")
+        print(f"GT {label} — marked pages: {pages}")
         print(f"Building blind shadow from {args.pdf} (pages {pages})...\n")
-        shadow, staged_name = build_shadow(args.pdf, gt_pub, pages, upload_folder)
+        shadow, staged_name = build_shadow(args.pdf, orig, ptype, total, pages, upload_folder)
 
         try:
             result = _detect_and_save_ads(shadow.id)
@@ -171,7 +195,7 @@ def main():
             print(hdr); print("-" * len(hdr))
             for pnum in pages:
                 spage = Page.query.filter_by(publication_id=shadow.id, page_number=pnum).first()
-                gt = _gt_boxes(args.gt_pub, pnum)
+                gt = gt_lookup(pnum)
                 pred = [(b.x, b.y, b.width, b.height)
                         for b in AdBox.query.filter_by(page_id=spage.id).all()]
                 W, H = spage.width_pixels, spage.height_pixels

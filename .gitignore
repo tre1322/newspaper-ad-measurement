@@ -68,3 +68,5 @@ config.py
 secrets.pynul 
 "*.tmp" 
 "temp*" 
+.railway_vars*.json
+gt_eval/

@@ -413,6 +413,9 @@
                     <a href="{{ url_for('publication_report', pub_id=publication.id) }}" class="btn btn-success" title="Generate comprehensive report">
                         <i class="fas fa-chart-bar"></i> Generate Report
                     </a>
+                    <button type="button" class="btn btn-outline-dark" id="saveRecurringBtn" onclick="saveRecurringTemplate()" title="Save THIS page's ad boxes as a recurring-page template for this paper (e.g. the weekly church page). Future editions auto-mark this page the same way.">
+                        <i class="fas fa-clone"></i> Save as Recurring Page
+                    </button>
                 </div>
                 
                 <!-- Zoom Controls -->
@@ -2482,6 +2485,39 @@ function attemptDeleteAdBox(boxId, attempt) {
 }
 
 // Accept all pending auto-detected boxes on this page (flip user_verified).
+function saveRecurringTemplate() {
+    // Save the ad boxes currently on THIS page as a recurring-page template for
+    // this paper. Future editions auto-mark the matching page (e.g. the weekly
+    // church-sponsor page) with these same rectangles. Re-save when sponsors change.
+    const btn = document.getElementById('saveRecurringBtn');
+    const label = prompt(
+        'Save the ad boxes on THIS page as a recurring-page template for this paper.\n\n' +
+        'Future editions will auto-mark this page (e.g. the weekly church page) the same way.\n' +
+        'Name this recurring page:', 'church');
+    if (!label) { return; }
+    if (btn) { btn.disabled = true; }
+    fetch(`/api/save_recurring_template/{{ page.id }}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ label: label })
+    })
+    .then(r => r.json())
+    .then(data => {
+        if (data.success) {
+            alert('Saved recurring "' + data.label + '" template for ' + data.masthead +
+                  ' — ' + data.boxes + ' ad boxes.\n\nFuture editions of this paper will ' +
+                  'auto-mark this page the same way.');
+        } else {
+            alert('Could not save template: ' + (data.error || 'unknown error'));
+        }
+        if (btn) { btn.disabled = false; }
+    })
+    .catch(err => {
+        alert('Error saving template: ' + err);
+        if (btn) { btn.disabled = false; }
+    });
+}
+
 function verifyPageAuto() {
     const btn = document.getElementById('acceptAllBtn');
     if (btn) { btn.disabled = true; }

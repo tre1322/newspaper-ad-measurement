@@ -934,6 +934,38 @@ class DetectorSnapshot(db.Model):
     prompt_version = db.Column(db.String(80))
     created_date = db.Column(db.DateTime, default=datetime.utcnow)
 
+
+class RecurringPageTemplate(db.Model):
+    """A recurring fixed-layout page (e.g. the weekly church-sponsor page) whose
+    ad regions are identical every edition. Learned ONCE from a correctly-marked
+    page, then re-applied on future editions of the same masthead.
+
+    Why this exists: the geometric detector re-derives candidates every week and
+    consistently misses the small church-sponsor tiles (a generation gap), so the
+    page marks differently each edition. But the sponsors are contracted — the ad
+    rectangles are the SAME every week, only the center devotional changes. So we
+    store the ad rectangles once (relative coords) and seed them directly on
+    future editions, keyed by masthead + a text signature that identifies the
+    page within an edition. This is the positive-region sibling of
+    SharedHeaderRegion. Auto-created by db.create_all (no migration).
+    """
+    __tablename__ = 'recurring_page_template'
+    id = db.Column(db.Integer, primary_key=True)
+    masthead = db.Column(db.String(40), index=True)   # 'oa', 'ccc'
+    label = db.Column(db.String(60), default='church')  # human tag for the page type
+    # Anchors: JSON list of normalized text phrases that must ALL appear on a
+    # page for it to be recognized as this recurring page (high precision, and
+    # scoped to the masthead). Derived from the page's own stable text at record
+    # time (the church attribution line etc.).
+    anchors_json = db.Column(db.Text)
+    # The ad rectangles, JSON list of [x0, y0, x1, y1] as page-relative fractions
+    # (0..1), so they survive small render-size differences across editions.
+    boxes_json = db.Column(db.Text)
+    box_count = db.Column(db.Integer, default=0)
+    hits = db.Column(db.Integer, default=0)           # times applied to an edition
+    created_date = db.Column(db.DateTime, default=datetime.utcnow)
+    updated_date = db.Column(db.DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
 class SimpleAdLearner:
     """
     Simple AI learning system that improves detection from user corrections
@@ -3824,6 +3856,172 @@ def _apply_shared_headers(cand, regions, page_w, page_h, iou_thresh=0.6):
     return cand, False
 
 
+# ============================================================================
+# Recurring-page templates (positive-region learn-once).
+# The weekly church-sponsor page has identical ad rectangles every edition but
+# the geometric detector keeps missing the small tiles. We learn the rectangles
+# once (relative coords) keyed by masthead, recognize the page by a text
+# signature, and seed the rectangles directly. See RecurringPageTemplate.
+# ============================================================================
+
+def _norm_text(s):
+    """Lowercase; collapse every non-alphanumeric run to a single space."""
+    out, prev_space = [], False
+    for ch in (s or '').lower():
+        if ch.isalnum():
+            out.append(ch); prev_space = False
+        elif not prev_space:
+            out.append(' '); prev_space = True
+    return ''.join(out).strip()
+
+
+def _page_text(pdf_path, page_number):
+    """Normalized full-page text for signature matching. Best-effort -> ''."""
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+        try:
+            if page_number < 1 or page_number > len(doc):
+                return ''
+            return _norm_text(doc[page_number - 1].get_text("text"))
+        finally:
+            doc.close()
+    except Exception as e:
+        print(f"[recurring] page text failed: {e}")
+        return ''
+
+
+def _derive_recurring_anchors(norm_text):
+    """Stable phrases that identify a recurring page; ALL must be present to
+    match. Tuned for the church page (the standing attribution line is on every
+    edition and nowhere else), with fallbacks for other recurring layouts."""
+    anchors = []
+    for key in ('attend the church of your choice',
+                'weekly church messages are contributed',
+                'church messages are contributed'):
+        if key in norm_text:
+            anchors.append(key)
+            break
+    if 'church' in norm_text and 'church' not in anchors:
+        anchors.append('church')
+    if not anchors:  # non-church recurring page: fall back to longest tokens
+        words = sorted({w for w in norm_text.split() if len(w) >= 7},
+                       key=len, reverse=True)
+        anchors = words[:3]
+    return anchors
+
+
+def _match_recurring_anchors(norm_text, anchors):
+    """True only if EVERY anchor phrase appears in the page text."""
+    return bool(anchors) and all(a in norm_text for a in anchors)
+
+
+def _load_recurring_templates(masthead):
+    """All recurring templates for a masthead, parsed."""
+    if not masthead:
+        return []
+    try:
+        rows = RecurringPageTemplate.query.filter_by(masthead=masthead).all()
+    except Exception as e:
+        print(f"[recurring] load failed: {e}")
+        return []
+    out = []
+    for r in rows:
+        try:
+            anchors = json.loads(r.anchors_json or '[]')
+            boxes = json.loads(r.boxes_json or '[]')
+        except Exception:
+            anchors, boxes = [], []
+        if boxes:
+            out.append({'id': r.id, 'label': r.label,
+                        'anchors': anchors, 'boxes': boxes})
+    return out
+
+
+def _match_recurring_template(pdf_path, page_number, templates):
+    """Return the first template whose anchors all match this page, else None."""
+    if not templates:
+        return None
+    text = _page_text(pdf_path, page_number)
+    if not text:
+        return None
+    for t in templates:
+        if _match_recurring_anchors(text, t['anchors']):
+            return t
+    return None
+
+
+def _seed_recurring_boxes(page, publication, config, template):
+    """Seed the template's relative ad rectangles as AD boxes on this page.
+    Deterministic — no judging — so the recurring page marks identically every
+    edition. Returns the number of boxes added (not yet committed)."""
+    W = max(1, page.width_pixels or 0)
+    H = max(1, page.height_pixels or 0)
+    added = 0
+    for rect in template['boxes']:
+        try:
+            x0, y0, x1, y1 = [float(v) for v in rect]
+        except Exception:
+            continue
+        x, y, w, h = x0 * W, y0 * H, (x1 - x0) * W, (y1 - y0) * H
+        if w <= 1 or h <= 1:
+            continue
+        cand = {'x': x, 'y': y, 'width': w, 'height': h,
+                'source': 'recurring_template', 'text_preview': '', 'confidence': 0.9}
+        try:
+            db.session.add(_make_ad_box(page, publication, config, cand,
+                                        'auto_recurring_template'))
+            added += 1
+        except Exception as e:
+            print(f"[recurring] seed box failed: {e}")
+    try:
+        row = db.session.get(RecurringPageTemplate, template['id'])
+        if row:
+            row.hits = (row.hits or 0) + 1
+            row.updated_date = datetime.utcnow()
+    except Exception:
+        pass
+    return added
+
+
+def _record_recurring_template(page, label='church'):
+    """Capture the current AD boxes on `page` as the recurring template for this
+    publication's masthead. Returns (masthead, box_count)."""
+    publication = db.session.get(Publication, page.publication_id)
+    if not publication:
+        return (None, 0)
+    masthead = _masthead(publication.original_filename)
+    if not masthead:
+        return (None, 0)
+    W = max(1.0, float(page.width_pixels or 1))
+    H = max(1.0, float(page.height_pixels or 1))
+    rects = []
+    for b in AdBox.query.filter_by(page_id=page.id).all():
+        rects.append([round(b.x / W, 5), round(b.y / H, 5),
+                      round((b.x + b.width) / W, 5), round((b.y + b.height) / H, 5)])
+    if not rects:
+        # Nothing marked on this page — don't persist an empty template (the
+        # endpoint reports this back so the user knows to mark the sponsors first).
+        return (masthead, 0)
+    pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
+    anchors = _derive_recurring_anchors(_page_text(pdf_path, page.page_number))
+    row = RecurringPageTemplate.query.filter_by(masthead=masthead, label=label).first()
+    if row:
+        row.anchors_json = json.dumps(anchors)
+        row.boxes_json = json.dumps(rects)
+        row.box_count = len(rects)
+        row.updated_date = datetime.utcnow()
+    else:
+        db.session.add(RecurringPageTemplate(
+            masthead=masthead, label=label,
+            anchors_json=json.dumps(anchors), boxes_json=json.dumps(rects),
+            box_count=len(rects), hits=0))
+    db.session.commit()
+    print(f"[recurring] recorded masthead={masthead} label={label} "
+          f"boxes={len(rects)} anchors={anchors}")
+    return (masthead, len(rects))
+
+
 def _make_ad_box(page, publication, config, cand, source_tag):
     """Build an AdBox row from a candidate dict (pixel-space coords)."""
     x = float(cand['x'])
@@ -4205,9 +4403,11 @@ def _detect_and_save_ads(pub_id):
     ).all()
     profile_sigs = _load_profile_signatures(pub_type)
     shared_headers = _load_shared_headers(_masthead(publication.original_filename))
+    recurring_templates = _load_recurring_templates(_masthead(publication.original_filename))
     print(f"[auto-detect] pub={pub_id} type={pub_type} "
           f"corrections={len(corrections)} profile_sigs={len(profile_sigs)} "
           f"shared_headers={len(shared_headers)} "
+          f"recurring_templates={len(recurring_templates)} "
           f"mock={os.environ.get('AD_JUDGE_MOCK', '0')}")
 
     stats = JudgeStats()
@@ -4242,6 +4442,30 @@ def _detect_and_save_ads(pub_id):
             {'x': b.x, 'y': b.y, 'width': b.width, 'height': b.height}
             for b in existing
         ]
+
+        # Recurring fixed-layout page (e.g. the weekly church-sponsor page): if
+        # this page matches a learned template for the masthead, seed its known
+        # ad rectangles directly and SKIP the geometric pipeline — the layout is
+        # identical every edition, so re-deriving it weekly just loses the small
+        # sponsor tiles. Skip if we already seeded it (re-run safety).
+        if recurring_templates:
+            already = any((b.ad_type or '').startswith('auto_recurring')
+                          for b in existing)
+            rt = None if already else _match_recurring_template(
+                pdf_path, page.page_number, recurring_templates)
+            if rt:
+                n = _seed_recurring_boxes(page, publication, config, rt)
+                try:
+                    db.session.commit()
+                    update_totals(page.id)
+                except Exception as e:
+                    db.session.rollback()
+                    print(f"  [recurring] commit failed on page {page.page_number}: {e}")
+                layout_counts['template_match'] = layout_counts.get('template_match', 0) + n
+                total_saved += n
+                print(f"  [recurring] page {page.page_number} matched "
+                      f"'{rt['label']}' -> seeded {n} ad boxes, skipped geometric pipeline")
+                continue
 
         # Layer 1: collect candidates from all generators.
         cands = []
@@ -11210,9 +11434,51 @@ def delete_box(box_id):
         db.session.rollback()
         print(f"Error deleting ad box {box_id}: {e}")
         return jsonify({
-            'success': False, 
+            'success': False,
             'error': 'Database transaction error. Please refresh the page and try again.'
         })
+
+@app.route('/api/save_recurring_template/<int:page_id>', methods=['POST'])
+def save_recurring_template(page_id):
+    """Save the current AD boxes on a (correctly-marked) page as the recurring
+    template for this publication's masthead. The weekly church-sponsor page has
+    identical ad rectangles every edition; once saved, future editions of the
+    same masthead seed these rectangles directly (see _detect_and_save_ads).
+    Optional JSON body: {"label": "church"}."""
+    try:
+        db.session.rollback()
+        page = Page.query.get_or_404(page_id)
+        label = (request.get_json(silent=True) or {}).get('label', 'church')
+        masthead, count = _record_recurring_template(page, label=label)
+        if not masthead:
+            return jsonify({'success': False,
+                            'error': 'no masthead (publication has no original_filename)'}), 400
+        if count == 0:
+            return jsonify({'success': False,
+                            'error': 'no ad boxes on this page — mark the sponsors first'}), 400
+        return jsonify({'success': True, 'masthead': masthead,
+                        'label': label, 'boxes': count})
+    except Exception as e:
+        db.session.rollback()
+        print(f"[recurring] save endpoint error: {e}")
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
+@app.route('/api/recurring_templates', methods=['GET'])
+def list_recurring_templates():
+    """Diagnostic (no auth, like the other /api diagnostics): list learned
+    recurring-page templates for every masthead."""
+    try:
+        rows = RecurringPageTemplate.query.order_by(RecurringPageTemplate.masthead).all()
+        return jsonify({'templates': [
+            {'id': r.id, 'masthead': r.masthead, 'label': r.label,
+             'box_count': r.box_count, 'hits': r.hits,
+             'anchors': json.loads(r.anchors_json or '[]'),
+             'updated': r.updated_date.isoformat() if r.updated_date else None}
+            for r in rows]})
+    except Exception as e:
+        return jsonify({'error': str(e)}), 500
+
 
 @app.route('/api/verify_page_auto/<int:page_id>', methods=['POST'])
 def verify_page_auto(page_id):

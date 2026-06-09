@@ -3891,29 +3891,78 @@ def _page_text(pdf_path, page_number):
         return ''
 
 
-def _derive_recurring_anchors(norm_text):
-    """Stable phrases that identify a recurring page; ALL must be present to
-    match. Tuned for the church page (the standing attribution line is on every
-    edition and nowhere else), with fallbacks for other recurring layouts."""
-    anchors = []
+def _box_interior_tokens(pdf_path, page_number, rects, want=8, min_len=5):
+    """Distinctive lowercased word tokens found INSIDE the marked rects (relative
+    0..1) — i.e. the sponsor/advertiser names. The sponsors are contracted, so
+    these recur every edition; a SUBSET of them is a stable key unique to the
+    page. Returns up to `want` longest distinct tokens."""
+    try:
+        import fitz
+        doc = fitz.open(pdf_path)
+    except Exception:
+        return []
+    toks = set()
+    try:
+        if 1 <= page_number <= len(doc):
+            pg = doc[page_number - 1]
+            W, H = float(pg.rect.width), float(pg.rect.height)
+            boxes = [(r[0]*W, r[1]*H, r[2]*W, r[3]*H) for r in rects if len(r) == 4]
+            for b in pg.get_text("dict").get("blocks", []):
+                if "lines" not in b:
+                    continue
+                bx0, by0, bx1, by1 = b["bbox"]
+                cx, cy = (bx0 + bx1) / 2.0, (by0 + by1) / 2.0
+                if not any(x0 <= cx <= x1 and y0 <= cy <= y1 for (x0, y0, x1, y1) in boxes):
+                    continue
+                txt = " ".join(s.get("text", "") for l in b["lines"]
+                               for s in l.get("spans", []))
+                for w in _norm_text(txt).split():
+                    if len(w) >= min_len and not w.isdigit():
+                        toks.add(w)
+    except Exception:
+        pass
+    finally:
+        try: doc.close()
+        except Exception: pass
+    return sorted(toks, key=len, reverse=True)[:want]
+
+
+def _derive_recurring_anchors(norm_text, box_tokens=None):
+    """Build the recognition key for a recurring page as {'phrases': [...],
+    'min': N} — the page matches if >= N of the phrases appear in its text.
+
+    Prefer a unique standing phrase (the church attribution line — on every
+    edition and nowhere else, so min 1). Otherwise key off the marked sponsors'
+    names (contracted -> stable; a SUBSET is unique to the page). This replaces
+    the old 'ALL anchors must match' on a single generic word like 'church',
+    which matched half the paper.
+    """
     for key in ('attend the church of your choice',
                 'weekly church messages are contributed',
                 'church messages are contributed'):
         if key in norm_text:
-            anchors.append(key)
-            break
-    if 'church' in norm_text and 'church' not in anchors:
-        anchors.append('church')
-    if not anchors:  # non-church recurring page: fall back to longest tokens
-        words = sorted({w for w in norm_text.split() if len(w) >= 7},
-                       key=len, reverse=True)
-        anchors = words[:3]
-    return anchors
+            return {'phrases': [key], 'min': 1}
+    toks = [t for t in (box_tokens or []) if t]
+    if len(toks) >= 3:
+        return {'phrases': toks, 'min': max(3, (len(toks) + 1) // 2)}
+    longest = sorted({w for w in norm_text.split() if len(w) >= 7},
+                     key=len, reverse=True)[:4]
+    phr = longest or toks
+    return {'phrases': phr, 'min': max(2, len(phr)) if phr else 1}
 
 
 def _match_recurring_anchors(norm_text, anchors):
-    """True only if EVERY anchor phrase appears in the page text."""
-    return bool(anchors) and all(a in norm_text for a in anchors)
+    """Match if enough anchor phrases appear. Accepts the structured form
+    {'phrases': [...], 'min': N} or a bare list (legacy = require all)."""
+    if isinstance(anchors, dict):
+        phrases = anchors.get('phrases', [])
+        need = anchors.get('min', len(phrases))
+    else:
+        phrases = anchors or []
+        need = len(phrases)
+    if not phrases:
+        return False
+    return sum(1 for p in phrases if p in norm_text) >= need
 
 
 def _load_recurring_templates(masthead):
@@ -4004,7 +4053,9 @@ def _record_recurring_template(page, label='church'):
         # endpoint reports this back so the user knows to mark the sponsors first).
         return (masthead, 0)
     pdf_path = os.path.join(app.config['UPLOAD_FOLDER'], 'pdfs', publication.filename)
-    anchors = _derive_recurring_anchors(_page_text(pdf_path, page.page_number))
+    anchors = _derive_recurring_anchors(
+        _page_text(pdf_path, page.page_number),
+        _box_interior_tokens(pdf_path, page.page_number, rects))
     row = RecurringPageTemplate.query.filter_by(masthead=masthead, label=label).first()
     if row:
         row.anchors_json = json.dumps(anchors)

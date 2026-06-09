@@ -11531,6 +11531,24 @@ def list_recurring_templates():
         return jsonify({'error': str(e)}), 500
 
 
+@app.route('/api/delete_recurring_template/<int:template_id>', methods=['POST'])
+def delete_recurring_template(template_id):
+    """Delete a recurring-page template by id (cleanup for a bad or duplicate
+    save). No auth, like the other /api template routes."""
+    try:
+        db.session.rollback()
+        row = db.session.get(RecurringPageTemplate, template_id)
+        if not row:
+            return jsonify({'success': False, 'error': 'not found'}), 404
+        info = {'id': template_id, 'masthead': row.masthead, 'label': row.label}
+        db.session.delete(row)
+        db.session.commit()
+        return jsonify({'success': True, 'deleted': info})
+    except Exception as e:
+        db.session.rollback()
+        return jsonify({'success': False, 'error': str(e)}), 500
+
+
 @app.route('/api/verify_page_auto/<int:page_id>', methods=['POST'])
 def verify_page_auto(page_id):
     """Accept all auto-detected boxes on a page (flip user_verified=True).

@@ -3585,6 +3585,109 @@ def _merge_overlapping_boxes(boxes, iou_thresh=0.1, containment_thresh=0.5):
     return merged
 
 
+def _dedupe_keep_nested(candidates, accepted, dup_iou=0.85,
+                        accepted_iou=0.35, accepted_contain=0.80):
+    """Dedupe candidates WITHOUT letting a container swallow the ads inside it.
+
+    The old `_demote_containers` + `_dedupe_against` chain dropped every box that
+    sat inside a larger one BEFORE judging, so a section/grid/feature frame
+    became the only crop the judge saw on that region -- and a single non-AD
+    verdict on that frame silently lost every real ad inside it. That swallow was
+    the recall ceiling (~70%). Here we instead KEEP nested boxes (container AND
+    children) so every region is judged on its own; container-vs-children is
+    reconciled AFTER judging, by verdict (`_reconcile_nested_ads`).
+
+    Still removed (the parts of the old dedupe that are still correct):
+      * candidates that duplicate an EXISTING AdBox -- manual draw or prior run.
+        Respect what's already on the page; don't re-propose it. (Parity with the
+        old `accepted` check: IoU > accepted_iou or containment > accepted_contain.)
+      * near-identical sibling candidates (IoU > dup_iou) -- the bordered and
+        cluster generators routinely box the SAME ad; judging both wastes a call
+        and risks a split vote. Keep the larger.
+
+    A child tile vs its frame has IoU ~= area_ratio (e.g. 1/16 of a 4x4 grid =
+    0.06, far below dup_iou), so a child is never mistaken for a duplicate of its
+    container -- it survives to judging. That's the whole point.
+    """
+    def _area(c):
+        return max(0.0, c.get('width', 0)) * max(0.0, c.get('height', 0))
+
+    # 1. Drop anything that duplicates an existing (manual / prior) box.
+    survivors = []
+    for c in candidates:
+        if c.get('width', 0) <= 1 or c.get('height', 0) <= 1:
+            continue
+        if any(_iou(c, a) > accepted_iou or _containment(c, a) > accepted_contain
+               for a in accepted):
+            continue
+        survivors.append(c)
+
+    # 2. Collapse near-identical siblings (keep the larger of each near-dup set).
+    survivors.sort(key=_area, reverse=True)
+    kept = []
+    for c in survivors:
+        if any(_iou(c, k) > dup_iou for k in kept):
+            continue
+        kept.append(c)
+    return kept
+
+
+def _reconcile_nested_ads(ad_cands, min_children=2, contain_thresh=0.70,
+                          cover_frac=0.60):
+    """Resolve container-vs-children among AD verdicts.
+
+    Verdict-aware replacement for `_demote_containers`: demotion happens AFTER
+    judging. A box the judge called AD that contains >= min_children other AD
+    boxes is a candidate "frame". We drop it in favour of the granular ads inside
+    ONLY when those inner ads actually FILL it -- their combined area covers
+    >= cover_frac of the container. That's a real directory / classified grid
+    whose tiles ARE the ads. A banner or display ad whose interior merely holds a
+    couple of independently-AD sub-elements (logo, caption, tagline) covers far
+    less of itself, so it is KEPT WHOLE -- dropping it would throw away the
+    uncovered area.
+
+    Because this runs post-judge, a frame the judge REJECTS is already absent
+    from `ad_cands`, so its real children survive on their own merits -- the
+    frame can no longer take them down with it (the swallow-recall win). A kept
+    container still merges with its now-redundant children downstream via
+    `_merge_overlapping_boxes` (the children sit inside it), so a kept banner
+    collapses back to one box.
+
+    Why the coverage guard (measured, ccc 2026-06-08): the first cut ("2+ AD
+    children always win", no guard) REGRESSED recall 70.8% -> 59.8% -- the
+    full-width banners on pages 8-11 each contain 2+ AD sub-pieces, so they were
+    dropped and only their ~30%-coverage innards survived. The guard keeps
+    directories granular while keeping banners/display ads whole.
+    """
+    def _area(c):
+        return max(0.0, c.get('width', 0)) * max(0.0, c.get('height', 0))
+
+    out = []
+    for i, c in enumerate(ad_cands):
+        c_area = _area(c)
+        if c_area <= 0:
+            out.append(c)
+            continue
+        children = 0
+        covered = 0.0
+        for j, o in enumerate(ad_cands):
+            if i == j:
+                continue
+            o_area = _area(o)
+            # o strictly smaller and mostly inside c -> o is a child of c.
+            if o_area < c_area and _containment(o, c) > contain_thresh:
+                children += 1
+                covered += _containment(o, c) * o_area  # area of o that lies in c
+        # Drop the frame only if enough distinct ads fill enough of it (a
+        # directory). Cap coverage at the container area: overlapping children
+        # must not push a banner over the threshold.
+        coverage = min(covered, c_area) / c_area
+        if children >= min_children and coverage >= cover_frac:
+            continue  # directory / grid -> keep the inner ads instead
+        out.append(c)
+    return out
+
+
 def _suppressed_by_corrections(box, page, publication_type, corrections):
     """True if a similar box was previously marked not-an-ad on the same publication_type."""
     if not corrections:
@@ -4146,16 +4249,17 @@ def _detect_and_save_ads(pub_id):
         cands.extend(_gen_vision_logos(image_path))
         print(f"  raw candidates: {len(cands)}")
 
-        # Drop section/page frames that merely enclose many distinct ads, so the
-        # area-descending dedupe doesn't collapse those ads into one big box.
+        # Dedupe WITHOUT swallowing nested ads: keep both a container frame and
+        # the ads inside it so every region is judged independently. The old
+        # _demote_containers -> area-descending _dedupe_against chain dropped
+        # inner ads BEFORE judging, so one non-AD verdict on a section/grid frame
+        # silently lost every ad inside it (the ~70% recall ceiling). Container-
+        # vs-children is now reconciled AFTER judging, by verdict
+        # (_reconcile_nested_ads). Still drops duplicates of existing boxes and
+        # near-identical sibling candidates.
         before = len(cands)
-        cands = _demote_containers(cands)
-        if before != len(cands):
-            print(f"  after container demotion: {len(cands)} ({before - len(cands)} frames dropped)")
-
-        # Dedupe (sort by area desc; outer wins).
-        cands = _dedupe_against(cands, existing_boxes)
-        print(f"  after dedupe vs existing: {len(cands)}")
+        cands = _dedupe_keep_nested(cands, existing_boxes)
+        print(f"  after nested-dedupe: {len(cands)} (from {before}; nested ads kept for judging)")
 
         # Drop candidates matching prior false-positive corrections.
         before = len(cands)
@@ -4251,6 +4355,18 @@ def _detect_and_save_ads(pub_id):
                 preview = cand.get('text_preview', '').strip()
                 if preview:
                     non_ad_previews.append(preview)
+
+        # Reconcile container-vs-children among the AD verdicts: a box the judge
+        # called AD that still contains >= 2 other AD boxes is a directory / grid
+        # / feature frame -> drop it and keep the granular ads inside (chosen
+        # rule: keep inner ads). A frame the judge REJECTED is already gone, so
+        # its real children already survived on their own -- that's the recall
+        # win this whole change exists for.
+        before_recon = len(ad_cands)
+        ad_cands = _reconcile_nested_ads(ad_cands)
+        if before_recon != len(ad_cands):
+            print(f"  reconciled {before_recon} -> {len(ad_cands)} ad boxes "
+                  f"({before_recon - len(ad_cands)} multi-ad frames dropped, inner ads kept)")
 
         # Collapse boxes that cover the same ad (bordered frame + inset photo,
         # etc.) so each ad is one box; adjacent distinct ads stay separate.
